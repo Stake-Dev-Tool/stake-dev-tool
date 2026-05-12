@@ -37,11 +37,34 @@ Grab the latest build from the [Releases page](https://github.com/simnJS/stake-d
 | Platform                   | File                                            | Notes                                       |
 | -------------------------- | ----------------------------------------------- | ------------------------------------------- |
 | Windows 10/11 (x64)        | `Stake-Dev-Tool-vX.Y.Z-windows-x64.exe`         | NSIS installer                              |
-| macOS Apple Silicon        | `Stake-Dev-Tool-vX.Y.Z-macos-arm64.app.tar.gz`  | Extract → drag `.app` into `/Applications`  |
+| macOS Apple Silicon        | `Stake-Dev-Tool-vX.Y.Z-macos-arm64.app.tar.gz`  | Extract, then see [macOS first launch](#macos-first-launch) |
 | Debian / Ubuntu (x64)      | `Stake-Dev-Tool-vX.Y.Z-linux-x64.deb`           | `sudo apt install ./<file>.deb`             |
 | Other Linux (x64)          | `Stake-Dev-Tool-vX.Y.Z-linux-x64.AppImage`      | `chmod +x` then run                         |
 
 > Intel Macs aren't supported — open an issue if that's a blocker.
+
+### macOS first launch
+
+The macOS build is not yet signed with an Apple Developer ID, so on first
+launch Gatekeeper shows:
+
+> "Stake Dev Tool.app" is damaged and can't be opened. You should move it
+> to the Bin.
+
+The app **isn't** damaged — macOS just blocks unsigned downloads. To unblock
+it, run this once in Terminal after moving the app to `/Applications`:
+
+```bash
+xattr -dr com.apple.quarantine "/Applications/Stake Dev Tool.app"
+```
+
+Then double-click the app as usual. If your copy is named differently
+(e.g. `Stake Dev Tool 2.app`), use that exact name in the path. Auto-updates
+applied later don't re-trigger the warning.
+
+Alternative one-time bypass: right-click the app → **Open** → confirm
+**Open** in the dialog. This only works on the very first launch;
+afterwards macOS remembers your decision.
 
 ## Features
 
