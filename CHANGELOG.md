@@ -5,6 +5,32 @@ All notable changes to this project are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [1.1.0] — 2026-05-14
+
+### Added
+
+- **Session persistence (SQLite).** Sessions are now stored on disk
+  (`<local data>/stake-dev-tool/sessions.sqlite3`) so a refresh or restart
+  resumes the active round, balance, and event history instead of starting
+  fresh. Falls back to memory-only if the database can't be opened.
+- **"Reset sessions" button** in the test view + `DELETE /api/devtool/sessions`
+  endpoint to wipe stored sessions and reload every frame.
+- **Replay bet amount** is now a dedicated input (0.01 – 1000) instead of
+  reusing the session balance, so replays can be launched at any stake.
+
+### Fixed
+
+- **`Round.amount` reports the player's base stake** instead of the
+  bonus-buy-charged total (`amount * mode_cost`). Without this fix, a
+  resumed `/authenticate` round reopened bonus buys at the inflated
+  charged amount.
+
+### Changed
+
+- Centralized `SUPPORTED_CURRENCIES` and `intern_currency` in `lgs::config`
+  (previously duplicated across `desktop/commands.rs`, `lgs/devtool.rs`,
+  and `lgs/session.rs`).
+
 ## [1.0.3] — 2026-05-12
 
 ### Fixed
