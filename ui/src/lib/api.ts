@@ -281,6 +281,16 @@ export const historyHttp = {
   }
 };
 
+export const sessionsHttp = {
+  reset: async (): Promise<void> => {
+    const r = await fetch('/api/devtool/sessions', { method: 'DELETE' });
+    if (!r.ok) {
+      const t = await r.text();
+      throw new Error(`reset sessions: ${r.status} ${t}`);
+    }
+  }
+};
+
 // ---- Notable bets per mode (computed from the lookup table) ----
 
 export type NotableBet = { eventId: number; payoutMultiplier: number };

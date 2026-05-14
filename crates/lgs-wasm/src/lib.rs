@@ -435,7 +435,7 @@ impl PreviewEngine {
                 self.bet_id += 1;
                 id
             },
-            amount: total_cost,
+            amount,
             payout,
             payout_multiplier: pick.payout_multiplier as f64 / 100.0,
             active: true,

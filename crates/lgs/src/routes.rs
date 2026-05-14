@@ -52,7 +52,7 @@ async fn authenticate(
             amount: session.balance,
             currency: session.currency,
         },
-        round: None,
+        round: session.active_round,
         config: config::auth_config(),
         meta: None,
     }))
@@ -169,7 +169,11 @@ async fn play(
 
     let round = Round {
         bet_id: state.sessions.next_bet_id(),
-        amount: total_cost,
+        // The RGS charges bonus-buy modes by `amount * mode_cost`, but the
+        // round contract reports the player's selected base stake. This keeps
+        // resumed `/authenticate` rounds from reopening bonus buys at the
+        // inflated charged amount.
+        amount,
         payout: result.payout,
         payout_multiplier: result.payout_multiplier as f64 / 100.0,
         // Active until the client calls /end-round, which credits the payout.

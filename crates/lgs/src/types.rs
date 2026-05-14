@@ -21,7 +21,7 @@ pub struct Session {
     pub event_history: Vec<EventEntry>,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EventEntry {
     #[serde(rename = "eventId")]
     pub event_id: u32,

@@ -24,6 +24,7 @@ serde.workspace = true
 serde_json.workspace = true
 sonic-rs.workspace = true
 zstd.workspace = true
+rusqlite.workspace = true
 dashmap.workspace = true
 rand.workspace = true
 rand_chacha.workspace = true

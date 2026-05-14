@@ -9,6 +9,7 @@
     settingsHttp,
     forcedEventHttp,
     savedRoundsHttp,
+    sessionsHttp,
     betStatsHttp,
     gameModesHttp,
     replayUrl,
@@ -94,6 +95,7 @@
   function rebuildFramesFromResolutions(prev: FrameState[] = []) {
     const enabled = allResolutions.filter((r) => r.enabled);
     const byId = new Map(prev.map((f) => [f.res.id, f]));
+    const persisted = loadPersistedFrameSessionIds();
     frames = enabled.map((res) => {
       const existing = byId.get(res.id);
       if (existing) {
@@ -102,13 +104,14 @@
       }
       return {
         res,
-        sessionId: crypto.randomUUID(),
+        sessionId: persisted[res.id] ?? defaultSessionIdFor(res.id),
         src: null,
         muted: true,
         history: [],
         showHistory: false
       };
     });
+    persistFrameSessionIds();
   }
 
   // Falls back to ['base'] while loading so the dropdowns are never empty.
@@ -120,6 +123,7 @@
 
   let replayMode = $state<string>('base');
   let replayEventId = $state<number | null>(null);
+  let replayAmount = $state(1);
 
   let savedRounds = $state<SavedRound[]>([]);
   let showSavedRounds = $state(true);
@@ -326,17 +330,23 @@
       toast.error('Enter a valid event id to replay.');
       return;
     }
+    if (replayAmount < 0.01 || replayAmount > 1000) {
+      toast.error('Replay bet amount must be between 0.01 and 1000.');
+      return;
+    }
     const url = replayUrl(gameUrl, gameSlug, lgsHostPort, {
       mode: replayMode,
       eventId: replayEventId,
       currency,
-      amount: Math.round(balance * API_MULTIPLIER),
+      amount: Math.round(replayAmount * API_MULTIPLIER),
       lang: language,
       device,
       social
     });
     frame.src = url;
-    toast.success(`Replay launched on ${frame.res.label}: ${replayMode} #${replayEventId}`);
+    toast.success(
+      `Replay launched on ${frame.res.label}: ${replayMode} #${replayEventId} at ${replayAmount} ${currency}`
+    );
   }
 
   // One persistent SSE connection per frame (keyed by sessionId). The server
@@ -400,6 +410,33 @@
   // We're served by the LGS itself, so APIs are same-origin.
   const lgsBase = `${location.origin}`;
   const lgsHostPort = location.host;
+  const SESSION_STORAGE_PREFIX = 'stake-dev-tool:test-sessions:';
+
+  function frameSessionStorageKey(): string | null {
+    if (!gameSlug || !gameUrl) return null;
+    return `${SESSION_STORAGE_PREFIX}${gameSlug}:${gameUrl}`;
+  }
+
+  function defaultSessionIdFor(resolutionId: string): string {
+    return `stake-dev-tool:${gameSlug}:${resolutionId}`;
+  }
+
+  function loadPersistedFrameSessionIds(): Record<string, string> {
+    const key = frameSessionStorageKey();
+    if (!key) return {};
+    try {
+      return JSON.parse(localStorage.getItem(key) ?? '{}') as Record<string, string>;
+    } catch {
+      return {};
+    }
+  }
+
+  function persistFrameSessionIds() {
+    const key = frameSessionStorageKey();
+    if (!key) return;
+    const sessionIds = Object.fromEntries(frames.map((f) => [f.res.id, f.sessionId]));
+    localStorage.setItem(key, JSON.stringify(sessionIds));
+  }
 
   onMount(async () => {
     const params = page.url.searchParams;
@@ -523,8 +560,9 @@
     }
   }
 
-  async function reloadFrame(frame: FrameState, regenerateSession = true) {
+  async function reloadFrame(frame: FrameState, regenerateSession = false) {
     if (regenerateSession) frame.sessionId = crypto.randomUUID();
+    persistFrameSessionIds();
     await prepareSession(frame.sessionId);
     frame.src = buildGameUrlFor(frame.sessionId);
   }
@@ -539,6 +577,30 @@
         await new Promise((r) => setTimeout(r, 800));
       }
       toast.success(`Reloaded ${frames.length} frames · balance=${balance} ${currency}`);
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : String(e));
+    } finally {
+      busy = false;
+    }
+  }
+
+  async function resetSessions() {
+    if (!confirm('Reset all saved sessions and reload every frame?')) return;
+    busy = true;
+    try {
+      await sessionsHttp.reset();
+      frames.forEach((f) => {
+        f.sessionId = defaultSessionIdFor(f.res.id);
+        f.src = null;
+        f.history = [];
+        f.showHistory = false;
+      });
+      persistFrameSessionIds();
+      for (const f of frames) {
+        await reloadFrame(f);
+        await new Promise((r) => setTimeout(r, 800));
+      }
+      toast.success('Sessions reset.');
     } catch (e) {
       toast.error(e instanceof Error ? e.message : String(e));
     } finally {
@@ -671,6 +733,17 @@
           <Button onclick={reloadAll} disabled={busy} class="w-full" size="default">
             <RefreshIcon class="h-4 w-4" />
             Apply &amp; reload all
+          </Button>
+
+          <Button
+            onclick={resetSessions}
+            disabled={busy}
+            class="w-full"
+            size="default"
+            variant="destructive"
+          >
+            <TrashIcon class="h-4 w-4" />
+            Reset sessions
           </Button>
 
           <div class="grid grid-cols-2 gap-1.5">
@@ -928,27 +1001,53 @@
             </button>
             {#if showReplay}
               <Separator />
-              <div class="space-y-1.5 p-2">
+              <div class="space-y-2 p-2">
+                <div class="grid grid-cols-[112px_1fr] gap-1.5">
+                  <div class="space-y-1">
+                    <Label class="text-xs uppercase tracking-wider text-muted-foreground">
+                      Mode
+                    </Label>
+                    <select
+                      bind:value={replayMode}
+                      class="border-input bg-background flex h-9 w-full rounded-md border px-2 py-1 font-mono text-sm focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none"
+                    >
+                      {#each availableModes as m (m)}
+                        <option value={m}>{m}</option>
+                      {/each}
+                    </select>
+                  </div>
+                  <div class="space-y-1">
+                    <Label class="text-xs uppercase tracking-wider text-muted-foreground">
+                      Event ID
+                    </Label>
+                    <Input
+                      type="number"
+                      bind:value={replayEventId}
+                      min={1}
+                      placeholder="eventId"
+                      class="font-mono-tab h-9 text-sm"
+                    />
+                  </div>
+                </div>
                 <div class="flex gap-1.5">
-                  <select
-                    bind:value={replayMode}
-                    class="border-input bg-background flex h-8 rounded-md border px-2 py-1 font-mono text-sm focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none"
-                  >
-                    {#each availableModes as m (m)}
-                      <option value={m}>{m}</option>
-                    {/each}
-                  </select>
-                  <Input
-                    type="number"
-                    bind:value={replayEventId}
-                    min={1}
-                    placeholder="eventId"
-                    class="font-mono-tab h-9 flex-1 text-sm"
-                  />
+                  <div class="min-w-0 flex-1 space-y-1">
+                    <Label class="text-xs uppercase tracking-wider text-muted-foreground">
+                      Bet amount
+                    </Label>
+                    <Input
+                      type="number"
+                      bind:value={replayAmount}
+                      min={0.01}
+                      max={1000}
+                      step={0.01}
+                      placeholder="0.01 - 1000"
+                      class="font-mono-tab h-9 text-sm"
+                    />
+                  </div>
                   <Button
                     size="sm"
-                    class="h-8 bg-sky-500 text-zinc-950 hover:bg-sky-400"
-                    disabled={busy || frames.length === 0}
+                    class="mt-6 h-9 bg-sky-500 text-zinc-950 hover:bg-sky-400"
+                    disabled={busy || frames.length === 0 || replayAmount < 0.01 || replayAmount > 1000}
                     onclick={() => frames[0] && launchReplay(frames[0])}
                   >
                     Load
@@ -1275,7 +1374,7 @@
                 {/each}
               </div>
               <div class="border-t bg-muted/20 px-3 py-1 text-xs text-muted-foreground">
-                Last 100 spins, newest first. Resets when the frame is reloaded.
+                Last 100 spins, newest first. Persists until sessions are reset.
               </div>
             </div>
           {/if}

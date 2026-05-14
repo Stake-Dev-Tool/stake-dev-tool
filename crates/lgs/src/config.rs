@@ -5,6 +5,20 @@ pub const CURRENCY: &str = "USD";
 pub const LANGUAGE: &str = "en";
 pub const INITIAL_BALANCE: u64 = 10_000 * API_MULTIPLIER;
 
+pub const SUPPORTED_CURRENCIES: &[&str] = &[
+    "USD", "CAD", "JPY", "EUR", "RUB", "CNY", "PHP", "INR", "IDR", "KRW", "BRL", "MXN", "DKK",
+    "PLN", "VND", "TRY", "CLP", "ARS", "PEN", "NGN", "SAR", "ILS", "AED", "TWD", "NOK", "KWD",
+    "JOD", "CRC", "TND", "SGD", "MYR", "OMR", "QAR", "BHD", "XGC", "XSC",
+];
+
+pub fn intern_currency(c: &str) -> &'static str {
+    SUPPORTED_CURRENCIES
+        .iter()
+        .copied()
+        .find(|s| s.eq_ignore_ascii_case(c))
+        .unwrap_or(CURRENCY)
+}
+
 pub const MIN_BET: u64 = 10_000;
 pub const MAX_BET: u64 = 2_000_000_000;
 pub const STEP_BET: u64 = 10_000;
