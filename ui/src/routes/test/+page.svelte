@@ -123,6 +123,7 @@
 
   let replayMode = $state<string>('base');
   let replayEventId = $state<number | null>(null);
+  let replayAmount = $state(1);
 
   let savedRounds = $state<SavedRound[]>([]);
   let showSavedRounds = $state(true);
@@ -329,17 +330,23 @@
       toast.error('Enter a valid event id to replay.');
       return;
     }
+    if (replayAmount < 0.01 || replayAmount > 1000) {
+      toast.error('Replay bet amount must be between 0.01 and 1000.');
+      return;
+    }
     const url = replayUrl(gameUrl, gameSlug, lgsHostPort, {
       mode: replayMode,
       eventId: replayEventId,
       currency,
-      amount: Math.round(balance * API_MULTIPLIER),
+      amount: Math.round(replayAmount * API_MULTIPLIER),
       lang: language,
       device,
       social
     });
     frame.src = url;
-    toast.success(`Replay launched on ${frame.res.label}: ${replayMode} #${replayEventId}`);
+    toast.success(
+      `Replay launched on ${frame.res.label}: ${replayMode} #${replayEventId} at ${replayAmount} ${currency}`
+    );
   }
 
   // One persistent SSE connection per frame (keyed by sessionId). The server
@@ -994,27 +1001,53 @@
             </button>
             {#if showReplay}
               <Separator />
-              <div class="space-y-1.5 p-2">
+              <div class="space-y-2 p-2">
+                <div class="grid grid-cols-[112px_1fr] gap-1.5">
+                  <div class="space-y-1">
+                    <Label class="text-xs uppercase tracking-wider text-muted-foreground">
+                      Mode
+                    </Label>
+                    <select
+                      bind:value={replayMode}
+                      class="border-input bg-background flex h-9 w-full rounded-md border px-2 py-1 font-mono text-sm focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none"
+                    >
+                      {#each availableModes as m (m)}
+                        <option value={m}>{m}</option>
+                      {/each}
+                    </select>
+                  </div>
+                  <div class="space-y-1">
+                    <Label class="text-xs uppercase tracking-wider text-muted-foreground">
+                      Event ID
+                    </Label>
+                    <Input
+                      type="number"
+                      bind:value={replayEventId}
+                      min={1}
+                      placeholder="eventId"
+                      class="font-mono-tab h-9 text-sm"
+                    />
+                  </div>
+                </div>
                 <div class="flex gap-1.5">
-                  <select
-                    bind:value={replayMode}
-                    class="border-input bg-background flex h-8 rounded-md border px-2 py-1 font-mono text-sm focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none"
-                  >
-                    {#each availableModes as m (m)}
-                      <option value={m}>{m}</option>
-                    {/each}
-                  </select>
-                  <Input
-                    type="number"
-                    bind:value={replayEventId}
-                    min={1}
-                    placeholder="eventId"
-                    class="font-mono-tab h-9 flex-1 text-sm"
-                  />
+                  <div class="min-w-0 flex-1 space-y-1">
+                    <Label class="text-xs uppercase tracking-wider text-muted-foreground">
+                      Bet amount
+                    </Label>
+                    <Input
+                      type="number"
+                      bind:value={replayAmount}
+                      min={0.01}
+                      max={1000}
+                      step={0.01}
+                      placeholder="0.01 - 1000"
+                      class="font-mono-tab h-9 text-sm"
+                    />
+                  </div>
                   <Button
                     size="sm"
-                    class="h-8 bg-sky-500 text-zinc-950 hover:bg-sky-400"
-                    disabled={busy || frames.length === 0}
+                    class="mt-6 h-9 bg-sky-500 text-zinc-950 hover:bg-sky-400"
+                    disabled={busy || frames.length === 0 || replayAmount < 0.01 || replayAmount > 1000}
                     onclick={() => frames[0] && launchReplay(frames[0])}
                   >
                     Load
