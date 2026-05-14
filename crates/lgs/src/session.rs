@@ -1,7 +1,14 @@
 use crate::config::{self, intern_currency};
 use crate::types::{EventEntry, Round, Session};
 use anyhow::{Context, Result, anyhow};
+use anyhow::{Context, Result, anyhow};
 use dashmap::DashMap;
+use parking_lot::Mutex;
+use rusqlite::{Connection, Row, params};
+use serde::{Deserialize, Serialize};
+use serde_json::value::RawValue;
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use parking_lot::Mutex;
 use rusqlite::{Connection, Row, params};
 use serde::{Deserialize, Serialize};
@@ -480,6 +487,20 @@ fn i64_to_u64(value: i64) -> u64 {
 
 fn i64_to_u32(value: i64) -> Option<u32> {
     u32::try_from(value).ok()
+}
+
+const SUPPORTED_CURRENCIES: &[&str] = &[
+    "USD", "CAD", "JPY", "EUR", "RUB", "CNY", "PHP", "INR", "IDR", "KRW", "BRL", "MXN", "DKK",
+    "PLN", "VND", "TRY", "CLP", "ARS", "PEN", "NGN", "SAR", "ILS", "AED", "TWD", "NOK", "KWD",
+    "JOD", "CRC", "TND", "SGD", "MYR", "OMR", "QAR", "BHD", "XGC", "XSC",
+];
+
+fn intern_currency(c: &str) -> &'static str {
+    SUPPORTED_CURRENCIES
+        .iter()
+        .copied()
+        .find(|s| s.eq_ignore_ascii_case(c))
+        .unwrap_or(config::CURRENCY)
 }
 
 #[cfg(test)]
