@@ -294,7 +294,8 @@ export const sessionsHttp = {
 // ---- Notable bets per mode (computed from the lookup table) ----
 
 export type NotableBet = { eventId: number; payoutMultiplier: number };
-export type BetStats = { min: NotableBet; avg: NotableBet; max: NotableBet };
+export type NotableBucket = 'zero' | 'low' | 'medium' | 'big' | 'max';
+export type BetStats = Record<NotableBucket, NotableBet[]>;
 export type ModeBetStats = { mode: string; stats: BetStats };
 
 export const betStatsHttp = {

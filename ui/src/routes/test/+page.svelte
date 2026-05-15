@@ -16,7 +16,8 @@
     type ResolutionPreset,
     type EventEntry,
     type SavedRound,
-    type ModeBetStats
+    type ModeBetStats,
+    type NotableBucket
   } from '$lib/api';
 
   import { Button } from '$lib/components/ui/button';
@@ -37,6 +38,8 @@
   import VolumeOffIcon from '@lucide/svelte/icons/volume-x';
   import ExternalLinkIcon from '@lucide/svelte/icons/external-link';
   import ChevronDownIcon from '@lucide/svelte/icons/chevron-down';
+  import ChevronLeftIcon from '@lucide/svelte/icons/chevron-left';
+  import ChevronRightIcon from '@lucide/svelte/icons/chevron-right';
   import StarIcon from '@lucide/svelte/icons/star';
   import StarOffIcon from '@lucide/svelte/icons/star-off';
   import TrashIcon from '@lucide/svelte/icons/trash-2';
@@ -64,6 +67,7 @@
 
   let gameUrl = $state('');
   let gameSlug = $state('');
+  let sidebarCollapsed = $state(false);
 
   let balance = $state(10000);
   let currency = $state<string>('USD');
@@ -135,6 +139,13 @@
   let notableLoading = $state(false);
   let notableLoaded = $state(false);
   let showNotable = $state(false);
+  const notableBuckets: Array<{ kind: NotableBucket; label: string; color: string }> = [
+    { kind: 'zero', label: 'zero', color: 'text-muted-foreground' },
+    { kind: 'low', label: 'low', color: 'text-sky-400' },
+    { kind: 'medium', label: 'med', color: 'text-amber-400' },
+    { kind: 'big', label: 'big', color: 'text-orange-400' },
+    { kind: 'max', label: 'max', color: 'text-emerald-400' }
+  ];
 
   async function reloadSavedRounds() {
     if (!gameSlug) return;
@@ -179,10 +190,19 @@
   }
 
   /** Bookmark a notable bet with the auto-set description. */
-  async function bookmarkNotable(mode: string, eventId: number, kind: 'min' | 'avg' | 'max') {
+  async function bookmarkNotable(mode: string, eventId: number, kind: NotableBucket) {
     if (!gameSlug) return;
     if (isBookmarked(mode, eventId)) return;
-    const description = kind === 'min' ? 'min' : kind === 'avg' ? 'average win' : 'max win';
+    const description =
+      kind === 'zero'
+        ? 'zero win'
+        : kind === 'low'
+          ? 'low win'
+          : kind === 'medium'
+            ? 'medium win'
+            : kind === 'big'
+              ? 'big win'
+              : 'max win';
     try {
       await savedRoundsHttp.create(gameSlug, mode, eventId, description);
       await reloadSavedRounds();
@@ -662,15 +682,61 @@
 
 <div class="flex h-screen overflow-hidden bg-background text-foreground">
   <!-- Sidebar -->
-  <aside class="flex h-screen w-[440px] flex-shrink-0 flex-col border-r bg-card/30">
+  <aside
+    class="relative flex h-screen flex-shrink-0 flex-col border-r bg-card/30 transition-[width] duration-200 ease-out {sidebarCollapsed
+      ? 'w-16'
+      : 'w-[440px]'}"
+  >
     <!-- Header -->
-    <div class="flex-shrink-0 border-b px-5 py-4">
-      <p class="text-xs font-medium uppercase tracking-wider text-muted-foreground">Game</p>
-      <p class="mt-0.5 truncate text-sm font-semibold">{gameSlug || '—'}</p>
+    <div
+      class="flex min-h-[73px] flex-shrink-0 items-center gap-3 border-b {sidebarCollapsed
+        ? 'justify-center px-2 py-3'
+        : 'justify-between px-5 py-4'}"
+    >
+      {#if !sidebarCollapsed}
+        <div class="min-w-0">
+          <p class="text-xs font-medium uppercase tracking-wider text-muted-foreground">Game</p>
+          <p class="mt-0.5 truncate text-sm font-semibold">{gameSlug || '—'}</p>
+        </div>
+      {/if}
+      <Tooltip.Provider delayDuration={300}>
+        <Tooltip.Root>
+          <Tooltip.Trigger>
+            {#snippet child({ props })}
+              <Button
+                {...props}
+                variant="outline"
+                size="icon"
+                class="h-9 w-9 flex-shrink-0 rounded-full border-border/80 bg-background/80 shadow-sm hover:bg-muted"
+                onclick={() => (sidebarCollapsed = !sidebarCollapsed)}
+                aria-label={sidebarCollapsed ? 'Expand sidebar' : 'Collapse sidebar'}
+                aria-expanded={!sidebarCollapsed}
+              >
+                {#if sidebarCollapsed}
+                  <ChevronRightIcon class="h-4 w-4" />
+                {:else}
+                  <ChevronLeftIcon class="h-4 w-4" />
+                {/if}
+              </Button>
+            {/snippet}
+          </Tooltip.Trigger>
+          <Tooltip.Content>{sidebarCollapsed ? 'Expand sidebar' : 'Collapse sidebar'}</Tooltip.Content>
+        </Tooltip.Root>
+      </Tooltip.Provider>
     </div>
 
-    <!-- Scrollable sections -->
-    <div class="flex-1 space-y-5 overflow-y-auto px-5 py-4">
+    {#if sidebarCollapsed}
+      <div class="flex flex-1 flex-col items-center gap-3 px-2 py-4">
+        <div
+          class="flex h-9 w-9 items-center justify-center rounded-md border bg-background text-xs font-semibold uppercase text-muted-foreground"
+          title={gameSlug || 'Game'}
+        >
+          G
+        </div>
+      </div>
+    {:else}
+      <!-- Scrollable sections -->
+      <div class="flex-1 space-y-5 overflow-y-auto px-5 py-4">
       <!-- ========== SESSION ========== -->
       <Card.Root>
         <Card.Header class="pb-3">
@@ -939,27 +1005,24 @@
                           {m.mode}
                         </div>
                         <div class="space-y-0.5">
-                          {#each [
-                            { kind: 'min' as const, label: 'min', bet: m.stats.min, color: 'text-muted-foreground' },
-                            { kind: 'avg' as const, label: 'avg', bet: m.stats.avg, color: 'text-amber-400' },
-                            { kind: 'max' as const, label: 'max', bet: m.stats.max, color: 'text-emerald-400' }
-                          ] as row (row.kind)}
-                            {@const bk = isBookmarked(m.mode, row.bet.eventId)}
+                          {#each notableBuckets as bucket (bucket.kind)}
+                            {#each m.stats[bucket.kind] as bet, ix (`${bucket.kind}-${bet.eventId}-${ix}`)}
+                            {@const bk = isBookmarked(m.mode, bet.eventId)}
                             <div class="flex items-center gap-2 rounded px-1.5 py-1 hover:bg-muted/40">
-                              <span class="w-7 text-xs uppercase tracking-wider text-muted-foreground">
-                                {row.label}
+                              <span class="w-9 text-xs uppercase tracking-wider text-muted-foreground">
+                                {ix === 0 ? bucket.label : ''}
                               </span>
-                              <span class="font-mono-tab text-sm {row.color}">
-                                #{row.bet.eventId}
+                              <span class="font-mono-tab text-sm {bucket.color}">
+                                #{bet.eventId}
                               </span>
                               <span class="ml-auto font-mono-tab text-xs text-muted-foreground">
-                                ×{(row.bet.payoutMultiplier / 100).toFixed(2)}
+                                ×{(bet.payoutMultiplier / 100).toFixed(2)}
                               </span>
                               <Button
                                 variant="outline"
                                 size="sm"
                                 class="h-5 px-1.5 text-xs"
-                                onclick={() => applyForcedFromNotable(m.mode, row.bet.eventId)}
+                                onclick={() => applyForcedFromNotable(m.mode, bet.eventId)}
                                 disabled={busy}
                               >
                                 Force
@@ -971,12 +1034,13 @@
                                   ? 'cursor-default text-amber-400'
                                   : 'text-muted-foreground hover:text-amber-400'}"
                                 disabled={bk}
-                                onclick={() => bookmarkNotable(m.mode, row.bet.eventId, row.kind)}
+                                onclick={() => bookmarkNotable(m.mode, bet.eventId, bucket.kind)}
                                 aria-label={bk ? 'Already bookmarked' : 'Bookmark'}
                               >
                                 <StarIcon class="h-4 w-4 {bk ? 'fill-amber-400' : ''}" />
                               </Button>
                             </div>
+                            {/each}
                           {/each}
                         </div>
                       </div>
@@ -1164,7 +1228,8 @@
           </div>
         </Card.Content>
       </Card.Root>
-    </div>
+      </div>
+    {/if}
   </aside>
 
   <!-- Frames area -->
