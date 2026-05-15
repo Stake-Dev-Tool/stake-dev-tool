@@ -558,17 +558,15 @@ fn decompress_and_index(compressed: &[u8]) -> Result<BooksIndex, String> {
         .map_err(|e| format!("zstd decode: {e}"))?;
 
     let mut id_to_range = HashMap::with_capacity(buffer.len() / 512 + 1);
-    let mut line_start = 0usize;
-    let mut i = 0usize;
-    while i < buffer.len() {
-        if buffer[i] == b'\n' {
-            index_line(&buffer, line_start, i, &mut id_to_range);
-            line_start = i + 1;
-        }
-        i += 1;
-    }
-    if line_start < buffer.len() {
-        index_line(&buffer, line_start, buffer.len(), &mut id_to_range);
+    let mut stream =
+        serde_json::Deserializer::from_slice(&buffer).into_iter::<serde::de::IgnoredAny>();
+    while let Some(item) = {
+        let start = stream.byte_offset();
+        stream.next().map(|item| (start, item))
+    } {
+        let (start, item) = item;
+        item.map_err(|e| format!("books json stream at byte {start}: {e}"))?;
+        index_record(&buffer, start, stream.byte_offset(), &mut id_to_range);
     }
     Ok(BooksIndex {
         buffer,
@@ -576,20 +574,17 @@ fn decompress_and_index(compressed: &[u8]) -> Result<BooksIndex, String> {
     })
 }
 
-fn index_line(
+fn index_record(
     buffer: &[u8],
-    line_start: usize,
-    mut line_end: usize,
+    record_start: usize,
+    record_end: usize,
     id_to_range: &mut HashMap<u32, (u32, u32)>,
 ) {
-    if line_end > line_start && buffer[line_end - 1] == b'\r' {
-        line_end -= 1;
-    }
-    if line_end <= line_start {
+    if record_end <= record_start {
         return;
     }
-    if let Some(id) = read_id_field(&buffer[line_start..line_end]) {
-        id_to_range.insert(id, (line_start as u32, line_end as u32));
+    if let Some(id) = read_id_field(&buffer[record_start..record_end]) {
+        id_to_range.insert(id, (record_start as u32, record_end as u32));
     }
 }
 

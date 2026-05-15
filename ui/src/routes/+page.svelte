@@ -180,7 +180,7 @@
 
         status = await lgs.status();
         caState = await ca.status();
-        savedProfiles = await profilesApi.list();
+        await loadProfiles(true);
         const s = await settingsApi.get();
         resolutions = s.resolutions;
         refreshProfileReadiness().catch(() => {});
@@ -242,6 +242,47 @@
     return `${head}…${tail}`;
   }
 
+  const TECHNICAL_FOLDER_SLUGS = new Set(['publish_files', 'publish-files', 'build', 'dist']);
+
+  function slugifyGameName(value: string): string {
+    return value
+      .trim()
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, '-')
+      .replace(/^-+|-+$/g, '');
+  }
+
+  function profileGameSlug(p: Pick<Profile, 'name' | 'gameSlug'>, inspectedSlug?: string): string {
+    const nameSlug = slugifyGameName(p.name);
+    if (!p.gameSlug) return nameSlug || inspectedSlug || '';
+    if (p.gameSlug === inspectedSlug && nameSlug) return nameSlug;
+    if (TECHNICAL_FOLDER_SLUGS.has(p.gameSlug) && nameSlug) return nameSlug;
+    return p.gameSlug;
+  }
+
+  async function loadProfiles(repair = false) {
+    let profiles = await profilesApi.list();
+    if (repair) {
+      let changed = false;
+      for (const p of profiles) {
+        const repairedSlug = profileGameSlug(p);
+        if (repairedSlug && repairedSlug !== p.gameSlug) {
+          await profilesApi.save({
+            id: p.id,
+            name: p.name,
+            gamePath: p.gamePath,
+            gameUrl: p.gameUrl,
+            gameSlug: repairedSlug,
+            resolutions: p.resolutions
+          });
+          changed = true;
+        }
+      }
+      if (changed) profiles = await profilesApi.list();
+    }
+    savedProfiles = profiles;
+  }
+
   function formatRelative(ts: number | undefined): string {
     if (!ts) return '—';
     const diff = Date.now() - ts;
@@ -290,7 +331,9 @@
         const p = savedProfiles.find((x) => x.id === activeProfileId) ?? savedProfiles[0];
         if (!p) throw new Error('Add a profile first.');
         const inspected = await lgs.inspect(p.gamePath);
-        await ensureLgsRunning(inspected.mathDir);
+        const gameSlug = profileGameSlug(p, inspected.slug);
+        const mathRoot = gameSlug === inspected.slug ? inspected.mathDir : p.gamePath;
+        await ensureLgsRunning(mathRoot);
         toast.success(`LGS listening on ${status.bound_addr}`);
       }
     });
@@ -420,11 +463,11 @@
         name: d.name.trim(),
         gamePath: d.game!.gamePath,
         gameUrl: d.gameUrl.trim(),
-        gameSlug: d.game!.slug,
+        gameSlug: slugifyGameName(d.name) || d.game!.slug,
         resolutions
       });
       activeProfileId = saved.id;
-      savedProfiles = await profilesApi.list();
+      await loadProfiles();
       closeDraft();
       toast.success(`Profile "${saved.name}" ${d.mode === 'edit' ? 'updated' : 'saved'}`);
     });
@@ -456,7 +499,7 @@
         // `allCatalogs` (stamping team_id on profiles whose id appears in a
         // team's catalogue). Re-read profiles so the UI picks up those new
         // team_ids and moves the cards to their real group.
-        savedProfiles = await profilesApi.list();
+        await loadProfiles();
       } else {
         catalog = [];
       }
@@ -493,15 +536,16 @@
     await withBusy(async () => {
       toast.info(`Adding "${p.name}" to "${team.name}" catalogue…`);
       await teamsApi.pushProfile(team.id, p.id);
-      toast.info(`Uploading ${p.gameSlug} math (can take several minutes)…`);
-      const r = await teamsApi.pushMath(team.id, p.gameSlug, p.gamePath);
+      const gameSlug = profileGameSlug(p);
+      toast.info(`Uploading ${gameSlug} math (can take several minutes)…`);
+      const r = await teamsApi.pushMath(team.id, gameSlug, p.gamePath);
       const mb = (r.bytesUploaded / 1_048_576).toFixed(1);
       if (r.filesUploaded === 0 && r.filesSkipped > 0) {
         toast.success(`Shared "${p.name}" — math already in sync`);
       } else {
         toast.success(`Shared "${p.name}" with ${mb} MB of math`);
       }
-      savedProfiles = await profilesApi.list();
+      await loadProfiles();
       refreshTeamsAndCatalog().catch(() => {});
     });
   }
@@ -512,7 +556,7 @@
     await withBusy(async () => {
       toast.info(`Pulling "${tp.name}" from "${team.name}"… large games can take several minutes.`);
       const p = await teamsApi.pullProfile(team.id, tp.id);
-      savedProfiles = await profilesApi.list();
+      await loadProfiles();
       activeProfileId = p.id;
       await refreshTeamsAndCatalog();
       await refreshProfileReadiness();
@@ -634,7 +678,7 @@
     await withBusy(async () => {
       toast.info(`Pulling latest "${p.name}" from "${team.name}"…`);
       await teamsApi.pullProfile(team.id, p.id);
-      savedProfiles = await profilesApi.list();
+      await loadProfiles();
       await refreshProfileReadiness();
       await refreshTeamsAndCatalog();
       toast.success(`"${p.name}" up to date`);
@@ -646,7 +690,7 @@
     await withBusy(async () => {
       await profilesApi.remove(p.id);
       if (activeProfileId === p.id) activeProfileId = null;
-      savedProfiles = await profilesApi.list();
+      await loadProfiles();
       toast.success(`Deleted "${p.name}"`);
     });
   }
@@ -654,7 +698,9 @@
   async function launchProfile(p: Profile) {
     await withBusy(async () => {
       const inspected = await lgs.inspect(p.gamePath);
-      await ensureLgsRunning(inspected.mathDir);
+      const gameSlug = profileGameSlug(p, inspected.slug);
+      const mathRoot = gameSlug === inspected.slug ? inspected.mathDir : p.gamePath;
+      await ensureLgsRunning(mathRoot);
 
       if (p.resolutions && p.resolutions.length > 0) {
         const s = await settingsApi.replace(p.resolutions);
@@ -663,7 +709,7 @@
 
       const params = new URLSearchParams({
         gameUrl: p.gameUrl,
-        gameSlug: inspected.slug,
+        gameSlug,
         v: String(Date.now())
       });
       const port = (status.bound_addr ?? '').split(':').pop() ?? `${lgsPort}`;
@@ -701,10 +747,10 @@
         name: p.name,
         gamePath: p.gamePath,
         gameUrl: p.gameUrl,
-        gameSlug: p.gameSlug,
+        gameSlug: profileGameSlug(p),
         resolutions
       });
-      savedProfiles = await profilesApi.list();
+      await loadProfiles();
       toast.success(`Snapshot saved to "${p.name}"`);
     });
   }
@@ -1098,7 +1144,7 @@
                     >
                       {p.name}
                     </button>
-                    <Badge variant="secondary" class="font-mono-tab text-xs">{p.gameSlug}</Badge>
+                    <Badge variant="secondary" class="font-mono-tab text-xs">{profileGameSlug(p)}</Badge>
                     {#if ready === false}
                       <Badge variant="outline" class="text-xs text-amber-500 border-amber-500/50">
                         math missing
@@ -1650,12 +1696,12 @@
 
       <div class="flex-1 overflow-y-auto px-6 py-5 flex flex-col gap-6">
         <div class="flex flex-col gap-2">
-          <Label for="draft-name" class="text-sm">Profile name</Label>
+          <Label for="draft-name" class="text-sm">Game name</Label>
           <Input
             id="draft-name"
             type="text"
             bind:value={draft.name}
-            placeholder="e.g. easter-guardian-dev"
+            placeholder="e.g. dice-drop"
             class="h-10"
           />
         </div>

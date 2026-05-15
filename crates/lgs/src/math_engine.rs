@@ -47,7 +47,18 @@ impl MathEngine {
     }
 
     fn file_path(&self, game: &str, file: &str) -> PathBuf {
-        PathBuf::from(&self.cfg.math_dir).join(game).join(file)
+        let root = PathBuf::from(&self.cfg.math_dir);
+        let nested = root.join(game).join(file);
+        if nested.exists() {
+            return nested;
+        }
+
+        let flat = root.join(file);
+        if flat.exists() {
+            return flat;
+        }
+
+        nested
     }
 
     async fn read_file(&self, game: &str, file: &str) -> AppResult<Vec<u8>> {
@@ -386,18 +397,15 @@ fn decompress_and_index(compressed: &[u8]) -> AppResult<BooksIndex> {
     let buffer = zstd::decode_all(compressed).map_err(|e| AppError::Zstd(e.to_string()))?;
 
     let mut id_to_range = HashMap::with_capacity(buffer.len() / 512 + 1);
-    let mut line_start = 0usize;
-    let mut i = 0usize;
-    while i < buffer.len() {
-        if buffer[i] == b'\n' {
-            index_line(&buffer, line_start, i, &mut id_to_range);
-            line_start = i + 1;
-        }
-        i += 1;
-    }
-    // Trailing line without a newline terminator.
-    if line_start < buffer.len() {
-        index_line(&buffer, line_start, buffer.len(), &mut id_to_range);
+    let mut stream =
+        serde_json::Deserializer::from_slice(&buffer).into_iter::<serde::de::IgnoredAny>();
+    while let Some(item) = {
+        let start = stream.byte_offset();
+        stream.next().map(|item| (start, item))
+    } {
+        let (start, item) = item;
+        item.map_err(|e| AppError::Parse(format!("books json stream at byte {start}: {e}")))?;
+        index_record(&buffer, start, stream.byte_offset(), &mut id_to_range);
     }
 
     Ok(BooksIndex {
@@ -406,20 +414,17 @@ fn decompress_and_index(compressed: &[u8]) -> AppResult<BooksIndex> {
     })
 }
 
-fn index_line(
+fn index_record(
     buffer: &[u8],
-    line_start: usize,
-    mut line_end: usize,
+    record_start: usize,
+    record_end: usize,
     id_to_range: &mut HashMap<u32, (u32, u32)>,
 ) {
-    if line_end > line_start && buffer[line_end - 1] == b'\r' {
-        line_end -= 1;
-    }
-    if line_end <= line_start {
+    if record_end <= record_start {
         return;
     }
-    if let Some(id) = read_id_field(&buffer[line_start..line_end]) {
-        id_to_range.insert(id, (line_start as u32, line_end as u32));
+    if let Some(id) = read_id_field(&buffer[record_start..record_end]) {
+        id_to_range.insert(id, (record_start as u32, record_end as u32));
     }
 }
 
@@ -502,4 +507,39 @@ fn read_event(idx: &BooksIndex, event_id: u32) -> AppResult<Arc<RawValue>> {
             .map_err(|e| AppError::Parse(format!("event raw: {e}")))?,
     };
     Ok(Arc::from(raw))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn compressed_books(bytes: &[u8]) -> Vec<u8> {
+        zstd::encode_all(bytes, 0).expect("compress test books")
+    }
+
+    #[test]
+    fn indexes_newline_delimited_books() {
+        let compressed = compressed_books(
+            br#"{"id":1,"events":[{"symbol":"A"}]}
+{"id":2,"events":[{"symbol":"B"}]}
+"#,
+        );
+
+        let books = decompress_and_index(&compressed).expect("index books");
+        let raw = read_event(&books, 2).expect("read event");
+
+        assert_eq!(raw.get(), r#"[{"symbol":"B"}]"#);
+    }
+
+    #[test]
+    fn indexes_adjacent_books_without_newlines() {
+        let compressed = compressed_books(
+            br#"{"id":10,"events":[{"bonus":false}]}{"id":11,"events":[{"bonus":true}]}"#,
+        );
+
+        let books = decompress_and_index(&compressed).expect("index books");
+        let raw = read_event(&books, 11).expect("read event");
+
+        assert_eq!(raw.get(), r#"[{"bonus":true}]"#);
+    }
 }
