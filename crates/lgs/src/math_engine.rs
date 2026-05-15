@@ -47,7 +47,18 @@ impl MathEngine {
     }
 
     fn file_path(&self, game: &str, file: &str) -> PathBuf {
-        PathBuf::from(&self.cfg.math_dir).join(game).join(file)
+        let root = PathBuf::from(&self.cfg.math_dir);
+        let nested = root.join(game).join(file);
+        if nested.exists() {
+            return nested;
+        }
+
+        let flat = root.join(file);
+        if flat.exists() {
+            return flat;
+        }
+
+        nested
     }
 
     async fn read_file(&self, game: &str, file: &str) -> AppResult<Vec<u8>> {
@@ -205,8 +216,11 @@ impl MathEngine {
         let cfg = self.load_config(game).await?;
         let mut out = Vec::with_capacity(cfg.modes.len());
         for mode in &cfg.modes {
-            let assets = self.load_assets(game, mode).await?;
-            if let Some(stats) = compute_bet_stats(&assets.sampler) {
+            let weights_bytes = self.read_file(game, &mode.weights).await?;
+            let weights_text = String::from_utf8(weights_bytes)
+                .map_err(|e| AppError::Parse(format!("weights utf8: {e}")))?;
+            let sampler = parse_weights(&weights_text)?;
+            if let Some(stats) = compute_bet_stats(&sampler) {
                 out.push(ModeBetStats {
                     mode: mode.name.clone(),
                     stats,
@@ -248,18 +262,13 @@ pub struct NotableBet {
     pub payout_multiplier: u32,
 }
 
-/// Three "interesting" bet ids picked from a mode's lookup table:
-/// - `min`: a no-win round (payoutMultiplier = 0 if any exist, else the
-///   smallest payout)
-/// - `avg`: the round whose payoutMultiplier is closest to the
-///   weight-weighted average of *winning* multipliers (i.e. the typical
-///   look of a winning spin)
-/// - `max`: the highest payoutMultiplier in the table
-#[derive(Debug, Clone, Copy, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 pub struct BetStats {
-    pub min: NotableBet,
-    pub avg: NotableBet,
-    pub max: NotableBet,
+    pub zero: Vec<NotableBet>,
+    pub low: Vec<NotableBet>,
+    pub medium: Vec<NotableBet>,
+    pub big: Vec<NotableBet>,
+    pub max: Vec<NotableBet>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -280,44 +289,51 @@ fn compute_bet_stats(sampler: &WeightSampler) -> Option<BetStats> {
         return None;
     }
 
-    let min_entry = sampler
+    let mut zeroes: Vec<&WeightEntry> = sampler
         .entries
         .iter()
-        .find(|e| e.payout_multiplier == 0)
-        .or_else(|| sampler.entries.iter().min_by_key(|e| e.payout_multiplier))?;
-
-    let max_entry = sampler.entries.iter().max_by_key(|e| e.payout_multiplier)?;
+        .filter(|e| e.payout_multiplier == 0)
+        .collect();
+    zeroes.sort_by_key(|e| (std::cmp::Reverse(e.weight), e.event_id));
 
     // Weighted mean of winning payoutMultipliers — represents the EV of a
-    // winning spin. We then pick the entry whose pm is closest to that mean.
-    let winners: Vec<&WeightEntry> = sampler
+    let mut winners: Vec<&WeightEntry> = sampler
         .entries
         .iter()
         .filter(|e| e.payout_multiplier > 0)
         .collect();
-
-    let avg_entry = if winners.is_empty() {
-        // No winners at all: avg falls back to min (degenerate but coherent).
-        min_entry
-    } else {
-        let total_w: u128 = winners.iter().map(|e| e.weight as u128).sum();
-        let weighted_sum: u128 = winners
-            .iter()
-            .map(|e| e.weight as u128 * e.payout_multiplier as u128)
-            .sum();
-        let avg_pm = (weighted_sum / total_w.max(1)) as u32;
-        winners
-            .iter()
-            .min_by_key(|e| e.payout_multiplier.abs_diff(avg_pm))
-            .copied()
-            .unwrap_or(min_entry)
-    };
+    winners.sort_by_key(|e| (e.payout_multiplier, e.event_id));
 
     Some(BetStats {
-        min: notable_from(min_entry),
-        avg: notable_from(avg_entry),
-        max: notable_from(max_entry),
+        zero: zeroes.into_iter().take(1).map(notable_from).collect(),
+        low: winners.iter().take(2).map(|e| notable_from(e)).collect(),
+        medium: notable_near_percentile(&winners, 1, 2, 2),
+        big: notable_near_percentile(&winners, 4, 5, 2),
+        max: winners
+            .iter()
+            .rev()
+            .take(2)
+            .map(|e| notable_from(e))
+            .collect(),
     })
+}
+
+fn notable_near_percentile(
+    sorted_winners: &[&WeightEntry],
+    numerator: usize,
+    denominator: usize,
+    count: usize,
+) -> Vec<NotableBet> {
+    if sorted_winners.is_empty() || denominator == 0 {
+        return Vec::new();
+    }
+    let target_idx = ((sorted_winners.len() - 1) * numerator) / denominator;
+    let target = sorted_winners[target_idx].payout_multiplier;
+    let mut entries = sorted_winners.to_vec();
+    entries.sort_by_key(|e| (e.payout_multiplier.abs_diff(target), e.event_id));
+    entries.truncate(count);
+    entries.sort_by_key(|e| (e.payout_multiplier, e.event_id));
+    entries.into_iter().map(notable_from).collect()
 }
 
 pub struct ReplayResult {
@@ -386,18 +402,15 @@ fn decompress_and_index(compressed: &[u8]) -> AppResult<BooksIndex> {
     let buffer = zstd::decode_all(compressed).map_err(|e| AppError::Zstd(e.to_string()))?;
 
     let mut id_to_range = HashMap::with_capacity(buffer.len() / 512 + 1);
-    let mut line_start = 0usize;
-    let mut i = 0usize;
-    while i < buffer.len() {
-        if buffer[i] == b'\n' {
-            index_line(&buffer, line_start, i, &mut id_to_range);
-            line_start = i + 1;
-        }
-        i += 1;
-    }
-    // Trailing line without a newline terminator.
-    if line_start < buffer.len() {
-        index_line(&buffer, line_start, buffer.len(), &mut id_to_range);
+    let mut stream =
+        serde_json::Deserializer::from_slice(&buffer).into_iter::<serde::de::IgnoredAny>();
+    while let Some(item) = {
+        let start = stream.byte_offset();
+        stream.next().map(|item| (start, item))
+    } {
+        let (start, item) = item;
+        item.map_err(|e| AppError::Parse(format!("books json stream at byte {start}: {e}")))?;
+        index_record(&buffer, start, stream.byte_offset(), &mut id_to_range);
     }
 
     Ok(BooksIndex {
@@ -406,20 +419,17 @@ fn decompress_and_index(compressed: &[u8]) -> AppResult<BooksIndex> {
     })
 }
 
-fn index_line(
+fn index_record(
     buffer: &[u8],
-    line_start: usize,
-    mut line_end: usize,
+    record_start: usize,
+    record_end: usize,
     id_to_range: &mut HashMap<u32, (u32, u32)>,
 ) {
-    if line_end > line_start && buffer[line_end - 1] == b'\r' {
-        line_end -= 1;
-    }
-    if line_end <= line_start {
+    if record_end <= record_start {
         return;
     }
-    if let Some(id) = read_id_field(&buffer[line_start..line_end]) {
-        id_to_range.insert(id, (line_start as u32, line_end as u32));
+    if let Some(id) = read_id_field(&buffer[record_start..record_end]) {
+        id_to_range.insert(id, (record_start as u32, record_end as u32));
     }
 }
 
@@ -502,4 +512,95 @@ fn read_event(idx: &BooksIndex, event_id: u32) -> AppResult<Arc<RawValue>> {
             .map_err(|e| AppError::Parse(format!("event raw: {e}")))?,
     };
     Ok(Arc::from(raw))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn compressed_books(bytes: &[u8]) -> Vec<u8> {
+        zstd::encode_all(bytes, 0).expect("compress test books")
+    }
+
+    #[test]
+    fn indexes_newline_delimited_books() {
+        let compressed = compressed_books(
+            br#"{"id":1,"events":[{"symbol":"A"}]}
+{"id":2,"events":[{"symbol":"B"}]}
+"#,
+        );
+
+        let books = decompress_and_index(&compressed).expect("index books");
+        let raw = read_event(&books, 2).expect("read event");
+
+        assert_eq!(raw.get(), r#"[{"symbol":"B"}]"#);
+    }
+
+    #[test]
+    fn indexes_adjacent_books_without_newlines() {
+        let compressed = compressed_books(
+            br#"{"id":10,"events":[{"bonus":false}]}{"id":11,"events":[{"bonus":true}]}"#,
+        );
+
+        let books = decompress_and_index(&compressed).expect("index books");
+        let raw = read_event(&books, 11).expect("read event");
+
+        assert_eq!(raw.get(), r#"[{"bonus":true}]"#);
+    }
+
+    #[test]
+    fn notable_buckets_cover_zero_low_medium_big_and_max() {
+        let sampler = WeightSampler {
+            entries: vec![
+                WeightEntry {
+                    event_id: 1,
+                    weight: 10,
+                    payout_multiplier: 0,
+                },
+                WeightEntry {
+                    event_id: 2,
+                    weight: 1,
+                    payout_multiplier: 10,
+                },
+                WeightEntry {
+                    event_id: 3,
+                    weight: 1,
+                    payout_multiplier: 20,
+                },
+                WeightEntry {
+                    event_id: 4,
+                    weight: 1,
+                    payout_multiplier: 100,
+                },
+                WeightEntry {
+                    event_id: 5,
+                    weight: 1,
+                    payout_multiplier: 200,
+                },
+                WeightEntry {
+                    event_id: 6,
+                    weight: 1,
+                    payout_multiplier: 500,
+                },
+                WeightEntry {
+                    event_id: 7,
+                    weight: 1,
+                    payout_multiplier: 1000,
+                },
+            ],
+            cum_weights: vec![],
+            total_weight: 0,
+        };
+
+        let stats = compute_bet_stats(&sampler).expect("stats");
+
+        assert_eq!(stats.zero.len(), 1);
+        assert_eq!(stats.low.len(), 2);
+        assert_eq!(stats.medium.len(), 2);
+        assert_eq!(stats.big.len(), 2);
+        assert_eq!(stats.max.len(), 2);
+        assert_eq!(stats.zero[0].event_id, 1);
+        assert_eq!(stats.low[0].event_id, 2);
+        assert_eq!(stats.max[0].event_id, 7);
+    }
 }
