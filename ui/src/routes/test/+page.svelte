@@ -431,6 +431,7 @@
   const lgsBase = `${location.origin}`;
   const lgsHostPort = location.host;
   const SESSION_STORAGE_PREFIX = 'stake-dev-tool:test-sessions:';
+  const SIDEBAR_COLLAPSED_STORAGE_KEY = 'stake-dev-tool:test-sidebar-collapsed';
 
   function frameSessionStorageKey(): string | null {
     if (!gameSlug || !gameUrl) return null;
@@ -458,7 +459,26 @@
     localStorage.setItem(key, JSON.stringify(sessionIds));
   }
 
+  function loadPersistedSidebarCollapsed() {
+    try {
+      sidebarCollapsed = localStorage.getItem(SIDEBAR_COLLAPSED_STORAGE_KEY) === '1';
+    } catch {
+      sidebarCollapsed = false;
+    }
+  }
+
+  function setSidebarCollapsed(next: boolean) {
+    sidebarCollapsed = next;
+    try {
+      localStorage.setItem(SIDEBAR_COLLAPSED_STORAGE_KEY, next ? '1' : '0');
+    } catch {
+      // Keep the UI responsive even when browser storage is unavailable.
+    }
+  }
+
   onMount(async () => {
+    loadPersistedSidebarCollapsed();
+
     const params = page.url.searchParams;
     gameUrl = params.get('gameUrl') ?? '';
     gameSlug = params.get('gameSlug') ?? '';
@@ -708,7 +728,7 @@
                 variant="outline"
                 size="icon"
                 class="h-9 w-9 flex-shrink-0 rounded-full border-border/80 bg-background/80 shadow-sm hover:bg-muted"
-                onclick={() => (sidebarCollapsed = !sidebarCollapsed)}
+                onclick={() => setSidebarCollapsed(!sidebarCollapsed)}
                 aria-label={sidebarCollapsed ? 'Expand sidebar' : 'Collapse sidebar'}
                 aria-expanded={!sidebarCollapsed}
               >
