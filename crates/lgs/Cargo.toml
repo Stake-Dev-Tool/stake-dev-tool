@@ -45,3 +45,6 @@ thiserror.workspace = true
 once_cell.workspace = true
 parking_lot.workspace = true
 arc-swap.workspace = true
+memmap2.workspace = true
+tempfile.workspace = true
+memchr.workspace = true

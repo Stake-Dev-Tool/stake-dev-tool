@@ -2,6 +2,7 @@ use crate::config::ServerConfig;
 use crate::error::{AppError, AppResult};
 use crate::types::{GameConfig, GameMode, WeightEntry};
 use dashmap::DashMap;
+use memmap2::Mmap;
 use rand::RngCore;
 use serde::Serialize;
 use serde_json::value::RawValue;
@@ -12,12 +13,16 @@ use tokio::fs;
 use tokio::sync::OnceCell;
 
 pub struct BooksIndex {
-    pub buffer: Vec<u8>,
+    /// Decompressed books, backed by an unlinked temp file via mmap. File-backed
+    /// pages stay clean, so the OS can reclaim them under memory pressure
+    /// instead of pushing multi-GB buffers to swap.
+    buffer: Mmap,
     /// Maps each book's `id` field to its (start, end) byte range in `buffer`.
     /// Built by scanning every line at load time — indexing by `id` rather than
     /// by line position because math-sdk writes `library[sim+1] = Book(sim)`,
     /// so line N contains id N-1 (not id N as the name might suggest).
-    pub id_to_range: HashMap<u32, (u32, u32)>,
+    /// Offsets are u64: decompressed books routinely exceed 4 GiB.
+    pub id_to_range: HashMap<u32, (u64, u64)>,
 }
 
 pub struct WeightSampler {
@@ -31,10 +36,20 @@ pub struct ModeAssets {
     pub books: Arc<BooksIndex>,
 }
 
+/// Decompressed books are huge (frequently several GiB per mode), so only the
+/// most recently used modes stay cached; older entries are dropped, releasing
+/// their temp-file-backed mmaps. In-flight spins keep their `Arc<ModeAssets>`
+/// alive, so eviction is safe mid-request. The cache is bounded both by entry
+/// count and by total decompressed bytes, since each cached mode holds its
+/// decompressed size in temp-file disk space.
+const MAX_CACHED_MODES: usize = 8;
+const MAX_CACHED_BYTES: u64 = 40 * 1024 * 1024 * 1024;
+
 pub struct MathEngine {
     cfg: ServerConfig,
     configs: DashMap<String, Arc<OnceCell<Arc<GameConfig>>>>,
     modes: DashMap<String, Arc<OnceCell<Arc<ModeAssets>>>>,
+    mode_lru: parking_lot::Mutex<Vec<(String, u64)>>,
 }
 
 impl MathEngine {
@@ -43,6 +58,28 @@ impl MathEngine {
             cfg,
             configs: DashMap::new(),
             modes: DashMap::new(),
+            mode_lru: parking_lot::Mutex::new(Vec::new()),
+        }
+    }
+
+    fn touch_mode_cache(&self, key: &str, bytes: u64) {
+        let evicted: Vec<(String, u64)> = {
+            let mut lru = self.mode_lru.lock();
+            lru.retain(|(k, _)| k != key);
+            lru.push((key.to_string(), bytes));
+            let mut evicted = Vec::new();
+            // Always keep at least the entry just touched, whatever its size.
+            while lru.len() > 1
+                && (lru.len() > MAX_CACHED_MODES
+                    || lru.iter().map(|(_, b)| *b).sum::<u64>() > MAX_CACHED_BYTES)
+            {
+                evicted.push(lru.remove(0));
+            }
+            evicted
+        };
+        for (old, old_bytes) in evicted {
+            self.modes.remove(&old);
+            tracing::info!(mode = %old, gib = old_bytes / (1024 * 1024 * 1024), "evicted books cache (LRU)");
         }
     }
 
@@ -108,20 +145,29 @@ impl MathEngine {
         let key = format!("{game}:{}", mode.name);
         let cell = self
             .modes
-            .entry(key)
+            .entry(key.clone())
             .or_insert_with(|| Arc::new(OnceCell::new()))
             .clone();
         let game = game.to_string();
         let mode = mode.clone();
-        cell.get_or_try_init(|| async move {
+        let assets = cell.get_or_try_init(|| async move {
             let weights_bytes = self.read_file(&game, &mode.weights).await?;
-            let books_bytes = self.read_file(&game, &mode.events).await?;
 
             let weights_text = String::from_utf8(weights_bytes)
                 .map_err(|e| AppError::Parse(format!("weights utf8: {e}")))?;
             let sampler = parse_weights(&weights_text)?;
 
-            let books = decompress_and_index(&books_bytes)?;
+            // Stream the compressed books straight from disk: at up to ~1 GiB
+            // compressed, buffering the whole file first would leave a same-
+            // sized hole in the allocator's large-block cache on every load.
+            let books_path = self.file_path(&game, &mode.events);
+            let books_file = std::fs::File::open(&books_path)
+                .map_err(|e| AppError::Parse(format!("read {}: {e}", books_path.display())))?;
+            let required_ids: Vec<u32> = sampler.entries.iter().map(|e| e.event_id).collect();
+            let books = decompress_and_index(
+                std::io::BufReader::with_capacity(4 << 20, books_file),
+                &required_ids,
+            )?;
 
             Ok::<Arc<ModeAssets>, AppError>(Arc::new(ModeAssets {
                 sampler: Arc::new(sampler),
@@ -129,7 +175,9 @@ impl MathEngine {
             }))
         })
         .await
-        .cloned()
+        .cloned()?;
+        self.touch_mode_cache(&key, assets.books.buffer.len() as u64);
+        Ok(assets)
     }
 
     pub async fn preload(&self, game: &str) -> AppResult<()> {
@@ -398,19 +446,34 @@ fn parse_weights(text: &str) -> AppResult<WeightSampler> {
     })
 }
 
-fn decompress_and_index(compressed: &[u8]) -> AppResult<BooksIndex> {
-    let buffer = zstd::decode_all(compressed).map_err(|e| AppError::Zstd(e.to_string()))?;
+fn decompress_and_index(
+    compressed: impl std::io::Read,
+    required_ids: &[u32],
+) -> AppResult<BooksIndex> {
+    // Stream-decompress into an unlinked temp file, then mmap it read-only.
+    // The temp file has no path (already deleted); the OS frees the disk space
+    // as soon as the mmap is dropped.
+    let file = tempfile::tempfile().map_err(|e| AppError::Zstd(format!("temp books file: {e}")))?;
 
-    let mut id_to_range = HashMap::with_capacity(buffer.len() / 512 + 1);
-    let mut stream =
-        serde_json::Deserializer::from_slice(&buffer).into_iter::<serde::de::IgnoredAny>();
-    while let Some(item) = {
-        let start = stream.byte_offset();
-        stream.next().map(|item| (start, item))
-    } {
-        let (start, item) = item;
-        item.map_err(|e| AppError::Parse(format!("books json stream at byte {start}: {e}")))?;
-        index_record(&buffer, start, stream.byte_offset(), &mut id_to_range);
+    // Fast path: math-sdk publish files are strict JSONL, so ids can be
+    // harvested from line starts while the decompressed stream is being
+    // written out — the multi-GiB buffer is never re-read. Trust the result
+    // only if it accounts for every id the weights table can ask for;
+    // otherwise (adjacent records, multi-line values…) fall back to an
+    // exhaustive JSON stream scan of the mmap.
+    let mut writer = IndexingWriter::new(std::io::BufWriter::with_capacity(4 << 20, file));
+    zstd::stream::copy_decode(compressed, &mut writer)
+        .map_err(|e| AppError::Zstd(e.to_string()))?;
+    let (writer, mut id_to_range) = writer.finish();
+    let file = writer
+        .into_inner()
+        .map_err(|e| AppError::Zstd(format!("flush books: {e}")))?;
+    let buffer =
+        unsafe { Mmap::map(&file) }.map_err(|e| AppError::Zstd(format!("mmap books: {e}")))?;
+
+    if !required_ids.iter().all(|id| id_to_range.contains_key(id)) {
+        tracing::warn!("line-based books index incomplete; falling back to full JSON scan");
+        id_to_range = index_by_json_stream(&buffer)?;
     }
 
     Ok(BooksIndex {
@@ -419,17 +482,112 @@ fn decompress_and_index(compressed: &[u8]) -> AppResult<BooksIndex> {
     })
 }
 
+/// The first bytes of a line always suffice to read its `id` field
+/// (`{"id":N` with optional whitespace), so no full line is ever buffered.
+const LINE_HEAD_CAP: usize = 64;
+
+/// Write adapter that forwards the decompressed stream to `inner` while
+/// building the id → byte-range index from line boundaries on the fly.
+struct IndexingWriter<W: std::io::Write> {
+    inner: W,
+    offset: u64,
+    line_start: u64,
+    head: Vec<u8>,
+    id_to_range: HashMap<u32, (u64, u64)>,
+}
+
+impl<W: std::io::Write> IndexingWriter<W> {
+    fn new(inner: W) -> Self {
+        Self {
+            inner,
+            offset: 0,
+            line_start: 0,
+            head: Vec::with_capacity(LINE_HEAD_CAP),
+            id_to_range: HashMap::with_capacity(64 * 1024),
+        }
+    }
+
+    fn feed(&mut self, buf: &[u8]) {
+        let mut pos = 0usize;
+        while pos < buf.len() {
+            match memchr::memchr(b'\n', &buf[pos..]) {
+                Some(i) => {
+                    let take = i.min(LINE_HEAD_CAP.saturating_sub(self.head.len()));
+                    self.head.extend_from_slice(&buf[pos..pos + take]);
+                    if let Some(id) = read_id_field(&self.head) {
+                        let nl_abs = self.offset + (pos + i) as u64;
+                        self.id_to_range.insert(id, (self.line_start, nl_abs));
+                        self.line_start = nl_abs + 1;
+                    } else {
+                        self.line_start = self.offset + (pos + i) as u64 + 1;
+                    }
+                    self.head.clear();
+                    pos += i + 1;
+                }
+                None => {
+                    let take = (buf.len() - pos).min(LINE_HEAD_CAP.saturating_sub(self.head.len()));
+                    self.head.extend_from_slice(&buf[pos..pos + take]);
+                    break;
+                }
+            }
+        }
+        self.offset += buf.len() as u64;
+    }
+
+    fn finish(mut self) -> (W, HashMap<u32, (u64, u64)>) {
+        // Trailing line without a final newline.
+        if self.offset > self.line_start {
+            if let Some(id) = read_id_field(&self.head) {
+                self.id_to_range.insert(id, (self.line_start, self.offset));
+            }
+        }
+        self.id_to_range.shrink_to_fit();
+        (self.inner, self.id_to_range)
+    }
+}
+
+impl<W: std::io::Write> std::io::Write for IndexingWriter<W> {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.inner.write_all(buf)?;
+        self.feed(buf);
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.inner.flush()
+    }
+}
+
+fn index_by_json_stream(buffer: &[u8]) -> AppResult<HashMap<u32, (u64, u64)>> {
+    // Books average well above 512 bytes each (often tens of KB), so sizing the
+    // map from len/512 over-allocates by orders of magnitude on multi-GiB
+    // files; start modest and shrink once the real count is known.
+    let mut id_to_range = HashMap::with_capacity(64 * 1024);
+    let mut stream =
+        serde_json::Deserializer::from_slice(buffer).into_iter::<serde::de::IgnoredAny>();
+    while let Some(item) = {
+        let start = stream.byte_offset();
+        stream.next().map(|item| (start, item))
+    } {
+        let (start, item) = item;
+        item.map_err(|e| AppError::Parse(format!("books json stream at byte {start}: {e}")))?;
+        index_record(buffer, start, stream.byte_offset(), &mut id_to_range);
+    }
+    id_to_range.shrink_to_fit();
+    Ok(id_to_range)
+}
+
 fn index_record(
     buffer: &[u8],
     record_start: usize,
     record_end: usize,
-    id_to_range: &mut HashMap<u32, (u32, u32)>,
+    id_to_range: &mut HashMap<u32, (u64, u64)>,
 ) {
     if record_end <= record_start {
         return;
     }
     if let Some(id) = read_id_field(&buffer[record_start..record_end]) {
-        id_to_range.insert(id, (record_start as u32, record_end as u32));
+        id_to_range.insert(id, (record_start as u64, record_end as u64));
     }
 }
 
@@ -530,7 +688,7 @@ mod tests {
 "#,
         );
 
-        let books = decompress_and_index(&compressed).expect("index books");
+        let books = decompress_and_index(&compressed[..], &[1, 2]).expect("index books");
         let raw = read_event(&books, 2).expect("read event");
 
         assert_eq!(raw.get(), r#"[{"symbol":"B"}]"#);
@@ -542,7 +700,9 @@ mod tests {
             br#"{"id":10,"events":[{"bonus":false}]}{"id":11,"events":[{"bonus":true}]}"#,
         );
 
-        let books = decompress_and_index(&compressed).expect("index books");
+        // Adjacent records defeat the line-based fast path; requiring id 11
+        // must force the fallback JSON stream scan, which still finds it.
+        let books = decompress_and_index(&compressed[..], &[10, 11]).expect("index books");
         let raw = read_event(&books, 11).expect("read event");
 
         assert_eq!(raw.get(), r#"[{"bonus":true}]"#);
