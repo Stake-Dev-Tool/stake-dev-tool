@@ -55,9 +55,21 @@ pub struct Round {
 #[derive(Debug, Clone, Deserialize)]
 pub struct GameMode {
     pub name: String,
+    /// Cost multiplier of the mode. math-sdk emits this either as an integer
+    /// or as a float (`"cost": 300.0`) depending on the generator version, so
+    /// accept both and round to the RGS's integer cost model.
+    #[serde(deserialize_with = "de_cost")]
     pub cost: u64,
     pub events: String,
     pub weights: String,
+}
+
+fn de_cost<'de, D: serde::Deserializer<'de>>(d: D) -> Result<u64, D::Error> {
+    let raw = f64::deserialize(d)?;
+    if !raw.is_finite() || raw < 0.0 {
+        return Err(serde::de::Error::custom(format!("invalid mode cost {raw}")));
+    }
+    Ok((raw.round() as u64).max(1))
 }
 
 #[derive(Debug, Clone, Deserialize)]
