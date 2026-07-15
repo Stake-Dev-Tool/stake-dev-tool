@@ -8,7 +8,7 @@ pub const INITIAL_BALANCE: u64 = 10_000 * API_MULTIPLIER;
 pub const SUPPORTED_CURRENCIES: &[&str] = &[
     "USD", "CAD", "JPY", "EUR", "RUB", "CNY", "PHP", "INR", "IDR", "KRW", "BRL", "MXN", "DKK",
     "PLN", "VND", "TRY", "CLP", "ARS", "PEN", "NGN", "SAR", "ILS", "AED", "TWD", "NOK", "KWD",
-    "JOD", "CRC", "TND", "SGD", "MYR", "OMR", "QAR", "BHD", "XGC", "XSC",
+    "JOD", "CRC", "TND", "SGD", "MYR", "OMR", "QAR", "BHD", "XGC", "XSC", "XEC",
 ];
 
 pub fn intern_currency(c: &str) -> &'static str {
@@ -115,5 +115,16 @@ impl ServerConfig {
             math_dir: env::var("LGS_MATH_DIR").unwrap_or_else(|_| "./math".to_string()),
             ui_dir: env::var("LGS_UI_DIR").ok().map(std::path::PathBuf::from),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn supports_regional_social_currencies() {
+        assert_eq!(intern_currency("XSC"), "XSC");
+        assert_eq!(intern_currency("xec"), "XEC");
     }
 }
