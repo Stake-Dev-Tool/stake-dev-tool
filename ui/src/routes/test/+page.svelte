@@ -50,9 +50,9 @@
   import ZapIcon from '@lucide/svelte/icons/zap';
   import HistoryIcon from '@lucide/svelte/icons/history';
 
-  // Stake social-mode currencies (XGC = Gold Coin, XSC = Stake Cash) only
-  // make sense when social=true; hide them otherwise.
-  const SOCIAL_CURRENCIES = new Set(['XGC', 'XSC']);
+  // Stake social-mode currencies only make sense when social=true; hide them
+  // otherwise. XSC and XEC both use the SC display symbol.
+  const SOCIAL_CURRENCIES = new Set(['XGC', 'XSC', 'XEC']);
   const realCurrencies = CURRENCIES.filter((c) => !SOCIAL_CURRENCIES.has(c.code));
   const socialCurrencies = CURRENCIES.filter((c) => SOCIAL_CURRENCIES.has(c.code));
 
@@ -76,10 +76,9 @@
   let social = $state(false);
   let device = $state('desktop');
 
-  // Available currencies depend on social mode: XGC/XSC are social-only.
   const availableCurrencies = $derived(social ? socialCurrencies : realCurrencies);
 
-  // Auto-switch currency when toggling social mode in/out of valid set.
+  // Auto-switch currency when toggling social mode in or out of its valid set.
   function toggleSocial(next: boolean) {
     social = next;
     if (social) {

@@ -467,7 +467,8 @@ export const CURRENCIES: CurrencyInfo[] = [
   { code: 'QAR', name: 'Qatar Riyal',                symbol: 'QAR',  country: 'qa' },
   { code: 'BHD', name: 'Bahraini Dinar',             symbol: 'BD',   country: 'bh' },
   { code: 'XGC', name: 'Stake Gold Coin',            symbol: 'GC',   country: null, badge: 'GC' },
-  { code: 'XSC', name: 'Stake Cash',                 symbol: 'SC',   country: null, badge: 'SC' }
+  { code: 'XSC', name: 'Stake Cash (US)',            symbol: 'SC',   country: null, badge: 'SC' },
+  { code: 'XEC', name: 'Stake Cash (EU)',            symbol: 'SC',   country: null, badge: 'SC' }
 ];
 
 export function flagUrl(country: string | null | undefined, height = 20): string | null {
