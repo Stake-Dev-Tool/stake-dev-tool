@@ -2367,7 +2367,7 @@ checksum = "09edd9e8b54e49e587e4f6295a7d29c3ea94d469cb40ab8ca70b288248a81db2"
 
 [[package]]
 name = "lgs"
-version = "1.2.1"
+version = "1.2.2"
 dependencies = [
  "anyhow",
  "arc-swap",
@@ -2406,7 +2406,7 @@ dependencies = [
 
 [[package]]
 name = "lgs-wasm"
-version = "1.2.1"
+version = "1.2.2"
 dependencies = [
  "getrandom 0.2.17",
  "gloo-net",
@@ -4647,7 +4647,7 @@ checksum = "6ce2be8dc25455e1f91df71bfa12ad37d7af1092ae736f3a6cd0e37bc7810596"
 
 [[package]]
 name = "stake-dev-tool"
-version = "1.2.1"
+version = "1.2.2"
 dependencies = [
  "anyhow",
  "base64 0.22.1",

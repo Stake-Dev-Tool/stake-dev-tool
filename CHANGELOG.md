@@ -5,6 +5,44 @@ All notable changes to this project are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [1.2.2] — 2026-07-20
+
+### Fixed
+
+- **Runaway books-cache memory usage.** Decompressed books now use read-only,
+  temporary-file-backed memory maps instead of permanently retained heap
+  buffers. The mode cache evicts least-recently-used entries beyond eight
+  modes or 40 GiB of cached decompressed data while preserving in-flight
+  requests safely.
+- **Books larger than 4 GiB now read correctly.** Book byte ranges use 64-bit
+  offsets, preventing wrapped offsets and corrupted outcomes beyond the 4 GiB
+  boundary.
+- **Mode costs emitted as integer-valued floats are accepted.** Values such as
+  `300.0` now deserialize without silently rounding invalid fractional costs.
+- **Concurrent cache eviction is consistent.** Stale cache cells can no longer
+  recreate phantom LRU entries or remove a newly active cache entry.
+
+### Changed
+
+- Books are indexed while being decompressed for normal JSONL publications,
+  with exhaustive JSON-stream fallback for incompatible layouts.
+- Blocking book decompression and file I/O run outside asynchronous request
+  workers.
+- Added regression coverage for LRU limits, stale cache entries, multiline and
+  adjacent books, and event reads beyond the 4 GiB boundary.
+
+## [1.2.1] — 2026-07-17
+
+### Added
+
+- Added XEC to the supported social currencies.
+
+## [1.2.0] — 2026-06-30
+
+### Changed
+
+- Persisted sidebar state and added dynamic canvas resizing.
+
 ## [1.1.0] — 2026-05-14
 
 ### Added
