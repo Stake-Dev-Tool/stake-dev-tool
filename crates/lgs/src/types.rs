@@ -55,9 +55,40 @@ pub struct Round {
 #[derive(Debug, Clone, Deserialize)]
 pub struct GameMode {
     pub name: String,
+    /// Cost multiplier of the mode. math-sdk emits this either as an integer
+    /// or as a float (`"cost": 300.0`) depending on the generator version, so
+    /// accept integer-valued forms without silently rounding invalid costs.
+    #[serde(deserialize_with = "de_cost")]
     pub cost: u64,
     pub events: String,
     pub weights: String,
+}
+
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum CostValue {
+    Integer(u64),
+    Float(f64),
+}
+
+fn de_cost<'de, D: serde::Deserializer<'de>>(d: D) -> Result<u64, D::Error> {
+    match CostValue::deserialize(d)? {
+        CostValue::Integer(value) if value > 0 => Ok(value),
+        CostValue::Float(value)
+            if value.is_finite()
+                && value >= 1.0
+                && value.fract() == 0.0
+                && value < u64::MAX as f64 =>
+        {
+            Ok(value as u64)
+        }
+        CostValue::Integer(value) => Err(serde::de::Error::custom(format!(
+            "invalid mode cost {value}; expected a positive integer"
+        ))),
+        CostValue::Float(value) => Err(serde::de::Error::custom(format!(
+            "invalid mode cost {value}; expected a positive integer"
+        ))),
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -70,6 +101,35 @@ pub struct WeightEntry {
     pub event_id: u32,
     pub weight: u64,
     pub payout_multiplier: u32,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn mode_with_cost(cost: &str) -> Result<GameMode, sonic_rs::Error> {
+        sonic_rs::from_str(&format!(
+            r#"{{"name":"base","cost":{cost},"events":"books.zst","weights":"weights.csv"}}"#
+        ))
+    }
+
+    #[test]
+    fn mode_cost_accepts_integer_and_integer_valued_float() {
+        assert_eq!(mode_with_cost("300").expect("integer cost").cost, 300);
+        assert_eq!(
+            mode_with_cost("300.0")
+                .expect("integer-valued float cost")
+                .cost,
+            300
+        );
+    }
+
+    #[test]
+    fn mode_cost_rejects_values_that_would_be_silently_changed() {
+        assert!(mode_with_cost("300.5").is_err());
+        assert!(mode_with_cost("0").is_err());
+        assert!(mode_with_cost("-1").is_err());
+    }
 }
 
 #[derive(Debug, Serialize)]
