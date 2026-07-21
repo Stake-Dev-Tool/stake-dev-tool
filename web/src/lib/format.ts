@@ -33,6 +33,66 @@ export function errorText(e: unknown): string {
   return String(e);
 }
 
+/** Human-readable byte size (base-1024): "—", "512 B", "1.4 KB", "23.0 MB". */
+export function humanSize(bytes: number | null | undefined): string {
+  if (bytes == null || !Number.isFinite(bytes) || bytes < 0) return '—';
+  if (bytes < 1024) return `${Math.round(bytes)} B`;
+  const units = ['KB', 'MB', 'GB', 'TB'];
+  let v = bytes / 1024;
+  let i = 0;
+  while (v >= 1024 && i < units.length - 1) {
+    v /= 1024;
+    i++;
+  }
+  return `${v < 10 ? v.toFixed(1) : Math.round(v)} ${units[i]}`;
+}
+
+/** Relative age from an ISO timestamp: "just now", "5m ago", "3h ago", "2d ago", else a date. */
+export function relativeAge(iso: string | null | undefined): string {
+  if (!iso) return '—';
+  const t = new Date(iso).getTime();
+  if (Number.isNaN(t)) return '—';
+  const secs = Math.max(0, Math.floor((Date.now() - t) / 1000));
+  if (secs < 45) return 'just now';
+  const mins = Math.round(secs / 60);
+  if (mins < 60) return `${mins}m ago`;
+  const hours = Math.round(mins / 60);
+  if (hours < 24) return `${hours}h ago`;
+  const days = Math.round(hours / 24);
+  if (days < 7) return `${days}d ago`;
+  return formatDate(iso);
+}
+
+/** RTP fraction (0.965) → "96.50%". Tolerant of null/invalid. */
+export function formatRtp(rtp: number | null | undefined): string {
+  if (rtp == null || !Number.isFinite(rtp)) return '—';
+  return `${(rtp * 100).toFixed(2)}%`;
+}
+
+/**
+ * Signed RTP delta in percentage points between two fractions: "+0.50", "−1.20",
+ * "0.00". Uses a real minus sign for negatives. Returns "—" for invalid input.
+ */
+export function formatRtpDelta(before: number | null | undefined, after: number | null | undefined): string {
+  if (before == null || after == null || !Number.isFinite(before) || !Number.isFinite(after)) return '—';
+  const pp = (after - before) * 100;
+  if (pp === 0) return '0.00';
+  const s = Math.abs(pp).toFixed(2);
+  return pp > 0 ? `+${s}` : `−${s}`;
+}
+
+/** Max-win multiplier → "×5,000". Tolerant of null/invalid. */
+export function formatMultiplier(x: number | null | undefined): string {
+  if (x == null || !Number.isFinite(x)) return '—';
+  return `×${x.toLocaleString(undefined, { maximumFractionDigits: 2 })}`;
+}
+
+/** Bet cost per mode → grouped number ("1", "100", "1.5"). Tolerant of null/invalid. */
+export function formatCost(cost: number | null | undefined): string {
+  if (cost == null || !Number.isFinite(cost)) return '—';
+  return cost.toLocaleString(undefined, { maximumFractionDigits: 2 });
+}
+
 /** Sanitize a `?next=` redirect target: only allow internal absolute paths. */
 export function safeNext(next: string | null | undefined, fallback = '/'): string {
   if (!next) return fallback;

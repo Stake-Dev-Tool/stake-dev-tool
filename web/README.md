@@ -53,6 +53,26 @@ static asset or `/api/*`. That fallback is what makes deep links work.
   calls `/api/auth/me` once. The root `+layout.svelte` runs the client-side
   auth guard and redirects unauthenticated users to `/login?next=…`. `/login`
   and `/invite/:token` are the only public routes.
-- **Routes:** `/login`, `/` (workspaces), `/w/[slug]` (members + invites),
+- **Routes:** `/login`, `/` (workspaces), `/w/[slug]` (games + members +
+  invites), `/w/[slug]/g/[game]` (revision list), `/w/[slug]/g/[game]/r/[number]`
+  (revision detail), `/w/[slug]/g/[game]/diff/[a]/[b]` (revision diff),
   `/invite/[token]` (public accept), `/device` (device-code approval),
   `/account` (API tokens + logout).
+
+## Games & revisions
+
+The `/w/[slug]/g/*` routes surface **M2 math revisions**, and are strictly
+**read-only** — games and revisions are immutable snapshots created by CI via
+`sdt push`, never from the dashboard (empty states say so and offer a copyable
+command). The workspace page lists games (name, slug, head-revision badge); a
+game page shows its revisions newest-first (message, author, age, file count,
+size, and a bet-stats badge) with a two-select **Compare** picker into the diff
+view. A revision page shows its file manifest (path, human size, copyable short
+hash) and the server-computed bet-stats table (mode, cost, RTP as a percentage,
+max win as a ×multiplier, entries); while stats are `pending` it **polls the
+detail endpoint every 3s** (an `$effect` teardown stops the poll on `ok`/`error`
+and on unmount). The diff view (`/diff/[a]/[b]`, `a` = after, `b` = before)
+renders file add/remove/change chips and per-mode before→after stats with a
+signed RTP delta in percentage points. All wire shapes live behind `normalize*`
+helpers in `api.ts` (`api.games.*`) exactly like the M1 surface, ready to
+reconcile against the generated `crates/protocol` bindings at integration.

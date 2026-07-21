@@ -107,6 +107,99 @@ export interface CreatedToken extends ApiToken {
 }
 
 // ---------------------------------------------------------------------------
+// Games & math revisions (M2)
+// ---------------------------------------------------------------------------
+
+/** Status of the server-computed per-revision bet-stats. */
+export type StatsStatus = 'pending' | 'ok' | 'error';
+
+export interface Game {
+  id: string;
+  slug: string;
+  name: string;
+  /** Newest revision number, or null when the game has no revisions yet. */
+  head_number: number | null;
+  revisions_count: number;
+  created_at: string;
+}
+
+/** A row in a game's revision list (newest first). */
+export interface RevisionSummary {
+  number: number;
+  message: string;
+  author_display_name: string | null;
+  created_at: string;
+  files_count: number;
+  total_size: number;
+  stats_status: StatsStatus | null;
+}
+
+export interface RevisionFile {
+  path: string;
+  hash: string;
+  size: number;
+}
+
+/** One bet mode's computed stats (RTP as a fraction, max_win as a multiplier). */
+export interface StatsMode {
+  mode: string;
+  cost: number;
+  rtp: number;
+  max_win: number;
+  entries: number | null;
+}
+
+export interface RevisionStats {
+  status: StatsStatus;
+  error: string | null;
+  modes: StatsMode[];
+}
+
+export interface RevisionDetail {
+  number: number;
+  message: string;
+  author_display_name: string | null;
+  created_at: string;
+  files: RevisionFile[];
+  /** null when the server carries no stats object for this revision. */
+  stats: RevisionStats | null;
+}
+
+/** One file entry in a diff. `size` is set for added/removed; `before_size`/`after_size` for changed. */
+export interface DiffFile {
+  path: string;
+  size: number | null;
+  before_size: number | null;
+  after_size: number | null;
+}
+
+export interface DiffFiles {
+  added: DiffFile[];
+  removed: DiffFile[];
+  changed: DiffFile[];
+  unchanged: number;
+}
+
+export interface DiffModeSide {
+  cost: number;
+  rtp: number;
+  max_win: number;
+}
+
+/** One mode compared across revisions. A side is null when the mode is new/removed. */
+export interface DiffMode {
+  mode: string;
+  before: DiffModeSide | null;
+  after: DiffModeSide | null;
+}
+
+export interface RevisionDiff {
+  files: DiffFiles;
+  /** modes is empty when neither revision has computed stats (show "unavailable"). */
+  stats: { modes: DiffMode[] };
+}
+
+// ---------------------------------------------------------------------------
 // Error type
 // ---------------------------------------------------------------------------
 
@@ -224,6 +317,138 @@ function normalizeUser(raw: unknown): User {
   };
 }
 
+// ---- Games & revisions -----------------------------------------------------
+
+/** Coerce to a finite number, else a fallback (default 0). */
+function num(v: unknown, fallback = 0): number {
+  const n = Number(v);
+  return Number.isFinite(n) ? n : fallback;
+}
+
+/** Coerce to a finite number, or null when absent/invalid. */
+function numOrNull(v: unknown): number | null {
+  if (v == null) return null;
+  const n = Number(v);
+  return Number.isFinite(n) ? n : null;
+}
+
+/** Coerce to a string, or null when absent (preserves "null author" vs ""). */
+function strOrNull(v: unknown): string | null {
+  return v == null ? null : String(v);
+}
+
+function asStatsStatus(v: unknown): StatsStatus | null {
+  return v === 'pending' || v === 'ok' || v === 'error' ? v : null;
+}
+
+function normalizeGame(raw: unknown): Game {
+  const g = (raw ?? {}) as Record<string, unknown>;
+  return {
+    id: String(g.id ?? ''),
+    slug: String(g.slug ?? ''),
+    name: String(g.name ?? g.slug ?? ''),
+    head_number: numOrNull(g.head_number),
+    revisions_count: num(g.revisions_count),
+    created_at: String(g.created_at ?? '')
+  };
+}
+
+function normalizeRevisionSummary(raw: unknown): RevisionSummary {
+  const r = (raw ?? {}) as Record<string, unknown>;
+  return {
+    number: num(r.number),
+    message: String(r.message ?? ''),
+    author_display_name: strOrNull(r.author_display_name),
+    created_at: String(r.created_at ?? ''),
+    files_count: num(r.files_count),
+    total_size: num(r.total_size),
+    stats_status: asStatsStatus(r.stats_status)
+  };
+}
+
+function normalizeRevisionFile(raw: unknown): RevisionFile {
+  const f = (raw ?? {}) as Record<string, unknown>;
+  return {
+    path: String(f.path ?? ''),
+    hash: String(f.hash ?? ''),
+    size: num(f.size)
+  };
+}
+
+function normalizeStatsMode(raw: unknown): StatsMode {
+  const m = (raw ?? {}) as Record<string, unknown>;
+  return {
+    mode: String(m.mode ?? ''),
+    cost: num(m.cost),
+    rtp: num(m.rtp),
+    max_win: num(m.max_win),
+    entries: numOrNull(m.entries)
+  };
+}
+
+function normalizeRevisionStats(raw: unknown): RevisionStats | null {
+  if (raw == null) return null;
+  const s = raw as Record<string, unknown>;
+  const modes = Array.isArray(s.modes) ? s.modes.map(normalizeStatsMode) : [];
+  return {
+    status: asStatsStatus(s.status) ?? 'pending',
+    error: strOrNull(s.error),
+    modes
+  };
+}
+
+function normalizeRevisionDetail(raw: unknown): RevisionDetail {
+  const r = (raw ?? {}) as Record<string, unknown>;
+  const files = Array.isArray(r.files) ? r.files.map(normalizeRevisionFile) : [];
+  return {
+    number: num(r.number),
+    message: String(r.message ?? ''),
+    author_display_name: strOrNull(r.author_display_name),
+    created_at: String(r.created_at ?? ''),
+    files,
+    stats: normalizeRevisionStats(r.stats)
+  };
+}
+
+function normalizeDiffFile(raw: unknown): DiffFile {
+  const f = (raw ?? {}) as Record<string, unknown>;
+  return {
+    path: String(f.path ?? ''),
+    size: numOrNull(f.size),
+    before_size: numOrNull(f.before_size),
+    after_size: numOrNull(f.after_size)
+  };
+}
+
+function normalizeDiffModeSide(raw: unknown): DiffModeSide | null {
+  if (raw == null) return null;
+  const s = raw as Record<string, unknown>;
+  return { cost: num(s.cost), rtp: num(s.rtp), max_win: num(s.max_win) };
+}
+
+function normalizeDiffMode(raw: unknown): DiffMode {
+  const m = (raw ?? {}) as Record<string, unknown>;
+  return {
+    mode: String(m.mode ?? ''),
+    before: normalizeDiffModeSide(m.before),
+    after: normalizeDiffModeSide(m.after)
+  };
+}
+
+function normalizeRevisionDiff(raw: unknown): RevisionDiff {
+  const r = (raw ?? {}) as Record<string, unknown>;
+  const filesRaw = (r.files ?? {}) as Record<string, unknown>;
+  const files: DiffFiles = {
+    added: (Array.isArray(filesRaw.added) ? filesRaw.added : []).map(normalizeDiffFile),
+    removed: (Array.isArray(filesRaw.removed) ? filesRaw.removed : []).map(normalizeDiffFile),
+    changed: (Array.isArray(filesRaw.changed) ? filesRaw.changed : []).map(normalizeDiffFile),
+    unchanged: num(filesRaw.unchanged)
+  };
+  const statsRaw = (r.stats ?? {}) as Record<string, unknown>;
+  const modes = Array.isArray(statsRaw.modes) ? statsRaw.modes.map(normalizeDiffMode) : [];
+  return { files, stats: { modes } };
+}
+
 // ---------------------------------------------------------------------------
 // Slug helpers (client-side mirror of the server rule)
 // ---------------------------------------------------------------------------
@@ -313,6 +538,46 @@ export const api = {
         'DELETE',
         `/workspaces/${encodeURIComponent(slug)}/members/${encodeURIComponent(userId)}`
       );
+    }
+  },
+
+  games: {
+    async list(slug: string): Promise<Game[]> {
+      const raw = await request<unknown>('GET', `/workspaces/${encodeURIComponent(slug)}/games`);
+      const arr = Array.isArray(raw)
+        ? raw
+        : ((raw as { games?: unknown[] } | undefined)?.games ?? []);
+      return arr.map(normalizeGame);
+    },
+    async revisions(slug: string, game: string): Promise<RevisionSummary[]> {
+      const raw = await request<unknown>(
+        'GET',
+        `/workspaces/${encodeURIComponent(slug)}/games/${encodeURIComponent(game)}/revisions`
+      );
+      const arr = Array.isArray(raw)
+        ? raw
+        : ((raw as { revisions?: unknown[] } | undefined)?.revisions ?? []);
+      return arr.map(normalizeRevisionSummary);
+    },
+    async revision(slug: string, game: string, number: number | string): Promise<RevisionDetail> {
+      const raw = await request<unknown>(
+        'GET',
+        `/workspaces/${encodeURIComponent(slug)}/games/${encodeURIComponent(game)}/revisions/${encodeURIComponent(String(number))}`
+      );
+      return normalizeRevisionDetail(raw);
+    },
+    /** Diff of `a` (after / :number) against `b` (before / :other). */
+    async diff(
+      slug: string,
+      game: string,
+      a: number | string,
+      b: number | string
+    ): Promise<RevisionDiff> {
+      const raw = await request<unknown>(
+        'GET',
+        `/workspaces/${encodeURIComponent(slug)}/games/${encodeURIComponent(game)}/revisions/${encodeURIComponent(String(a))}/diff/${encodeURIComponent(String(b))}`
+      );
+      return normalizeRevisionDiff(raw);
     }
   },
 

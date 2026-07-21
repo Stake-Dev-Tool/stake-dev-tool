@@ -9,7 +9,8 @@
     type Member,
     type Invite,
     type WorkspaceDetail,
-    type CreatedInvite
+    type CreatedInvite,
+    type Game
   } from '$lib/api';
   import { session } from '$lib/session.svelte';
   import { roleTone, formatDate, formatExpiry, errorText } from '$lib/format';
@@ -23,6 +24,8 @@
 
   let detail = $state<WorkspaceDetail | null>(null);
   let invites = $state<Invite[]>([]);
+  let games = $state<Game[]>([]);
+  let gamesError = $state('');
   let loading = $state(true);
   let loadError = $state('');
   let actionError = $state('');
@@ -51,6 +54,7 @@
     loadError = '';
     try {
       detail = await api.workspaces.get(slug);
+      await loadGames();
       if (canManage) {
         await loadInvites();
       } else {
@@ -60,6 +64,18 @@
       loadError = errorText(e);
     } finally {
       loading = false;
+    }
+  }
+
+  // Games are read-only in M2 (created by `sdt push`); a games failure must not
+  // take down the members/invites view, so it carries its own inline error.
+  async function loadGames() {
+    gamesError = '';
+    try {
+      games = await api.games.list(slug);
+    } catch (e) {
+      games = [];
+      gamesError = errorText(e);
     }
   }
 
@@ -212,6 +228,70 @@
         {actionError}
       </p>
     {/if}
+
+    <!-- Games -->
+    <section class="mb-10">
+      <h2 class="mb-3 text-sm font-semibold uppercase tracking-wide text-faint">
+        Games · {games.length}
+      </h2>
+      <Card class="overflow-hidden">
+        {#if gamesError}
+          <div class="px-4 py-6">
+            <p class="text-sm text-danger">{gamesError}</p>
+            <Button variant="outline" size="sm" class="mt-3" onclick={loadGames}>Retry</Button>
+          </div>
+        {:else if games.length === 0}
+          <div class="flex flex-col items-center gap-4 px-6 py-14 text-center">
+            <span class="flex h-11 w-11 items-center justify-center rounded-xl bg-accent/10 text-accent">
+              <svg
+                width="20"
+                height="20"
+                viewBox="0 0 24 24"
+                fill="none"
+                stroke="currentColor"
+                stroke-width="2"
+                stroke-linecap="round"
+                stroke-linejoin="round"
+              >
+                <rect x="2" y="6" width="20" height="12" rx="2" />
+                <path d="M6 12h4M8 10v4M15 12h.01M18 12h.01" />
+              </svg>
+            </span>
+            <div>
+              <h3 class="font-semibold">No games yet</h3>
+              <p class="mx-auto mt-1 max-w-sm text-sm leading-relaxed text-muted">
+                Games and their math revisions are pushed from CI — the dashboard is read-only. Run
+                <span class="font-mono-tab text-text">sdt push</span> to see them here.
+              </p>
+            </div>
+            <div class="w-full max-w-xs"><CopyField value="sdt push" /></div>
+          </div>
+        {:else}
+          {#each games as g (g.id || g.slug)}
+            <a
+              href={`/w/${slug}/g/${g.slug}`}
+              class="flex items-center justify-between gap-4 border-b border-border/60 px-4 py-3.5 transition last:border-0 hover:bg-surface-2"
+            >
+              <div class="min-w-0">
+                <div class="flex items-center gap-2">
+                  <span class="truncate font-medium">{g.name}</span>
+                  {#if g.head_number != null}
+                    <Badge tone="accent">rev {g.head_number}</Badge>
+                  {:else}
+                    <Badge>no revisions</Badge>
+                  {/if}
+                </div>
+                <div class="mt-0.5 truncate font-mono-tab text-xs text-muted">{g.slug}</div>
+              </div>
+              <div class="shrink-0 text-xs text-faint">
+                {g.revisions_count}
+                {g.revisions_count === 1 ? 'revision' : 'revisions'}
+              </div>
+            </a>
+          {/each}
+        {/if}
+      </Card>
+    </section>
 
     <!-- Members -->
     <section class="mb-10">
