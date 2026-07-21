@@ -21,7 +21,7 @@ The Nitro preset can be switched (static hosting, Cloudflare, etc.) via
 
 ## Deploy (stakedevtool.com)
 
-The site ships as a small Node server behind Caddy on the Hetzner VPS,
+The site ships as a small Node server behind Caddy on the netcup VPS,
 next to `crates/server` (see V2.md).
 
 ```bash

@@ -70,7 +70,7 @@ function PrivacyPage() {
       <h2>Who processes it for us</h2>
       <ul>
         <li>
-          <strong>Hetzner Online GmbH</strong> (Germany): server hosting.
+          <strong>netcup GmbH</strong> (Germany): server hosting.
         </li>
         <li>
           <strong>Cloudflare</strong>: DNS and object storage for math blobs

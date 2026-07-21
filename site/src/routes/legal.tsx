@@ -33,10 +33,10 @@ function LegalNoticePage() {
 
       <h2>Hosting</h2>
       <p>
-        The site and service are hosted by <strong>Hetzner Online GmbH</strong>,
-        Industriestr. 25, 91710 Gunzenhausen, Germany (
-        <a href="https://www.hetzner.com" target="_blank" rel="noopener noreferrer">
-          hetzner.com
+        The site and service are hosted by <strong>netcup GmbH</strong>,
+        Emmy-Noether-Str. 10, 76131 Karlsruhe, Germany (
+        <a href="https://www.netcup.com" target="_blank" rel="noopener noreferrer">
+          netcup.com
         </a>
         ).
       </p>
