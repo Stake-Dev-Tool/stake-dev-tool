@@ -369,7 +369,7 @@
       toast.error('Replay bet amount must be between 0.01 and 1000.');
       return;
     }
-    const url = replayUrl(gameUrl, gameSlug, lgsHostPort, {
+    const url = replayUrl(gameUrl, gameSlug, ctx.rgsBase(), {
       mode: replayMode,
       eventId: replayEventId,
       currency,
@@ -440,10 +440,12 @@
 
   let busy = $state(false);
 
-  // The game front (iframe) and replay call back to the LGS/RGS, which is served
-  // same-origin with this workbench, so its host comes from `location`. Devtool
+  // The game front (iframe) and replay call back to the LGS/RGS same-origin, so
+  // their base is routed through the context: `ctx.rgsUrl(slug)` for the play
+  // iframe and `ctx.rgsBase()` for replay. Desktop resolves these to
+  // `location.host[/api/rgs/<slug>]` (byte-identical to before); a cloud context
+  // splices the tenant prefix in so they hit `<host><prefix>/api/rgs/…`. Devtool
   // HTTP/SSE/prepare are apiBase-scoped via `http` (above) instead.
-  const lgsHostPort = location.host;
   const SESSION_STORAGE_PREFIX = 'stake-dev-tool:test-sessions:';
   const SIDEBAR_COLLAPSED_STORAGE_KEY = 'stake-dev-tool:test-sidebar-collapsed';
   const VIEWPORT_STORAGE_PREFIX = 'stake-dev-tool:test-display-viewports:';
@@ -451,9 +453,12 @@
 
   const activeFrame = $derived(frames[0] ?? null);
 
+  // `ctx.storageNamespace` is '' on desktop (key byte-identical to before) and
+  // the tenant prefix on the cloud, so two workspaces sharing one browser origin
+  // never read each other's persisted per-frame session ids (recon B.4).
   function frameSessionStorageKey(): string | null {
     if (!gameSlug || !gameUrl) return null;
-    return `${SESSION_STORAGE_PREFIX}${gameSlug}:${gameUrl}`;
+    return `${SESSION_STORAGE_PREFIX}${ctx.storageNamespace}${gameSlug}:${gameUrl}`;
   }
 
   function defaultSessionIdFor(resolutionId: string): string {
@@ -479,7 +484,8 @@
 
   function displayViewportStorageKey(): string | null {
     if (!gameSlug || !gameUrl) return null;
-    return `${VIEWPORT_STORAGE_PREFIX}${gameSlug}:${gameUrl}`;
+    // Tenant-namespaced for the same reason as the session-id key above.
+    return `${VIEWPORT_STORAGE_PREFIX}${ctx.storageNamespace}${gameSlug}:${gameUrl}`;
   }
 
   function loadPersistedDisplayViewportIds(): Record<string, string> {
@@ -656,10 +662,9 @@
 
   function buildGameUrlFor(sessionId: string): string {
     if (!gameUrl) return '';
-    const rgsUrl = `${lgsHostPort}/api/rgs/${gameSlug}`;
     const u = new URL(gameUrl);
     u.searchParams.set('sessionID', sessionId);
-    u.searchParams.set('rgs_url', rgsUrl);
+    u.searchParams.set('rgs_url', ctx.rgsUrl(gameSlug));
     u.searchParams.set('lang', language);
     u.searchParams.set('currency', currency);
     u.searchParams.set('device', device);

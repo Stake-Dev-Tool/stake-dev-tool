@@ -12,11 +12,14 @@
   import Button from '$lib/components/Button.svelte';
   import Card from '$lib/components/Card.svelte';
   import Badge from '$lib/components/Badge.svelte';
+  import FrontUrlDialog from '$lib/components/FrontUrlDialog.svelte';
 
   let slug = $derived(page.params.slug ?? '');
   let game = $derived(page.params.game ?? '');
   let numParam = $derived(page.params.number ?? '');
   let revNum = $derived(Number(numParam));
+
+  let testOpen = $state(false);
 
   let detail = $state<RevisionDetail | null>(null);
   let loading = $state(true);
@@ -128,17 +131,24 @@
             <span class="font-mono-tab">{humanSize(totalSize)}</span>
           </div>
         </div>
-        {#if revNum > 1}
-          <Button
-            href={`/w/${slug}/g/${game}/diff/${revNum}/${revNum - 1}`}
-            variant="outline"
-            size="sm"
-          >
-            Compare with previous
+        <div class="flex flex-shrink-0 items-center gap-2">
+          <Button variant="outline" size="sm" onclick={() => (testOpen = true)}>
+            Open test view
           </Button>
-        {/if}
+          {#if revNum > 1}
+            <Button
+              href={`/w/${slug}/g/${game}/diff/${revNum}/${revNum - 1}`}
+              variant="outline"
+              size="sm"
+            >
+              Compare with previous
+            </Button>
+          {/if}
+        </div>
       </div>
     </header>
+
+    <FrontUrlDialog bind:open={testOpen} {slug} {game} number={revNum} />
 
     <!-- Stats -->
     <section class="mb-10">

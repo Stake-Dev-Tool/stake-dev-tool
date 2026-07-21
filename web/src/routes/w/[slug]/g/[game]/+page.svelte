@@ -8,11 +8,13 @@
   import Badge from '$lib/components/Badge.svelte';
   import CopyField from '$lib/components/CopyField.svelte';
   import MathPushPanel from '$lib/components/MathPushPanel.svelte';
+  import FrontUrlDialog from '$lib/components/FrontUrlDialog.svelte';
 
   let slug = $derived(page.params.slug ?? '');
   let game = $derived(page.params.game ?? '');
 
   let showPush = $state(false);
+  let testOpen = $state(false);
 
   let gameMeta = $state<Game | null>(null);
   let revisions = $state<RevisionSummary[]>([]);
@@ -119,10 +121,19 @@
       {:else}
         <Badge>no revisions</Badge>
       {/if}
-      {#if !showPush}
-        <Button class="ml-auto" onclick={() => (showPush = true)}>Push a revision</Button>
-      {/if}
+      <div class="ml-auto flex items-center gap-2">
+        {#if headNumber != null}
+          <Button variant="outline" onclick={() => (testOpen = true)}>Open test view</Button>
+        {/if}
+        {#if !showPush}
+          <Button onclick={() => (showPush = true)}>Push a revision</Button>
+        {/if}
+      </div>
     </header>
+
+    {#if headNumber != null}
+      <FrontUrlDialog bind:open={testOpen} {slug} {game} number={headNumber} />
+    {/if}
 
     {#if showPush}
       <div class="mb-8">

@@ -77,6 +77,27 @@ points. All wire shapes live behind `normalize*` helpers in `api.ts`
 (`api.games.*`) exactly like the M1 surface, ready to reconcile against the
 generated `crates/protocol` bindings at integration.
 
+## Test view (M6)
+
+The multi-resolution **test view** — the same page the desktop app embeds — runs
+against the cloud LGS straight from the dashboard. An **Open test view** button on
+the game page (targets the head revision) and on a revision detail page (that
+revision) opens a small **FrontUrlDialog** that collects the game-front URL
+(remembered per game in `localStorage`, warns when an `http://` front would be
+blocked as mixed content on the https dashboard, and hints that hosted front
+bundles arrive with share links in M5). It then opens, in a new tab:
+
+```
+/api/ws/<slug>/g/<game>/r/<number>/test/?gameSlug=<game>&gameUrl=<front>
+```
+
+That path is served same-origin by the M4 tenant router (the LGS embeds the built
+test view), so the session cookie authorizes it. The test view detects the tenant
+prefix off its own `location.pathname` and re-bases every devtool/RGS/replay call
+under it — see `ui/src/lib/testview/context.ts` (`resolveContext`); no desktop
+regression (the prefix-less desktop path is byte-identical). Front bundles are
+brought by the tester for now; M5 will host them same-origin.
+
 ## Browser push
 
 A revision can be pushed from the dashboard without leaving the browser — the
