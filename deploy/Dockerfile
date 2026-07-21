@@ -7,7 +7,9 @@
 # and a slim runtime carries just the binary + the dashboard build.
 
 FROM node:20-alpine AS frontend
-RUN corepack enable
+# Pinned major: corepack would fetch the latest pnpm (11+), which requires
+# Node 22 built-ins and crashes on node:20.
+RUN npm i -g pnpm@10
 WORKDIR /repo
 COPY pnpm-workspace.yaml package.json pnpm-lock.yaml ./
 COPY ui/package.json ui/
