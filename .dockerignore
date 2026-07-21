@@ -1,0 +1,13 @@
+.git
+target
+node_modules
+**/node_modules
+site/.output
+site/.nitro
+site/.tanstack
+ui/build
+ui/.svelte-kit
+web/build
+web/.svelte-kit
+crates/lgs-wasm/pkg
+**/.env

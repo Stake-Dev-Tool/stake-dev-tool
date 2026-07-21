@@ -17,7 +17,32 @@ node site/.output/server/index.mjs
 ```
 
 The Nitro preset can be switched (static hosting, Cloudflare, etc.) via
-`nitro` options in `vite.config.ts` once deployment is decided.
+`nitro` options in `vite.config.ts` if the deployment target ever changes.
+
+## Deploy (stakedevtool.com)
+
+The site ships as a small Node server behind Caddy on the Hetzner VPS,
+next to `crates/server` (see V2.md).
+
+```bash
+# from the repo root
+docker build -f site/Dockerfile -t stakedevtool-site .
+docker run -d --name site --env-file site/.env -p 127.0.0.1:3000:3000 stakedevtool-site
+```
+
+Caddy block (TLS is automatic):
+
+```
+stakedevtool.com {
+    reverse_proxy 127.0.0.1:3000
+}
+www.stakedevtool.com {
+    redir https://stakedevtool.com{uri} permanent
+}
+```
+
+Production `site/.env` needs `SITE_URL=https://stakedevtool.com` plus the
+`POLAR_*` variables (see `.env.example`).
 
 ## Structure
 
