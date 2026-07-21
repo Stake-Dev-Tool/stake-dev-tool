@@ -3,6 +3,7 @@ import { Link } from '@tanstack/react-router'
 const NAV = [
   { to: '/features', label: 'Features' },
   { to: '/cloud', label: 'Cloud' },
+  { to: '/cli', label: 'CLI & MCP' },
   { to: '/pricing', label: 'Pricing' },
   { to: '/open-source', label: 'Open source' },
 ] as const

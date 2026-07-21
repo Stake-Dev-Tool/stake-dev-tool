@@ -10,6 +10,7 @@
 
 import { Route as rootRouteImport } from './routes/__root'
 import { Route as IndexRouteImport } from './routes/index'
+import { Route as CliRouteImport } from './routes/cli'
 import { Route as CloudRouteImport } from './routes/cloud'
 import { Route as FeaturesRouteImport } from './routes/features'
 import { Route as LegalRouteImport } from './routes/legal'
@@ -25,6 +26,11 @@ import { Route as ApiBillingWebhookRouteImport } from './routes/api.billing.webh
 const IndexRoute = IndexRouteImport.update({
   id: '/',
   path: '/',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const CliRoute = CliRouteImport.update({
+  id: '/cli',
+  path: '/cli',
   getParentRoute: () => rootRouteImport,
 } as any)
 const CloudRoute = CloudRouteImport.update({
@@ -85,6 +91,7 @@ const ApiBillingWebhookRoute = ApiBillingWebhookRouteImport.update({
 
 export interface FileRoutesByFullPath {
   '/': typeof IndexRoute
+  '/cli': typeof CliRoute
   '/cloud': typeof CloudRoute
   '/features': typeof FeaturesRoute
   '/legal': typeof LegalRoute
@@ -99,6 +106,7 @@ export interface FileRoutesByFullPath {
 }
 export interface FileRoutesByTo {
   '/': typeof IndexRoute
+  '/cli': typeof CliRoute
   '/cloud': typeof CloudRoute
   '/features': typeof FeaturesRoute
   '/legal': typeof LegalRoute
@@ -114,6 +122,7 @@ export interface FileRoutesByTo {
 export interface FileRoutesById {
   __root__: typeof rootRouteImport
   '/': typeof IndexRoute
+  '/cli': typeof CliRoute
   '/cloud': typeof CloudRoute
   '/features': typeof FeaturesRoute
   '/legal': typeof LegalRoute
@@ -130,6 +139,7 @@ export interface FileRouteTypes {
   fileRoutesByFullPath: FileRoutesByFullPath
   fullPaths:
     | '/'
+    | '/cli'
     | '/cloud'
     | '/features'
     | '/legal'
@@ -144,6 +154,7 @@ export interface FileRouteTypes {
   fileRoutesByTo: FileRoutesByTo
   to:
     | '/'
+    | '/cli'
     | '/cloud'
     | '/features'
     | '/legal'
@@ -158,6 +169,7 @@ export interface FileRouteTypes {
   id:
     | '__root__'
     | '/'
+    | '/cli'
     | '/cloud'
     | '/features'
     | '/legal'
@@ -173,6 +185,7 @@ export interface FileRouteTypes {
 }
 export interface RootRouteChildren {
   IndexRoute: typeof IndexRoute
+  CliRoute: typeof CliRoute
   CloudRoute: typeof CloudRoute
   FeaturesRoute: typeof FeaturesRoute
   LegalRoute: typeof LegalRoute
@@ -193,6 +206,13 @@ declare module '@tanstack/react-router' {
       path: '/'
       fullPath: '/'
       preLoaderRoute: typeof IndexRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/cli': {
+      id: '/cli'
+      path: '/cli'
+      fullPath: '/cli'
+      preLoaderRoute: typeof CliRouteImport
       parentRoute: typeof rootRouteImport
     }
     '/cloud': {
@@ -277,6 +297,7 @@ declare module '@tanstack/react-router' {
 
 const rootRouteChildren: RootRouteChildren = {
   IndexRoute: IndexRoute,
+  CliRoute: CliRoute,
   CloudRoute: CloudRoute,
   FeaturesRoute: FeaturesRoute,
   LegalRoute: LegalRoute,
