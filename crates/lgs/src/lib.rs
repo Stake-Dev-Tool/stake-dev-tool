@@ -8,8 +8,15 @@ pub mod saved_rounds;
 pub mod session;
 pub mod settings;
 pub mod state;
+pub mod tenant;
 pub mod tls;
 pub mod types;
+
+// The multi-tenant surface `crates/server` builds on. Single-tenant callers
+// (standalone binary, desktop app) never need these — they keep using
+// `MathEngine::new` / `AppState::new`, which run under `TenantId::default`.
+pub use math_engine::{BooksCache, DiskMathSource, MathSource};
+pub use tenant::{TenantId, TenantRegistry};
 
 use crate::config::ServerConfig;
 use crate::math_engine::MathEngine;

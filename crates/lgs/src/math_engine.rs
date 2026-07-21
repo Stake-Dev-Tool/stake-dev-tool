@@ -1,5 +1,6 @@
 use crate::config::ServerConfig;
 use crate::error::{AppError, AppResult};
+use crate::tenant::TenantId;
 use crate::types::{GameConfig, GameMode, WeightEntry};
 use dashmap::DashMap;
 use memmap2::Mmap;
@@ -36,8 +37,50 @@ pub struct ModeAssets {
     pub books: Arc<BooksIndex>,
 }
 
+/// Pluggable resolution of a math root to on-disk files. The default
+/// [`DiskMathSource`] reproduces the historical `LGS_MATH_DIR/<game>/<file>`
+/// (nested) layout with a flat `LGS_MATH_DIR/<file>` fallback. The future cloud
+/// server implements this to materialize a tenant's math from object storage
+/// into a per-tenant local dir (which is then itself just a `DiskMathSource`).
+pub trait MathSource: Send + Sync {
+    /// Resolve the on-disk path for `game`/`file`. Mirrors the historical
+    /// resolution exactly, including returning the nested candidate when
+    /// neither candidate exists, so downstream error messages keep pointing at
+    /// the expected location.
+    fn file_path(&self, game: &str, file: &str) -> PathBuf;
+}
+
+/// Default [`MathSource`]: the on-disk layout used by the standalone binary and
+/// the desktop app, rooted at a single math directory.
+pub struct DiskMathSource {
+    root: PathBuf,
+}
+
+impl DiskMathSource {
+    pub fn new(root: impl Into<PathBuf>) -> Self {
+        Self { root: root.into() }
+    }
+}
+
+impl MathSource for DiskMathSource {
+    fn file_path(&self, game: &str, file: &str) -> PathBuf {
+        let nested = self.root.join(game).join(file);
+        if nested.exists() {
+            return nested;
+        }
+
+        let flat = self.root.join(file);
+        if flat.exists() {
+            return flat;
+        }
+
+        nested
+    }
+}
+
 struct CachedMode {
     key: String,
+    tenant: TenantId,
     bytes: u64,
     cell: Arc<OnceCell<Arc<ModeAssets>>>,
 }
@@ -51,29 +94,82 @@ struct CachedMode {
 const MAX_CACHED_MODES: usize = 8;
 const MAX_CACHED_BYTES: u64 = 40 * 1024 * 1024 * 1024;
 
-pub struct MathEngine {
-    cfg: ServerConfig,
-    configs: DashMap<String, Arc<OnceCell<Arc<GameConfig>>>>,
+/// Process-global books cache, shared across every tenant so the decompressed-
+/// bytes budget and mode-count cap are enforced once for the whole process
+/// (exactly the recently-hardened single-tenant behavior, now shared).
+///
+/// Cache keys embed the [`TenantId`], so two tenants hosting a game with the
+/// same slug never share a books mmap. An optional per-tenant byte cap keeps a
+/// single tenant from evicting everyone else out of the shared budget; the
+/// default is uncapped, which reproduces single-tenant behavior exactly.
+pub struct BooksCache {
     modes: DashMap<String, Arc<OnceCell<Arc<ModeAssets>>>>,
-    mode_lru: parking_lot::Mutex<Vec<CachedMode>>,
+    lru: parking_lot::Mutex<Vec<CachedMode>>,
+    max_modes: usize,
+    max_bytes: u64,
+    tenant_caps: DashMap<TenantId, u64>,
 }
 
-impl MathEngine {
-    pub fn new(cfg: ServerConfig) -> Self {
+impl BooksCache {
+    /// A cache with the default process-global budget (`MAX_CACHED_MODES`
+    /// entries / `MAX_CACHED_BYTES` decompressed bytes).
+    pub fn new() -> Self {
+        Self::with_limits(MAX_CACHED_MODES, MAX_CACHED_BYTES)
+    }
+
+    /// A cache with explicit global limits (mainly for tests; production uses
+    /// [`BooksCache::new`]).
+    pub fn with_limits(max_modes: usize, max_bytes: u64) -> Self {
         Self {
-            cfg,
-            configs: DashMap::new(),
             modes: DashMap::new(),
-            mode_lru: parking_lot::Mutex::new(Vec::new()),
+            lru: parking_lot::Mutex::new(Vec::new()),
+            max_modes,
+            max_bytes,
+            tenant_caps: DashMap::new(),
         }
     }
 
-    fn touch_mode_cache(&self, key: &str, cell: &Arc<OnceCell<Arc<ModeAssets>>>, bytes: u64) {
+    /// Set (or clear, with `None`) the maximum decompressed bytes a single
+    /// tenant may hold in the shared cache. Default is uncapped.
+    pub fn set_tenant_cap(&self, tenant: &TenantId, max_bytes: Option<u64>) {
+        match max_bytes {
+            Some(cap) => {
+                self.tenant_caps.insert(tenant.clone(), cap);
+            }
+            None => {
+                self.tenant_caps.remove(tenant);
+            }
+        }
+    }
+
+    /// Compose the tenant-scoped cache key. The unit separator can appear in
+    /// neither tenant ids nor game/mode slugs, so the key is unambiguous. One
+    /// allocation per lookup — the same profile as the previous
+    /// `"{game}:{mode}"` key.
+    fn cache_key(tenant: &TenantId, game: &str, mode: &str) -> String {
+        format!("{}\u{1f}{game}\u{1f}{mode}", tenant.as_str())
+    }
+
+    /// Get (or lazily create) the `OnceCell` for an already-composed key.
+    fn entry_cell(&self, key: &str) -> Arc<OnceCell<Arc<ModeAssets>>> {
+        self.modes
+            .entry(key.to_string())
+            .or_insert_with(|| Arc::new(OnceCell::new()))
+            .clone()
+    }
+
+    fn touch(
+        &self,
+        key: &str,
+        tenant: &TenantId,
+        cell: &Arc<OnceCell<Arc<ModeAssets>>>,
+        bytes: u64,
+    ) {
         // Keep the LRU and DashMap mutation under one lock. A request may have
         // cloned a cell just before another request evicts it; in that case it
         // may finish safely, but it must not re-add a phantom LRU entry for a
         // cell that is no longer present in `modes`.
-        let mut lru = self.mode_lru.lock();
+        let mut lru = self.lru.lock();
         let is_current = self
             .modes
             .get(key)
@@ -85,43 +181,118 @@ impl MathEngine {
         lru.retain(|entry| entry.key != key);
         lru.push(CachedMode {
             key: key.to_string(),
+            tenant: tenant.clone(),
             bytes,
             cell: Arc::clone(cell),
         });
 
-        // Always keep at least the entry just touched, whatever its size.
+        // Per-tenant cap: evict this tenant's oldest entries first (never the
+        // one just touched) until it fits under its cap, so one big tenant
+        // cannot starve the others out of the shared global budget.
+        if let Some(cap) = self.tenant_caps.get(tenant).map(|c| *c) {
+            while tenant_bytes(&lru, tenant) > cap {
+                let Some(pos) = lru
+                    .iter()
+                    .position(|entry| &entry.tenant == tenant && entry.key != key)
+                else {
+                    break;
+                };
+                let old = lru.remove(pos);
+                self.evict(&old);
+            }
+        }
+
+        // Global caps (entry count + total bytes). Always keep at least the
+        // entry just touched, whatever its size.
         while lru.len() > 1
-            && (lru.len() > MAX_CACHED_MODES
-                || lru.iter().map(|entry| entry.bytes).sum::<u64>() > MAX_CACHED_BYTES)
+            && (lru.len() > self.max_modes
+                || lru.iter().map(|entry| entry.bytes).sum::<u64>() > self.max_bytes)
         {
             let old = lru.remove(0);
-            let removed = self
-                .modes
-                .remove_if(&old.key, |_, current| Arc::ptr_eq(current, &old.cell))
-                .is_some();
-            if removed {
-                tracing::info!(
-                    mode = %old.key,
-                    gib = old.bytes / (1024 * 1024 * 1024),
-                    "evicted books cache (LRU)"
-                );
-            }
+            self.evict(&old);
         }
     }
 
+    /// Drop an LRU-selected entry from `modes`, but only if it is still the
+    /// same cell (a concurrent load may have replaced it).
+    fn evict(&self, old: &CachedMode) {
+        let removed = self
+            .modes
+            .remove_if(&old.key, |_, current| Arc::ptr_eq(current, &old.cell))
+            .is_some();
+        if removed {
+            tracing::info!(
+                mode = %old.key,
+                tenant = %old.tenant,
+                gib = old.bytes / (1024 * 1024 * 1024),
+                "evicted books cache (LRU)"
+            );
+        }
+    }
+}
+
+impl Default for BooksCache {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+fn tenant_bytes(lru: &[CachedMode], tenant: &TenantId) -> u64 {
+    lru.iter()
+        .filter(|entry| &entry.tenant == tenant)
+        .map(|entry| entry.bytes)
+        .sum()
+}
+
+/// A per-tenant view over the shared [`BooksCache`], plus that tenant's own
+/// game-config cache and [`MathSource`]. Two `MathEngine`s with different
+/// tenants never share resolved math, parsed configs, or books mmaps — even for
+/// an identical game slug — while all of them honour one process-global cache
+/// budget.
+pub struct MathEngine {
+    tenant: TenantId,
+    source: Arc<dyn MathSource>,
+    books: Arc<BooksCache>,
+    configs: DashMap<String, Arc<OnceCell<Arc<GameConfig>>>>,
+}
+
+impl MathEngine {
+    /// Single-tenant constructor used by the standalone binary and the desktop
+    /// app: math resolves from `cfg.math_dir` on disk, the engine runs under
+    /// [`TenantId::default`], and it owns a private books cache with the default
+    /// process-global budget. Behavior is byte-identical to before
+    /// multi-tenancy existed.
+    pub fn new(cfg: ServerConfig) -> Self {
+        Self::with_source(
+            TenantId::default(),
+            Arc::new(DiskMathSource::new(cfg.math_dir)),
+            Arc::new(BooksCache::new()),
+        )
+    }
+
+    /// Multi-tenant constructor for the cloud server: the caller supplies the
+    /// tenant identity, a pluggable [`MathSource`], and a [`BooksCache`] shared
+    /// across all tenants so the global memory budget is enforced process-wide.
+    pub fn with_source(
+        tenant: TenantId,
+        source: Arc<dyn MathSource>,
+        books: Arc<BooksCache>,
+    ) -> Self {
+        Self {
+            tenant,
+            source,
+            books,
+            configs: DashMap::new(),
+        }
+    }
+
+    /// The tenant this engine serves.
+    pub fn tenant(&self) -> &TenantId {
+        &self.tenant
+    }
+
     fn file_path(&self, game: &str, file: &str) -> PathBuf {
-        let root = PathBuf::from(&self.cfg.math_dir);
-        let nested = root.join(game).join(file);
-        if nested.exists() {
-            return nested;
-        }
-
-        let flat = root.join(file);
-        if flat.exists() {
-            return flat;
-        }
-
-        nested
+        self.source.file_path(game, file)
     }
 
     async fn read_file(&self, game: &str, file: &str) -> AppResult<Vec<u8>> {
@@ -168,12 +339,8 @@ impl MathEngine {
     }
 
     pub async fn load_assets(&self, game: &str, mode: &GameMode) -> AppResult<Arc<ModeAssets>> {
-        let key = format!("{game}:{}", mode.name);
-        let cell = self
-            .modes
-            .entry(key.clone())
-            .or_insert_with(|| Arc::new(OnceCell::new()))
-            .clone();
+        let key = BooksCache::cache_key(&self.tenant, game, &mode.name);
+        let cell = self.books.entry_cell(&key);
         let game = game.to_string();
         let mode = mode.clone();
         let assets = cell
@@ -210,7 +377,8 @@ impl MathEngine {
             })
             .await
             .cloned()?;
-        self.touch_mode_cache(&key, &cell, assets.books.buffer.len() as u64);
+        self.books
+            .touch(&key, &self.tenant, &cell, assets.books.buffer.len() as u64);
         Ok(assets)
     }
 
@@ -849,59 +1017,145 @@ mod tests {
         })
     }
 
-    fn insert_cache_cell(engine: &MathEngine, key: &str) -> Arc<OnceCell<Arc<ModeAssets>>> {
+    #[test]
+    fn new_engine_runs_under_the_default_tenant() {
+        // The standalone/desktop constructor labels its engine with the default
+        // tenant, so single-tenant behavior is preserved.
+        assert_eq!(test_engine().tenant().as_str(), TenantId::DEFAULT_STR);
+    }
+
+    fn insert_cache_cell(cache: &BooksCache, key: &str) -> Arc<OnceCell<Arc<ModeAssets>>> {
         let cell = Arc::new(OnceCell::new());
-        engine.modes.insert(key.to_string(), Arc::clone(&cell));
+        cache.modes.insert(key.to_string(), Arc::clone(&cell));
         cell
     }
 
     #[test]
     fn lru_evicts_the_oldest_mode_by_entry_count() {
-        let engine = test_engine();
+        let cache = BooksCache::new();
+        let tenant = TenantId::default();
         for index in 0..=MAX_CACHED_MODES {
-            let key = format!("game:mode-{index}");
-            let cell = insert_cache_cell(&engine, &key);
-            engine.touch_mode_cache(&key, &cell, 1);
+            let key = BooksCache::cache_key(&tenant, "game", &format!("mode-{index}"));
+            let cell = insert_cache_cell(&cache, &key);
+            cache.touch(&key, &tenant, &cell, 1);
         }
 
-        assert!(!engine.modes.contains_key("game:mode-0"));
-        assert_eq!(engine.modes.len(), MAX_CACHED_MODES);
-        assert_eq!(engine.mode_lru.lock().len(), MAX_CACHED_MODES);
+        assert!(
+            !cache
+                .modes
+                .contains_key(&BooksCache::cache_key(&tenant, "game", "mode-0"))
+        );
+        assert_eq!(cache.modes.len(), MAX_CACHED_MODES);
+        assert_eq!(cache.lru.lock().len(), MAX_CACHED_MODES);
     }
 
     #[test]
     fn lru_evicts_the_oldest_mode_by_decompressed_bytes() {
-        let engine = test_engine();
+        let cache = BooksCache::new();
+        let tenant = TenantId::default();
         let bytes = MAX_CACHED_BYTES / 2 + 1;
         for index in 0..3 {
-            let key = format!("game:large-mode-{index}");
-            let cell = insert_cache_cell(&engine, &key);
-            engine.touch_mode_cache(&key, &cell, bytes);
+            let key = BooksCache::cache_key(&tenant, "game", &format!("large-mode-{index}"));
+            let cell = insert_cache_cell(&cache, &key);
+            cache.touch(&key, &tenant, &cell, bytes);
         }
 
-        assert!(!engine.modes.contains_key("game:large-mode-0"));
-        assert!(!engine.modes.contains_key("game:large-mode-1"));
-        assert!(engine.modes.contains_key("game:large-mode-2"));
-        assert_eq!(engine.mode_lru.lock().len(), 1);
+        assert!(
+            !cache
+                .modes
+                .contains_key(&BooksCache::cache_key(&tenant, "game", "large-mode-0"))
+        );
+        assert!(
+            !cache
+                .modes
+                .contains_key(&BooksCache::cache_key(&tenant, "game", "large-mode-1"))
+        );
+        assert!(
+            cache
+                .modes
+                .contains_key(&BooksCache::cache_key(&tenant, "game", "large-mode-2"))
+        );
+        assert_eq!(cache.lru.lock().len(), 1);
     }
 
     #[test]
     fn stale_cache_cell_cannot_create_a_phantom_lru_entry() {
-        let engine = test_engine();
-        let key = "game:base";
-        let stale = insert_cache_cell(&engine, key);
-        engine.modes.remove(key);
-        let current = insert_cache_cell(&engine, key);
+        let cache = BooksCache::new();
+        let tenant = TenantId::default();
+        let key = BooksCache::cache_key(&tenant, "game", "base");
+        let stale = insert_cache_cell(&cache, &key);
+        cache.modes.remove(&key);
+        let current = insert_cache_cell(&cache, &key);
 
-        engine.touch_mode_cache(key, &stale, 10);
+        cache.touch(&key, &tenant, &stale, 10);
 
-        assert!(engine.mode_lru.lock().is_empty());
+        assert!(cache.lru.lock().is_empty());
         assert!(
-            engine
+            cache
                 .modes
-                .get(key)
+                .get(&key)
                 .is_some_and(|cell| Arc::ptr_eq(cell.value(), &current))
         );
+    }
+
+    #[test]
+    fn per_tenant_cap_evicts_only_within_the_capped_tenant() {
+        // Generous global budget; only tenant A is capped.
+        let cache = BooksCache::with_limits(MAX_CACHED_MODES, MAX_CACHED_BYTES);
+        let a = TenantId::from("workspace-a");
+        let b = TenantId::from("workspace-b");
+        cache.set_tenant_cap(&a, Some(100));
+
+        // Each tenant loads two 60-byte modes under the same slug. Tenant A's
+        // 100-byte cap forces its first mode out; tenant B is uncapped, so both
+        // of B's survive — proving one tenant's cap never touches another's.
+        for tenant in [&a, &b] {
+            for index in 0..2 {
+                let key = BooksCache::cache_key(tenant, "game", &format!("mode-{index}"));
+                let cell = insert_cache_cell(&cache, &key);
+                cache.touch(&key, tenant, &cell, 60);
+            }
+        }
+
+        assert!(
+            !cache
+                .modes
+                .contains_key(&BooksCache::cache_key(&a, "game", "mode-0"))
+        );
+        assert!(
+            cache
+                .modes
+                .contains_key(&BooksCache::cache_key(&a, "game", "mode-1"))
+        );
+        assert!(
+            cache
+                .modes
+                .contains_key(&BooksCache::cache_key(&b, "game", "mode-0"))
+        );
+        assert!(
+            cache
+                .modes
+                .contains_key(&BooksCache::cache_key(&b, "game", "mode-1"))
+        );
+    }
+
+    #[test]
+    fn same_slug_different_tenants_get_distinct_cache_entries() {
+        let cache = BooksCache::new();
+        let a = TenantId::from("tenant-a");
+        let b = TenantId::from("tenant-b");
+        let ka = BooksCache::cache_key(&a, "sweet-bonanza", "base");
+        let kb = BooksCache::cache_key(&b, "sweet-bonanza", "base");
+        assert_ne!(ka, kb);
+
+        let ca = insert_cache_cell(&cache, &ka);
+        let cb = insert_cache_cell(&cache, &kb);
+        cache.touch(&ka, &a, &ca, 1);
+        cache.touch(&kb, &b, &cb, 1);
+
+        assert!(cache.modes.contains_key(&ka));
+        assert!(cache.modes.contains_key(&kb));
+        assert!(!Arc::ptr_eq(&ca, &cb));
     }
 
     #[test]
