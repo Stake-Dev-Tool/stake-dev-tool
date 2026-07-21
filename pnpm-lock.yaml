@@ -192,6 +192,10 @@ importers:
         version: 5.4.21(@types/node@20.19.39)(lightningcss@1.32.0)
 
   web:
+    dependencies:
+      hash-wasm:
+        specifier: ^4.12.0
+        version: 4.12.0
     devDependencies:
       '@sveltejs/adapter-static':
         specifier: ^3.0.6
@@ -2086,6 +2090,9 @@ packages:
     peerDependenciesMeta:
       crossws:
         optional: true
+
+  hash-wasm@4.12.0:
+    resolution: {integrity: sha512-+/2B2rYLb48I/evdOIhP+K/DD2ca2fgBjp6O+GBEnCDk2e4rpeXIK8GvIyRPjTezgmWn9gmKwkQjjx6BtqDHVQ==}
 
   hookable@6.1.1:
     resolution: {integrity: sha512-U9LYDy1CwhMCnprUfeAZWZGByVbhd54hwepegYTK7Pi5NvqEj63ifz5z+xukznehT7i6NIZRu89Ay1AZmRsLEQ==}
@@ -4568,6 +4575,8 @@ snapshots:
       srvx: 0.11.22
     optionalDependencies:
       crossws: 0.4.10(srvx@0.11.22)
+
+  hash-wasm@4.12.0: {}
 
   hookable@6.1.1: {}
 

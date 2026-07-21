@@ -19,6 +19,7 @@
   import Card from '$lib/components/Card.svelte';
   import Badge from '$lib/components/Badge.svelte';
   import CopyField from '$lib/components/CopyField.svelte';
+  import MathPushPanel from '$lib/components/MathPushPanel.svelte';
 
   let slug = $derived(page.params.slug ?? '');
 
@@ -26,6 +27,7 @@
   let invites = $state<Invite[]>([]);
   let games = $state<Game[]>([]);
   let gamesError = $state('');
+  let showNewGame = $state(false);
   let loading = $state(true);
   let loadError = $state('');
   let actionError = $state('');
@@ -67,8 +69,8 @@
     }
   }
 
-  // Games are read-only in M2 (created by `sdt push`); a games failure must not
-  // take down the members/invites view, so it carries its own inline error.
+  // A games-list failure must not take down the members/invites view, so it
+  // carries its own inline error.
   async function loadGames() {
     gamesError = '';
     try {
@@ -77,6 +79,14 @@
       games = [];
       gamesError = errorText(e);
     }
+  }
+
+  // A new game is created implicitly by its first commit; jump to the new
+  // revision (its stats poll there).
+  function onGamePushed(n: number, gameSlug: string) {
+    showNewGame = false;
+    if (n >= 1) void goto(`/w/${slug}/g/${gameSlug}/r/${n}`);
+    else void goto(`/w/${slug}/g/${gameSlug}`);
   }
 
   async function loadInvites() {
@@ -231,9 +241,27 @@
 
     <!-- Games -->
     <section class="mb-10">
-      <h2 class="mb-3 text-sm font-semibold uppercase tracking-wide text-faint">
-        Games · {games.length}
-      </h2>
+      <div class="mb-3 flex items-center justify-between gap-3">
+        <h2 class="text-sm font-semibold uppercase tracking-wide text-faint">
+          Games · {games.length}
+        </h2>
+        {#if !showNewGame}
+          <Button size="sm" onclick={() => (showNewGame = true)}>New game</Button>
+        {/if}
+      </div>
+
+      {#if showNewGame}
+        <div class="mb-4">
+          <MathPushPanel
+            {slug}
+            game={null}
+            parentNumber={null}
+            ondone={(n, gameSlug) => onGamePushed(n, gameSlug)}
+            oncancel={() => (showNewGame = false)}
+          />
+        </div>
+      {/if}
+
       <Card class="overflow-hidden">
         {#if gamesError}
           <div class="px-4 py-6">
@@ -260,8 +288,8 @@
             <div>
               <h3 class="font-semibold">No games yet</h3>
               <p class="mx-auto mt-1 max-w-sm text-sm leading-relaxed text-muted">
-                Games and their math revisions are pushed from CI — the dashboard is read-only. Run
-                <span class="font-mono-tab text-text">sdt push</span> to see them here.
+                Push math straight from your browser with <span class="text-text">New game</span>
+                above, or run <span class="font-mono-tab text-text">sdt push</span> from CI.
               </p>
             </div>
             <div class="w-full max-w-xs"><CopyField value="sdt push" /></div>

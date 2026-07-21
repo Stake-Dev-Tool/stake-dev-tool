@@ -61,18 +61,54 @@ static asset or `/api/*`. That fallback is what makes deep links work.
 
 ## Games & revisions
 
-The `/w/[slug]/g/*` routes surface **M2 math revisions**, and are strictly
-**read-only** — games and revisions are immutable snapshots created by CI via
-`sdt push`, never from the dashboard (empty states say so and offer a copyable
-command). The workspace page lists games (name, slug, head-revision badge); a
-game page shows its revisions newest-first (message, author, age, file count,
-size, and a bet-stats badge) with a two-select **Compare** picker into the diff
-view. A revision page shows its file manifest (path, human size, copyable short
-hash) and the server-computed bet-stats table (mode, cost, RTP as a percentage,
-max win as a ×multiplier, entries); while stats are `pending` it **polls the
-detail endpoint every 3s** (an `$effect` teardown stops the poll on `ok`/`error`
-and on unmount). The diff view (`/diff/[a]/[b]`, `a` = after, `b` = before)
-renders file add/remove/change chips and per-mode before→after stats with a
-signed RTP delta in percentage points. All wire shapes live behind `normalize*`
-helpers in `api.ts` (`api.games.*`) exactly like the M1 surface, ready to
-reconcile against the generated `crates/protocol` bindings at integration.
+The `/w/[slug]/g/*` routes surface **M2 math revisions**. Reads are unchanged;
+revisions can now also be **pushed straight from the browser** (see below) as
+well as from CI via `sdt push`. The workspace page lists games (name, slug,
+head-revision badge); a game page shows its revisions newest-first (message,
+author, age, file count, size, and a bet-stats badge) with a two-select
+**Compare** picker into the diff view. A revision page shows its file manifest
+(path, human size, copyable short hash) and the server-computed bet-stats table
+(mode, cost, RTP as a percentage, max win as a ×multiplier, entries); while
+stats are `pending` it **polls the detail endpoint every 3s** (an `$effect`
+teardown stops the poll on `ok`/`error` and on unmount). The diff view
+(`/diff/[a]/[b]`, `a` = after, `b` = before) renders file add/remove/change
+chips and per-mode before→after stats with a signed RTP delta in percentage
+points. All wire shapes live behind `normalize*` helpers in `api.ts`
+(`api.games.*`) exactly like the M1 surface, ready to reconcile against the
+generated `crates/protocol` bindings at integration.
+
+## Browser push
+
+A revision can be pushed from the dashboard without leaving the browser — the
+same content-addressed flow `sdt push` uses. Session-cookie auth already carries
+the implicit `full` scope (which satisfies `push:math`), so no token is needed.
+
+- **Where:** a **Push a revision** button on the game page (`/w/[slug]/g/[game]`)
+  pushes into that game; a **New game** button on the workspace Games card runs
+  the same flow plus a live-derived, validated game-slug input
+  (`^[a-z0-9][a-z0-9-]{1,38}[a-z0-9]$`). CI (`sdt push`) remains available and is
+  offered alongside in every empty state.
+- **Intake** (`src/lib/components/MathFolderPicker.svelte`): drag a folder
+  (walked via `DataTransferItem.webkitGetAsEntry`) or click to browse
+  (`<input webkitdirectory>`). Paths are made relative POSIX with the top folder
+  stripped; dotfiles are skipped. Rejects a folder with no root `index.json`,
+  more than 1000 files, or nothing usable, and shows a summary (file count, total
+  size, largest file).
+- **Pipeline** (`src/lib/push.ts`, UI-agnostic + unit-testable): sha256 each file
+  with `hash-wasm`, streamed from `file.stream()` in chunks so a multi-GB book is
+  never buffered whole → `POST …/revisions/check` for the missing hashes → `PUT
+  …/blobs/:hash` for each missing blob (unique by hash; the `File` is the fetch
+  body, so uploads stream too; **3 concurrent**) → `POST …/revisions`. A 409
+  `missing_blobs` at commit re-uploads exactly the named hashes and retries the
+  commit **once**. `parent_number` is the game's head (null for a new game).
+- **Progress:** per-file states (queued → hashing % → uploaded / deduplicated)
+  and a global recap (**x / y files, z sent, w deduplicated**). Upload progress is
+  per-file (start/done) — `fetch` does not expose sub-file upload progress.
+- **Errors** map to precise copy: 413 → "larger than the server allows",
+  `hash_mismatch`, `stale_parent` → "someone pushed meanwhile — reload",
+  `invalid_manifest` → the server's message.
+- On success the flow navigates to the new revision's page, where stats poll.
+
+`ApiError` now carries a `details` field (the parsed error body) so the commit
+handler can read the top-level `missing` array a 409 returns. Adds one runtime
+dependency, **`hash-wasm`**.

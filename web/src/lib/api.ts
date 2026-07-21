@@ -212,11 +212,18 @@ export interface RevisionDiff {
 export class ApiError extends Error {
   readonly status: number;
   readonly code: string;
-  constructor(status: number, code: string, message: string) {
+  /**
+   * The parsed response body (when any). Lets callers read fields the envelope
+   * carries alongside `error` — notably the top-level `missing` array a 409
+   * `missing_blobs` returns from the revision-commit endpoint.
+   */
+  readonly details: unknown;
+  constructor(status: number, code: string, message: string, details?: unknown) {
     super(message);
     this.name = 'ApiError';
     this.status = status;
     this.code = code;
+    this.details = details;
   }
 }
 
@@ -233,6 +240,28 @@ const BASE = '/api';
 
 type Method = 'GET' | 'POST' | 'PATCH' | 'DELETE' | 'PUT';
 
+/** Parse a response body as JSON, tolerating empty or non-JSON bodies. */
+async function readJson(res: Response): Promise<unknown> {
+  const raw = await res.text();
+  if (!raw) return undefined;
+  try {
+    return JSON.parse(raw);
+  } catch {
+    return undefined;
+  }
+}
+
+/** Build an ApiError from a failed response and its already-parsed body. */
+function errorFrom(status: number, statusText: string, data: unknown): ApiError {
+  const err = (data as { error?: { code?: string; message?: string } } | undefined)?.error;
+  return new ApiError(
+    status,
+    err?.code ?? `http_${status}`,
+    err?.message ?? (statusText || 'Request failed'),
+    data
+  );
+}
+
 async function request<T>(method: Method, path: string, body?: unknown): Promise<T> {
   const hasBody = body !== undefined;
   let res: Response;
@@ -248,25 +277,8 @@ async function request<T>(method: Method, path: string, body?: unknown): Promise
     throw new ApiError(0, 'network_error', 'Could not reach the server. Is it running?');
   }
 
-  const raw = await res.text();
-  let data: unknown = undefined;
-  if (raw) {
-    try {
-      data = JSON.parse(raw);
-    } catch {
-      data = undefined;
-    }
-  }
-
-  if (!res.ok) {
-    const err = (data as { error?: { code?: string; message?: string } } | undefined)?.error;
-    throw new ApiError(
-      res.status,
-      err?.code ?? `http_${res.status}`,
-      err?.message ?? (res.statusText || 'Request failed')
-    );
-  }
-
+  const data = await readJson(res);
+  if (!res.ok) throw errorFrom(res.status, res.statusText, data);
   return data as T;
 }
 
@@ -449,6 +461,24 @@ function normalizeRevisionDiff(raw: unknown): RevisionDiff {
   return { files, stats: { modes } };
 }
 
+/**
+ * Extract a list of lowercase blob hashes from a `{ missing: [...] }` payload or
+ * a bare array. Accepts either plain hash strings or `{ hash }` objects, so the
+ * same helper reads both the `check` response and a 409 `missing_blobs` body.
+ */
+function normalizeHashList(raw: unknown): string[] {
+  const arr = Array.isArray(raw)
+    ? raw
+    : ((raw as { missing?: unknown } | null | undefined)?.missing ?? []);
+  if (!Array.isArray(arr)) return [];
+  const out: string[] = [];
+  for (const v of arr) {
+    const h = typeof v === 'string' ? v : (v as { hash?: unknown } | null)?.hash;
+    if (typeof h === 'string' && h.length > 0) out.push(h.toLowerCase());
+  }
+  return out;
+}
+
 // ---------------------------------------------------------------------------
 // Slug helpers (client-side mirror of the server rule)
 // ---------------------------------------------------------------------------
@@ -578,6 +608,80 @@ export const api = {
         `/workspaces/${encodeURIComponent(slug)}/games/${encodeURIComponent(game)}/revisions/${encodeURIComponent(String(a))}/diff/${encodeURIComponent(String(b))}`
       );
       return normalizeRevisionDiff(raw);
+    },
+
+    // ---- Browser push (M2 write path) -------------------------------------
+    // Session-cookie auth already carries the implicit `full` scope, which
+    // satisfies `push:math`, so the browser calls these directly (no token).
+
+    /**
+     * Validate a manifest and learn which blobs the server still needs. Returns
+     * the missing hashes (lowercase hex); an empty array means every blob is
+     * already stored (the whole revision deduplicated).
+     */
+    async check(slug: string, game: string, files: RevisionFile[]): Promise<string[]> {
+      const raw = await request<unknown>(
+        'POST',
+        `/workspaces/${encodeURIComponent(slug)}/games/${encodeURIComponent(game)}/revisions/check`,
+        { files }
+      );
+      return normalizeHashList(raw);
+    },
+
+    /**
+     * Stream-upload one blob's raw bytes. Uses `fetch` directly (not the JSON
+     * `request` helper): a `Blob`/`File` body is streamed by the browser, so a
+     * multi-GB book is never buffered in memory. Resolves 'created' (201) or
+     * 'exists' (200 — already stored). `onProgress` is best-effort — `fetch`
+     * cannot report sub-file upload progress, so it fires once on completion.
+     */
+    async putBlob(
+      slug: string,
+      game: string,
+      hash: string,
+      file: Blob,
+      onProgress?: (bytesSent: number) => void
+    ): Promise<'created' | 'exists'> {
+      let res: Response;
+      try {
+        res = await fetch(
+          `${BASE}/workspaces/${encodeURIComponent(slug)}/games/${encodeURIComponent(game)}/blobs/${encodeURIComponent(hash)}`,
+          {
+            method: 'PUT',
+            credentials: 'same-origin',
+            headers: { 'content-type': 'application/octet-stream' },
+            body: file
+          }
+        );
+      } catch {
+        throw new ApiError(0, 'network_error', 'Could not reach the server. Is it running?');
+      }
+      const data = await readJson(res);
+      if (!res.ok) throw errorFrom(res.status, res.statusText, data);
+      onProgress?.(file.size);
+      return res.status === 201 ? 'created' : 'exists';
+    },
+
+    /**
+     * Commit a revision from an already-uploaded manifest. `parent_number` is the
+     * game's current head (null for a brand-new game — the commit creates the game
+     * slug implicitly). Throws ApiError on 409 `missing_blobs` (its `.details.missing`
+     * lists the hashes to re-upload) or `stale_parent`, 422 `invalid_manifest` /
+     * `hash_mismatch`, and 413 `payload_too_large`.
+     */
+    async commit(
+      slug: string,
+      game: string,
+      input: { message: string; files: RevisionFile[]; parent_number: number | null }
+    ): Promise<{ number: number }> {
+      const raw = await request<unknown>(
+        'POST',
+        `/workspaces/${encodeURIComponent(slug)}/games/${encodeURIComponent(game)}/revisions`,
+        input
+      );
+      const r = (raw ?? {}) as Record<string, unknown>;
+      const rev = (r.revision ?? r) as Record<string, unknown>;
+      return { number: num(rev.number) };
     }
   },
 

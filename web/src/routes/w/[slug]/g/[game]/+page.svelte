@@ -7,9 +7,12 @@
   import Card from '$lib/components/Card.svelte';
   import Badge from '$lib/components/Badge.svelte';
   import CopyField from '$lib/components/CopyField.svelte';
+  import MathPushPanel from '$lib/components/MathPushPanel.svelte';
 
   let slug = $derived(page.params.slug ?? '');
   let game = $derived(page.params.game ?? '');
+
+  let showPush = $state(false);
 
   let gameMeta = $state<Game | null>(null);
   let revisions = $state<RevisionSummary[]>([]);
@@ -57,6 +60,14 @@
 
   function openRevision(n: number) {
     void goto(`/w/${slug}/g/${game}/r/${n}`);
+  }
+
+  function onPushed(n: number) {
+    showPush = false;
+    // Jump to the new revision (its stats poll there); fall back to a reload if
+    // the commit response carried no usable number.
+    if (n >= 1) void goto(`/w/${slug}/g/${game}/r/${n}`);
+    else void load();
   }
 
   function compare() {
@@ -108,7 +119,22 @@
       {:else}
         <Badge>no revisions</Badge>
       {/if}
+      {#if !showPush}
+        <Button class="ml-auto" onclick={() => (showPush = true)}>Push a revision</Button>
+      {/if}
     </header>
+
+    {#if showPush}
+      <div class="mb-8">
+        <MathPushPanel
+          {slug}
+          {game}
+          parentNumber={headNumber}
+          ondone={(n) => onPushed(n)}
+          oncancel={() => (showPush = false)}
+        />
+      </div>
+    {/if}
 
     {#if revisions.length === 0}
       <Card class="flex flex-col items-center gap-4 border-dashed px-6 py-16 text-center">
@@ -132,8 +158,9 @@
         <div>
           <h2 class="text-lg font-semibold">No revisions yet</h2>
           <p class="mx-auto mt-1.5 max-w-md text-sm leading-relaxed text-muted">
-            Revisions are immutable math snapshots pushed from CI — the dashboard is read-only. Push
-            math with <span class="font-mono-tab text-text">sdt push</span> to see revisions here.
+            Revisions are immutable math snapshots. Push one straight from your browser with
+            <span class="text-text">Push a revision</span> above, or run
+            <span class="font-mono-tab text-text">sdt push</span> from CI.
           </p>
         </div>
         <div class="w-full max-w-xs"><CopyField value="sdt push" /></div>
