@@ -1,3 +1,14 @@
+//! DEPRECATED (M3): the legacy GitHub-repo "teams" system.
+//!
+//! M3 replaces team sync with cloud workspaces (`crate::cloud::{workspaces,
+//! sync, documents, math}`); the `teams_*` command bodies now delegate there.
+//! This module is retained only so migration (`crate::cloud::migrate`) can still
+//! *read* a GitHub team, and so the Teams screen can list legacy teams offering
+//! a "Migrate to cloud" button. It is slated for removal post-V2. The
+//! module-level `allow(dead_code)` covers the now-unused GitHub sync/catalogue
+//! paths that migration does not touch.
+#![allow(dead_code)]
+
 use anyhow::{Context, Result, anyhow};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
@@ -37,6 +48,11 @@ pub struct Team {
     pub added_at: u64,
     #[serde(default, rename = "lastSyncAt")]
     pub last_sync_at: Option<u64>,
+    /// Set once this legacy team has been migrated to a cloud workspace; the
+    /// value is the destination workspace id. Drives the Teams-screen "migrated"
+    /// badge and disables re-migration.
+    #[serde(default, rename = "migratedTo")]
+    pub migrated_to: Option<String>,
 }
 
 #[derive(Debug, Default, Serialize, Deserialize)]
@@ -195,6 +211,25 @@ pub async fn active_team() -> Result<Option<Team>> {
 pub async fn set_active(team_id: Option<&str>) -> Result<()> {
     let mut f = load().await?;
     f.active_team_id = team_id.map(|s| s.to_string());
+    save(&f).await
+}
+
+/// Looks up one legacy team by id (used by migration and the Teams screen).
+pub async fn team_by_id(team_id: &str) -> Result<Team> {
+    load()
+        .await?
+        .teams
+        .into_iter()
+        .find(|t| t.id == team_id)
+        .ok_or_else(|| anyhow!("team not found"))
+}
+
+/// Stamps a legacy team as migrated to `workspace_id`.
+pub async fn mark_migrated(team_id: &str, workspace_id: &str) -> Result<()> {
+    let mut f = load().await?;
+    if let Some(t) = f.teams.iter_mut().find(|t| t.id == team_id) {
+        t.migrated_to = Some(workspace_id.to_string());
+    }
     save(&f).await
 }
 
@@ -366,6 +401,7 @@ pub async fn create_team(name: String, org: Option<String>) -> Result<Team> {
         html_url: repo.html_url.clone(),
         added_at: now_ms(),
         last_sync_at: None,
+        migrated_to: None,
     };
     upsert_local(team).await
 }
@@ -413,6 +449,7 @@ pub async fn join_team(owner: String, name: String) -> Result<Team> {
         html_url: repo.html_url,
         added_at: now_ms(),
         last_sync_at: None,
+        migrated_to: None,
     };
     upsert_local(team).await
 }

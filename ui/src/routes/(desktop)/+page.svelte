@@ -36,14 +36,17 @@
     browser,
     ca,
     checkForUpdates,
+    cloudApi,
     downloadAndInstallUpdate,
     githubAuth,
     lgs,
+    onWorkspaceEvent,
     pickFolder,
     profiles as profilesApi,
     settings as settingsApi,
     teamsApi,
     type CaStatus,
+    type CloudUser,
     type GithubUser,
     type InspectedGame,
     type LgsStatus,
@@ -55,6 +58,7 @@
   } from '$lib/api';
   import * as Dialog from '$lib/components/ui/dialog';
   import GithubSignInDialog from '$lib/components/GithubSignInDialog.svelte';
+  import CloudSignInDialog from '$lib/components/CloudSignInDialog.svelte';
   import KeyRoundIcon from '@lucide/svelte/icons/key-round';
   import LogOutIcon from '@lucide/svelte/icons/log-out';
   import LogInIcon from '@lucide/svelte/icons/log-in';
@@ -77,8 +81,25 @@
 
   // GitHub auth state — surfaced in the topbar so sign-in is reachable from
   // anywhere (not buried behind the Teams page).
+  // GitHub auth — kept for the Share-preview feature (GitHub Pages hosting).
   let githubUser = $state<GithubUser | null>(null);
   let signInOpen = $state(false);
+
+  // Cloud auth + active workspace — drives the workspace catalogue (share/pull)
+  // and the live SSE stream; surfaced in the topbar.
+  let cloudUser = $state<CloudUser | null>(null);
+  let cloudSignInOpen = $state(false);
+  let activeWorkspace = $state<Team | null>(null);
+  // The workspace we currently hold an SSE subscription for. Guards against
+  // re-subscribing on every refresh (a resubscribe would re-emit `reconnected`,
+  // which would trigger another refresh → subscribe loop).
+  let subscribedWorkspaceId: string | null = null;
+
+  function ensureSubscribed(id: string | null) {
+    if (!id || id === subscribedWorkspaceId) return;
+    subscribedWorkspaceId = id;
+    cloudApi.subscribe(id).catch(() => {});
+  }
 
   async function refreshGithubUser() {
     try {
@@ -93,11 +114,39 @@
   }
 
   async function signOutGithub() {
-    if (!confirm('Sign out of GitHub? Your local teams will remain.')) return;
+    if (!confirm('Sign out of GitHub? Share-preview publishing will be disabled.')) return;
     try {
       await githubAuth.logout();
       githubUser = null;
-      toast.success('Signed out');
+      toast.success('Signed out of GitHub');
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : String(e));
+    }
+  }
+
+  async function refreshCloudUser() {
+    try {
+      cloudUser = await cloudApi.currentUser();
+    } catch {
+      cloudUser = null;
+    }
+  }
+
+  async function onCloudSignedIn(u: CloudUser) {
+    cloudUser = u;
+    await refreshTeamsAndCatalog();
+  }
+
+  async function signOutCloud() {
+    if (!confirm('Sign out of the cloud? Workspace syncing will pause here.')) return;
+    try {
+      await cloudApi.unsubscribe().catch(() => {});
+      await cloudApi.signOut();
+      cloudUser = null;
+      activeWorkspace = null;
+      allTeams = [];
+      catalog = [];
+      toast.success('Signed out of the cloud');
     } catch (e) {
       toast.error(e instanceof Error ? e.message : String(e));
     }
@@ -184,6 +233,7 @@
         const s = await settingsApi.get();
         resolutions = s.resolutions;
         refreshProfileReadiness().catch(() => {});
+        refreshCloudUser().catch(() => {});
         refreshTeamsAndCatalog().catch(() => {});
         refreshGithubUser().catch(() => {});
       } catch (e) {
@@ -212,11 +262,35 @@
       refreshTeamsAndCatalog().catch(() => {});
       refreshProfileReadiness().catch(() => {});
     };
+    // Live workspace stream: on any document/revision change (or reconnect),
+    // refresh the catalogue + readiness so shared saved rounds/profiles appear
+    // without a manual refresh (the M3 "two desktops see each other" path).
+    let unlistenWs: (() => void) | null = null;
+    onWorkspaceEvent((ev) => {
+      if (busy) return;
+      // The launcher shows the profile catalogue + math readiness. Only refresh
+      // for events that affect those (a shared/updated profile, a new math
+      // revision, or a reconnect). Saved-round changes don't show here, and
+      // reacting to every one would be needless churn.
+      const relevant =
+        ev.type === 'reconnected' ||
+        ev.type === 'revision_pushed' ||
+        (ev.type === 'document' && ev.docKind === 'profile');
+      if (!relevant) return;
+      refreshTeamsAndCatalog().catch(() => {});
+      refreshProfileReadiness().catch(() => {});
+    })
+      .then((un) => {
+        unlistenWs = un;
+      })
+      .catch(() => {});
+
     window.addEventListener('keydown', onKey);
     window.addEventListener('focus', onFocus);
     return () => {
       window.removeEventListener('keydown', onKey);
       window.removeEventListener('focus', onFocus);
+      unlistenWs?.();
     };
   });
 
@@ -493,6 +567,9 @@
     catalogLoading = true;
     try {
       allTeams = await teamsApi.list();
+      activeWorkspace = await teamsApi.active();
+      // Keep the live stream pointed at the active workspace (subscribe-once).
+      ensureSubscribed(activeWorkspace?.id ?? null);
       if (allTeams.length > 0) {
         catalog = await teamsApi.allCatalogs();
         // The backend reconciles local profiles against the catalogue during
@@ -893,8 +970,14 @@
           </Tooltip.Root>
         </div>
 
-        <!-- Group 2: Account — secondary -->
-        {#if githubUser}
+        <!-- Group 2: Account — cloud workspace identity -->
+        {#if cloudUser}
+          {#if activeWorkspace}
+            <Badge variant="outline" class="gap-1 font-normal">
+              <UsersRoundIcon class="h-3.5 w-3.5 text-emerald-500" />
+              {activeWorkspace.name}
+            </Badge>
+          {/if}
           <Tooltip.Root>
             <Tooltip.Trigger>
               {#snippet child({ props })}
@@ -902,16 +985,16 @@
                   {...props}
                   variant="outline"
                   size="default"
-                  onclick={signOutGithub}
+                  onclick={signOutCloud}
                   class="gap-2"
                 >
                   <KeyRoundIcon class="h-4 w-4 text-emerald-500" />
-                  <span class="font-mono-tab text-sm">@{githubUser?.login ?? ''}</span>
+                  <span class="font-mono-tab text-sm">{cloudUser?.display_name ?? ''}</span>
                   <LogOutIcon class="h-3.5 w-3.5 opacity-50" />
                 </Button>
               {/snippet}
             </Tooltip.Trigger>
-            <Tooltip.Content>Signed in to GitHub — click to sign out</Tooltip.Content>
+            <Tooltip.Content>Signed in to the cloud — click to sign out</Tooltip.Content>
           </Tooltip.Root>
         {:else}
           <Tooltip.Root>
@@ -921,7 +1004,7 @@
                   {...props}
                   variant="outline"
                   size="default"
-                  onclick={() => (signInOpen = true)}
+                  onclick={() => (cloudSignInOpen = true)}
                   class="gap-2"
                 >
                   <LogInIcon class="h-4 w-4" />
@@ -929,7 +1012,7 @@
                 </Button>
               {/snippet}
             </Tooltip.Trigger>
-            <Tooltip.Content>GitHub — required for Teams + Share preview</Tooltip.Content>
+            <Tooltip.Content>Cloud — required for workspaces</Tooltip.Content>
           </Tooltip.Root>
         {/if}
 
@@ -1666,7 +1749,7 @@
               {/if}
             </div>
             <div class="font-mono-tab text-xs text-muted-foreground">
-              {t.repoOwner}/{t.repoName}
+              {t.slug}
             </div>
           </div>
           <UploadIcon class="h-4 w-4 text-muted-foreground" />
@@ -1780,6 +1863,7 @@
 
 <!-- GitHub sign-in dialog (shared, opened from topbar or Share preview) -->
 <GithubSignInDialog bind:open={signInOpen} onSignedIn={onGithubSignedIn} />
+<CloudSignInDialog bind:open={cloudSignInOpen} onSignedIn={onCloudSignedIn} />
 
 <!-- LGS port settings dialog -->
 <Dialog.Root bind:open={portSettingsOpen}>

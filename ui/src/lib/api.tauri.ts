@@ -196,32 +196,46 @@ export const githubAuth = {
   listOrgs: () => invoke<GithubOrg[]>('github_list_orgs')
 };
 
-export type TeamRole = 'owner' | 'member';
+export type TeamRole = 'owner' | 'admin' | 'member';
 
+// A cloud workspace — the M3 replacement for the GitHub-repo "team". The type
+// keeps the name `Team` so the desktop-chrome routes' `teamsApi` surface is
+// unchanged; the fields are workspace-shaped.
 export type Team = {
+  id: string;
+  slug: string;
+  name: string;
+  role: TeamRole;
+  memberCount?: number | null;
+};
+
+// A legacy GitHub-repo team still present on this device. Surfaced only so the
+// Teams screen can offer a per-team "Migrate to cloud" action.
+export type LegacyTeam = {
   id: string;
   name: string;
   repoOwner: string;
   repoName: string;
-  role: TeamRole;
+  role: 'owner' | 'member';
   htmlUrl: string;
   addedAt: number;
   lastSyncAt?: number | null;
-};
-
-export type DiscoveredTeam = {
-  teamId: string;
-  teamName: string;
-  repoOwner: string;
-  repoName: string;
-  htmlUrl: string;
+  migratedTo?: string | null;
 };
 
 export type SyncReport = {
-  profilesPushed: number;
-  profilesPulled: number;
-  roundsPushed: number;
-  roundsPulled: number;
+  pushed: number;
+  pulled: number;
+  conflicts: number;
+};
+
+export type MigrateReport = {
+  workspaceId: string;
+  workspaceSlug: string;
+  workspaceName: string;
+  profiles: number;
+  rounds: number;
+  games: number;
 };
 
 export type TeamProfileInfo = {
@@ -259,18 +273,21 @@ export type PublishReport = {
 /// playable but RTP-broken. `full` ships math as-is.
 export type MathMode = 'full' | 'partial' | 'sampled';
 
+// Cloud-backed workspace operations. Command NAMES are preserved (the desktop
+// UI contract); the desktop crate re-points their bodies to the cloud platform.
 export const teamsApi = {
   list: () => invoke<Team[]>('teams_list'),
   active: () => invoke<Team | null>('teams_active'),
   setActive: (teamId: string | null) => invoke<void>('teams_set_active', { teamId }),
-  create: (name: string, org?: string | null) =>
-    invoke<Team>('teams_create', { name, org: org ?? null }),
-  join: (owner: string, name: string) => invoke<Team>('teams_join', { owner, name }),
+  create: (name: string, slug?: string | null) =>
+    invoke<Team>('teams_create', { name, slug: slug ?? null }),
+  /** Join a workspace by accepting an invite token (from an invite URL). */
+  join: (token: string) => invoke<Team>('teams_join', { token }),
   leave: (teamId: string) => invoke<void>('teams_leave', { teamId }),
   delete: (teamId: string) => invoke<void>('teams_delete', { teamId }),
-  invite: (teamId: string, username: string) =>
-    invoke<void>('teams_invite', { teamId, username }),
-  discover: () => invoke<DiscoveredTeam[]>('teams_discover'),
+  /** Create an invite and return its shareable URL (show once, copy). */
+  invite: (teamId: string, role?: TeamRole) =>
+    invoke<string>('teams_invite', { teamId, role: role ?? null }),
   sync: (teamId: string) => invoke<SyncReport>('teams_sync', { teamId }),
   pushMath: (teamId: string, gameSlug: string, gamePath: string) =>
     invoke<MathSyncReport>('teams_push_math', { teamId, gameSlug, gamePath }),
@@ -294,8 +311,73 @@ export const teamsApi = {
     invoke<void>('teams_push_profile', { teamId, profileId }),
   allCatalogs: () => invoke<CatalogEntry[]>('teams_all_catalogs'),
   removeFromCatalog: (teamId: string, profileId: string) =>
-    invoke<void>('teams_remove_from_catalog', { teamId, profileId })
+    invoke<void>('teams_remove_from_catalog', { teamId, profileId }),
+  // ---- Legacy GitHub teams (migration only) ----
+  legacyList: () => invoke<LegacyTeam[]>('teams_legacy_list'),
+  migrateToCloud: (teamId: string) =>
+    invoke<MigrateReport>('teams_migrate_to_cloud', { teamId })
 };
+
+// ===== Cloud platform (V2) — device-flow sign-in, workspaces, live SSE =====
+
+export type CloudUser = {
+  id: string;
+  email: string;
+  display_name: string;
+  created_at: string;
+};
+
+export type CloudDeviceCode = {
+  device_code: string;
+  user_code: string;
+  verification_uri: string;
+  expires_in: number;
+  interval: number;
+};
+
+export type CloudDeviceFlowPoll = {
+  auth: { user: CloudUser } | null;
+  next_interval_secs: number;
+};
+
+export type WorkspaceSummary = {
+  id: string;
+  slug: string;
+  name: string;
+  role: TeamRole;
+  created_at: string;
+};
+
+/** Live workspace events forwarded from the Rust SSE subscription. */
+export type WorkspaceEvent =
+  | { type: 'reconnected'; slug: string }
+  | { type: 'document'; slug: string; docKind: 'profile' | 'saved_round'; docId: string; seq: number }
+  | { type: 'revision_pushed'; slug: string; game: string; number: number };
+
+export const cloudApi = {
+  getBaseUrl: () => invoke<string>('cloud_get_base_url'),
+  setBaseUrl: (url: string) => invoke<string>('cloud_set_base_url', { url }),
+  requestDeviceCode: () => invoke<CloudDeviceCode>('cloud_request_device_code'),
+  pollForToken: (deviceCode: string, currentInterval: number) =>
+    invoke<CloudDeviceFlowPoll>('cloud_poll_for_token', { deviceCode, currentInterval }),
+  currentUser: () => invoke<CloudUser | null>('cloud_current_user'),
+  signOut: () => invoke<void>('cloud_sign_out'),
+  listWorkspaces: () => invoke<{ workspaces: WorkspaceSummary[] }>('cloud_list_workspaces'),
+  /** Start (or restart) the live SSE stream for a workspace. */
+  subscribe: (workspaceId: string) => invoke<void>('cloud_subscribe', { workspaceId }),
+  unsubscribe: () => invoke<void>('cloud_unsubscribe')
+};
+
+/**
+ * Subscribe to the workspace SSE events forwarded by the Rust side. Returns an
+ * unlisten function. Import `listen` lazily so this module stays cheap.
+ */
+export async function onWorkspaceEvent(
+  handler: (event: WorkspaceEvent) => void
+): Promise<() => void> {
+  const { listen } = await import('@tauri-apps/api/event');
+  return listen<WorkspaceEvent>('cloud-workspace-event', (e) => handler(e.payload));
+}
 
 export async function pickFolder(title = 'Select math root folder'): Promise<string | null> {
   const result = await openDialog({

@@ -15,6 +15,9 @@ pub struct LgsRunning {
 #[derive(Default)]
 pub struct AppState {
     pub running: Mutex<Option<LgsRunning>>,
+    /// The live workspace SSE subscription task, if any. Held so switching the
+    /// active workspace can abort the previous stream before starting a new one.
+    pub cloud_sse: Mutex<Option<tokio::task::JoinHandle<()>>>,
 }
 
 impl AppState {

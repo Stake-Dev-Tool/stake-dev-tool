@@ -1,7 +1,6 @@
 <script lang="ts">
   import { onMount } from 'svelte';
   import { goto } from '$app/navigation';
-  import { openUrl } from '@tauri-apps/plugin-opener';
 
   import { Button } from '$lib/components/ui/button';
   import * as Card from '$lib/components/ui/card';
@@ -9,7 +8,6 @@
   import { Input } from '$lib/components/ui/input';
   import { Label } from '$lib/components/ui/label';
   import { Badge } from '$lib/components/ui/badge';
-  import { Separator } from '$lib/components/ui/separator';
   import { Toaster } from '$lib/components/ui/sonner';
   import { toast } from 'svelte-sonner';
 
@@ -17,69 +15,73 @@
   import UsersIcon from '@lucide/svelte/icons/users';
   import PlusIcon from '@lucide/svelte/icons/plus';
   import LogInIcon from '@lucide/svelte/icons/log-in';
-  import LogOutIcon from '@lucide/svelte/icons/log-out';
   import RefreshIcon from '@lucide/svelte/icons/refresh-cw';
   import SendIcon from '@lucide/svelte/icons/send';
-  import ExternalLinkIcon from '@lucide/svelte/icons/external-link';
   import TrashIcon from '@lucide/svelte/icons/trash-2';
   import CheckIcon from '@lucide/svelte/icons/check';
+  import CopyIcon from '@lucide/svelte/icons/copy';
+  import UploadCloudIcon from '@lucide/svelte/icons/upload-cloud';
 
   import {
+    cloudApi,
     githubAuth,
     teamsApi,
-    type DiscoveredTeam,
-    type GithubOrg,
+    type CloudUser,
     type GithubUser,
+    type LegacyTeam,
     type SyncReport,
-    type Team
+    type Team,
+    type TeamRole
   } from '$lib/api';
+  import CloudSignInDialog from '$lib/components/CloudSignInDialog.svelte';
   import GithubSignInDialog from '$lib/components/GithubSignInDialog.svelte';
 
-  let user = $state<GithubUser | null>(null);
+  let cloudUser = $state<CloudUser | null>(null);
   let loading = $state(true);
   let busy = $state(false);
 
-  let teams = $state<Team[]>([]);
-  let activeTeamId = $state<string | null>(null);
+  let workspaces = $state<Team[]>([]);
+  let activeId = $state<string | null>(null);
 
-  let signInOpen = $state(false);
+  let cloudSignInOpen = $state(false);
 
-  // Create team dialog
+  // Create workspace
   let createOpen = $state(false);
   let createName = $state('');
-  /// '' means "personal account" (no org).
-  let createOrg = $state('');
-  let orgs = $state<GithubOrg[]>([]);
+  let createSlug = $state('');
 
-  // Join team dialog
+  // Join workspace (invite token)
   let joinOpen = $state(false);
-  let joinOwner = $state('');
-  let joinRepo = $state('');
-  let discovered = $state<DiscoveredTeam[]>([]);
-  let discoverBusy = $state(false);
+  let joinToken = $state('');
 
-  // Invite dialog
+  // Invite (create + one-time copy)
   let inviteOpen = $state(false);
-  let inviteUsername = $state('');
-  let inviteTargetTeamId = $state<string | null>(null);
+  let inviteTargetId = $state<string | null>(null);
+  let inviteRole = $state<TeamRole>('member');
+  let inviteUrl = $state<string | null>(null);
+  let inviteCopied = $state(false);
 
-  // Delete team (owner) dialog
+  // Delete workspace (owner)
   let deleteOpen = $state(false);
   let deleteTarget = $state<Team | null>(null);
-  let deleteConfirmText = $state('');
+  let deleteConfirm = $state('');
 
+  // Legacy GitHub teams + migration
+  let githubUser = $state<GithubUser | null>(null);
+  let legacyTeams = $state<LegacyTeam[]>([]);
+  let githubSignInOpen = $state(false);
+  let migratingId = $state<string | null>(null);
 
-  const activeTeam = $derived(teams.find((t) => t.id === activeTeamId) ?? null);
-  const otherTeams = $derived(teams.filter((t) => t.id !== activeTeamId));
+  const activeWs = $derived(workspaces.find((w) => w.id === activeId) ?? null);
+  const otherWs = $derived(workspaces.filter((w) => w.id !== activeId));
+  const pendingLegacy = $derived(legacyTeams.filter((t) => !t.migratedTo));
 
   onMount(() => {
     (async () => {
       try {
-        user = await githubAuth.currentUser();
-        if (user) {
-          await refreshTeams();
-          refreshOrgs().catch(() => {});
-        }
+        cloudUser = await cloudApi.currentUser();
+        if (cloudUser) await refreshWorkspaces();
+        await refreshLegacy();
       } catch (e) {
         console.error(e);
       } finally {
@@ -87,27 +89,6 @@
       }
     })();
   });
-
-  async function refreshOrgs() {
-    try {
-      orgs = await githubAuth.listOrgs();
-    } catch (e) {
-      console.error(e);
-      orgs = [];
-    }
-  }
-
-  async function onSignedIn(u: GithubUser) {
-    user = u;
-    await refreshTeams();
-    refreshOrgs().catch(() => {});
-  }
-
-  async function refreshTeams() {
-    teams = await teamsApi.list();
-    const active = await teamsApi.active();
-    activeTeamId = active?.id ?? null;
-  }
 
   async function withBusy<T>(fn: () => Promise<T>): Promise<T | undefined> {
     busy = true;
@@ -120,159 +101,173 @@
     }
   }
 
-  async function signOut() {
-    if (!confirm('Sign out of GitHub? Your local teams will remain but syncing will be disabled.'))
+  async function refreshWorkspaces() {
+    workspaces = await teamsApi.list();
+    const active = await teamsApi.active();
+    activeId = active?.id ?? null;
+    if (activeId) cloudApi.subscribe(activeId).catch(() => {});
+  }
+
+  async function refreshLegacy() {
+    try {
+      githubUser = await githubAuth.currentUser();
+      legacyTeams = await teamsApi.legacyList();
+    } catch {
+      legacyTeams = [];
+    }
+  }
+
+  async function onCloudSignedIn(u: CloudUser) {
+    cloudUser = u;
+    await refreshWorkspaces();
+  }
+
+  async function signOutCloud() {
+    if (!confirm('Sign out of the cloud? Workspaces stay on the server; syncing pauses here.'))
       return;
     await withBusy(async () => {
-      await githubAuth.logout();
-      user = null;
+      await cloudApi.unsubscribe().catch(() => {});
+      await cloudApi.signOut();
+      cloudUser = null;
+      workspaces = [];
+      activeId = null;
       toast.success('Signed out');
     });
   }
 
-  // ---- Teams ----
-
-  async function createTeam() {
+  async function createWorkspace() {
     const name = createName.trim();
-    if (!name) return toast.error('Give the team a name');
-    const org = createOrg.trim() || null;
+    if (!name) return toast.error('Give the workspace a name');
     await withBusy(async () => {
-      const t = await teamsApi.create(name, org);
+      const w = await teamsApi.create(name, createSlug.trim() || null);
       createOpen = false;
       createName = '';
-      createOrg = '';
-      await refreshTeams();
-      activeTeamId = t.id;
-      await teamsApi.setActive(t.id);
-      toast.success(`Team "${t.name}" created`);
+      createSlug = '';
+      await refreshWorkspaces();
+      await setActive(w);
+      toast.success(`Workspace "${w.name}" created`);
     });
   }
 
-  async function joinFromDiscovery(d: DiscoveredTeam) {
+  async function joinWorkspace() {
+    const token = joinToken.trim();
+    if (!token) return toast.error('Paste an invite token or URL');
+    // Accept a full invite URL by taking its last path segment.
+    const cleaned = token.includes('/') ? token.split('/').filter(Boolean).pop()! : token;
     await withBusy(async () => {
-      const t = await teamsApi.join(d.repoOwner, d.repoName);
+      const w = await teamsApi.join(cleaned);
       joinOpen = false;
-      await refreshTeams();
-      activeTeamId = t.id;
-      await teamsApi.setActive(t.id);
-      toast.success(`Joined "${t.name}"`);
+      joinToken = '';
+      await refreshWorkspaces();
+      await setActive(w);
+      toast.success(`Joined "${w.name}"`);
     });
   }
 
-  async function joinManual() {
-    const owner = joinOwner.trim();
-    const repo = joinRepo.trim();
-    if (!owner || !repo) return toast.error('Enter owner and repo name');
-    await withBusy(async () => {
-      const t = await teamsApi.join(owner, repo);
-      joinOpen = false;
-      joinOwner = '';
-      joinRepo = '';
-      await refreshTeams();
-      activeTeamId = t.id;
-      await teamsApi.setActive(t.id);
-      toast.success(`Joined "${t.name}"`);
-    });
+  async function setActive(w: Team) {
+    activeId = w.id;
+    await teamsApi.setActive(w.id);
+    cloudApi.subscribe(w.id).catch(() => {});
+    toast.success(`"${w.name}" is now active`);
   }
 
-  async function openJoinDialog() {
-    joinOpen = true;
-    discoverBusy = true;
-    discovered = [];
-    try {
-      const found = await teamsApi.discover();
-      // Hide teams we already joined locally
-      const localKeys = new Set(teams.map((t) => `${t.repoOwner}/${t.repoName}`));
-      discovered = found.filter((d) => !localKeys.has(`${d.repoOwner}/${d.repoName}`));
-    } catch (e) {
-      toast.error(e instanceof Error ? e.message : String(e));
-    } finally {
-      discoverBusy = false;
-    }
-  }
-
-  async function setActive(t: Team) {
-    activeTeamId = t.id;
-    await teamsApi.setActive(t.id);
-    toast.success(`"${t.name}" is now active`);
-  }
-
-  async function leaveTeam(t: Team) {
-    if (t.role === 'owner') {
-      deleteTarget = t;
-      deleteConfirmText = '';
+  async function leaveWs(w: Team) {
+    if (w.role === 'owner') {
+      deleteTarget = w;
+      deleteConfirm = '';
       deleteOpen = true;
       return;
     }
-    if (
-      !confirm(
-        `Remove "${t.name}" from this device? Your local files stay. The GitHub repo is not deleted.`
-      )
-    )
-      return;
+    if (!confirm(`Leave "${w.name}"? You'll lose access until you're re-invited.`)) return;
     await withBusy(async () => {
-      await teamsApi.leave(t.id);
-      await refreshTeams();
-      toast.success(`Left "${t.name}"`);
+      await teamsApi.leave(w.id);
+      await refreshWorkspaces();
+      toast.success(`Left "${w.name}"`);
     });
   }
 
-  async function confirmDeleteTeam() {
-    const t = deleteTarget;
-    if (!t) return;
-    if (deleteConfirmText.trim() !== t.name) {
-      return toast.error('Type the team name exactly to confirm');
-    }
+  async function confirmDelete() {
+    const w = deleteTarget;
+    if (!w) return;
+    if (deleteConfirm.trim() !== w.name) return toast.error('Type the workspace name to confirm');
     await withBusy(async () => {
-      await teamsApi.delete(t.id);
+      await teamsApi.delete(w.id);
       deleteOpen = false;
       deleteTarget = null;
-      deleteConfirmText = '';
-      await refreshTeams();
-      toast.success(`Team "${t.name}" deleted`);
+      deleteConfirm = '';
+      await refreshWorkspaces();
+      toast.success(`Workspace "${w.name}" deleted`);
     });
   }
 
-  async function syncTeam(t: Team) {
+  function openInvite(w: Team) {
+    inviteTargetId = w.id;
+    inviteRole = 'member';
+    inviteUrl = null;
+    inviteCopied = false;
+    inviteOpen = true;
+  }
+
+  async function createInvite() {
+    if (!inviteTargetId) return;
     await withBusy(async () => {
-      const r: SyncReport = await teamsApi.sync(t.id);
-      await refreshTeams();
-      const total =
-        r.profilesPushed + r.profilesPulled + r.roundsPushed + r.roundsPulled;
-      if (total === 0) {
+      inviteUrl = await teamsApi.invite(inviteTargetId!, inviteRole);
+      inviteCopied = false;
+      toast.success('Invite created — copy the link below (shown once)');
+    });
+  }
+
+  async function copyInvite() {
+    if (!inviteUrl) return;
+    try {
+      await navigator.clipboard.writeText(inviteUrl);
+      inviteCopied = true;
+      toast.success('Invite link copied');
+    } catch {
+      toast.error('Could not copy to clipboard');
+    }
+  }
+
+  async function syncWs(w: Team) {
+    await withBusy(async () => {
+      const r: SyncReport = await teamsApi.sync(w.id);
+      if (r.pushed + r.pulled === 0 && r.conflicts === 0) {
         toast.success('Already up to date');
       } else {
-        toast.success(
-          `Synced: ↑${r.profilesPushed + r.roundsPushed} ↓${r.profilesPulled + r.roundsPulled}`
-        );
+        const parts = [`↑${r.pushed}`, `↓${r.pulled}`];
+        if (r.conflicts > 0) parts.push(`${r.conflicts} conflict${r.conflicts === 1 ? '' : 's'}`);
+        toast.success(`Synced: ${parts.join(' · ')}`);
       }
     });
   }
 
-  function openInviteDialog(t: Team) {
-    inviteTargetTeamId = t.id;
-    inviteUsername = '';
-    inviteOpen = true;
+  async function onGithubSignedIn(u: GithubUser) {
+    githubUser = u;
+    await refreshLegacy();
   }
 
-  async function sendInvite() {
-    const username = inviteUsername.trim();
-    if (!inviteTargetTeamId || !username) return toast.error('Enter a GitHub username');
-    await withBusy(async () => {
-      await teamsApi.invite(inviteTargetTeamId!, username);
-      inviteOpen = false;
-      toast.success(`Invite sent to @${username}`);
-    });
-  }
-
-  function formatRelative(ts: number | null | undefined): string {
-    if (!ts) return 'never';
-    const diff = Date.now() - ts;
-    if (diff < 60_000) return 'just now';
-    if (diff < 3_600_000) return `${Math.floor(diff / 60_000)}m ago`;
-    if (diff < 86_400_000) return `${Math.floor(diff / 3_600_000)}h ago`;
-    const d = Math.floor(diff / 86_400_000);
-    return d === 1 ? 'yesterday' : `${d}d ago`;
+  async function migrate(t: LegacyTeam) {
+    if (!cloudUser) return toast.error('Sign in to the cloud first');
+    if (!githubUser) return toast.error('Sign in to GitHub to read the team repo');
+    if (
+      !confirm(
+        `Migrate "${t.name}" into a new cloud workspace? Profiles, saved rounds and math are copied. The GitHub repo is left untouched.`
+      )
+    )
+      return;
+    migratingId = t.id;
+    try {
+      const r = await teamsApi.migrateToCloud(t.id);
+      toast.success(
+        `Migrated "${t.name}" → "${r.workspaceName}" (${r.profiles} profiles, ${r.rounds} rounds, ${r.games} games)`
+      );
+      await refreshWorkspaces();
+      await refreshLegacy();
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : String(e));
+    } finally {
+      migratingId = null;
+    }
   }
 </script>
 
@@ -290,133 +285,102 @@
         <ArrowLeftIcon />
       </Button>
       <div>
-        <h1 class="text-2xl font-semibold tracking-tight">Teams</h1>
+        <h1 class="text-2xl font-semibold tracking-tight">Workspaces</h1>
         <p class="text-sm text-muted-foreground">
-          Share profiles, saved rounds, and math across your team
+          Share profiles, saved rounds, and math across your team — live.
         </p>
       </div>
     </div>
 
-    {#if user}
-      <div class="flex items-center gap-3">
-        {#if user.avatar_url}
-          <img
-            src={user.avatar_url}
-            alt="@{user.login}"
-            class="h-8 w-8 rounded-full border"
-            referrerpolicy="no-referrer"
-          />
-        {/if}
-        <div class="flex flex-col items-end">
-          <span class="text-sm font-medium">@{user.login}</span>
-          <button
-            type="button"
-            class="text-xs text-muted-foreground hover:text-foreground"
-            onclick={signOut}
-            disabled={busy}
-          >
-            Sign out
-          </button>
-        </div>
+    {#if cloudUser}
+      <div class="flex flex-col items-end">
+        <span class="text-sm font-medium">{cloudUser.display_name}</span>
+        <button
+          type="button"
+          class="text-xs text-muted-foreground hover:text-foreground"
+          onclick={signOutCloud}
+          disabled={busy}
+        >
+          Sign out
+        </button>
       </div>
     {/if}
   </header>
 
   {#if loading}
     <Card.Root>
-      <Card.Content class="py-10 text-center text-sm text-muted-foreground">
-        Loading…
-      </Card.Content>
+      <Card.Content class="py-10 text-center text-sm text-muted-foreground">Loading…</Card.Content>
     </Card.Root>
-  {:else if !user}
-    <!-- Signed out state -->
+  {:else if !cloudUser}
+    <!-- Signed out -->
     <Card.Root>
       <Card.Header>
         <Card.Title class="flex items-center gap-2">
           <LogInIcon class="h-5 w-5" />
-          Sign in with GitHub
+          Sign in to the cloud
         </Card.Title>
         <Card.Description>
-          Teams are backed by private GitHub repositories — one per team. Profiles and saved
-          rounds sync automatically between members. You'll need a free GitHub account.
+          Workspaces live on the cloud platform. Profiles and saved rounds sync automatically and
+          update live between members over a server event stream.
         </Card.Description>
       </Card.Header>
       <Card.Content>
-        <Button size="lg" onclick={() => (signInOpen = true)} disabled={busy}>
+        <Button size="lg" onclick={() => (cloudSignInOpen = true)} disabled={busy}>
           <LogInIcon />
-          Sign in with GitHub
+          Sign in
         </Button>
       </Card.Content>
     </Card.Root>
   {:else}
-    <!-- Signed in state -->
-
-    {#if activeTeam}
+    <!-- Active workspace -->
+    {#if activeWs}
       <Card.Root class="border-emerald-500/30 bg-emerald-500/5">
         <Card.Header>
           <div class="flex items-start justify-between gap-4">
             <div>
               <Card.Title class="flex items-center gap-2">
                 <UsersIcon class="h-5 w-5" />
-                {activeTeam.name}
-                {#if activeTeam.role === 'owner'}
-                  <Badge variant="secondary">Owner</Badge>
-                {:else}
-                  <Badge variant="outline">Member</Badge>
-                {/if}
+                {activeWs.name}
+                <Badge variant={activeWs.role === 'owner' ? 'secondary' : 'outline'}>
+                  {activeWs.role}
+                </Badge>
               </Card.Title>
               <Card.Description class="font-mono-tab mt-1">
-                {activeTeam.repoOwner}/{activeTeam.repoName}
+                {activeWs.slug}
+                {#if activeWs.memberCount != null}
+                  · {activeWs.memberCount} member{activeWs.memberCount === 1 ? '' : 's'}
+                {/if}
               </Card.Description>
-            </div>
-            <div class="text-right text-xs text-muted-foreground">
-              Last sync<br />
-              <span class="font-mono-tab">{formatRelative(activeTeam.lastSyncAt)}</span>
             </div>
           </div>
         </Card.Header>
         <Card.Content class="flex flex-wrap items-center gap-2">
-          <Button size="sm" onclick={() => syncTeam(activeTeam)} disabled={busy}>
+          <Button size="sm" onclick={() => syncWs(activeWs)} disabled={busy}>
             <RefreshIcon class={busy ? 'animate-spin' : ''} />
             Sync now
           </Button>
-          {#if activeTeam.role === 'owner'}
-            <Button size="sm" variant="outline" onclick={() => openInviteDialog(activeTeam)}>
+          {#if activeWs.role === 'owner' || activeWs.role === 'admin'}
+            <Button size="sm" variant="outline" onclick={() => openInvite(activeWs)}>
               <SendIcon />
               Invite member
             </Button>
           {/if}
-          <Button size="sm" variant="outline" onclick={() => openUrl(activeTeam.htmlUrl)}>
-            <ExternalLinkIcon />
-            Open on GitHub
-          </Button>
           <Button
             size="sm"
             variant="ghost"
             class="ml-auto text-destructive hover:text-destructive"
-            onclick={() => leaveTeam(activeTeam)}
+            onclick={() => leaveWs(activeWs)}
+            disabled={busy}
           >
             <TrashIcon />
-            {activeTeam.role === 'owner' ? 'Delete team' : 'Leave'}
+            {activeWs.role === 'owner' ? 'Delete workspace' : 'Leave'}
           </Button>
         </Card.Content>
       </Card.Root>
     {:else}
       <Card.Root>
         <Card.Content class="py-10 text-center">
-          <p class="text-sm text-muted-foreground">You're not in any team yet.</p>
-        </Card.Content>
-      </Card.Root>
-    {/if}
-
-    {#if activeTeam}
-      <Card.Root class="border-dashed">
-        <Card.Content class="py-4 text-sm text-muted-foreground">
-          Shared games show up in the <a
-            href="/"
-            class="font-medium text-foreground underline-offset-4 hover:underline">Games page</a
-          >. Hover a local profile there and click the upload icon to share it with this team
-          (profile + math + saved rounds).
+          <p class="text-sm text-muted-foreground">You're not in any workspace yet.</p>
         </Card.Content>
       </Card.Root>
     {/if}
@@ -425,35 +389,37 @@
     <div class="flex gap-2">
       <Button onclick={() => (createOpen = true)} disabled={busy}>
         <PlusIcon />
-        Create team
+        Create workspace
       </Button>
-      <Button variant="outline" onclick={openJoinDialog} disabled={busy}>
+      <Button variant="outline" onclick={() => (joinOpen = true)} disabled={busy}>
         <LogInIcon />
-        Join existing team
+        Join with invite
       </Button>
     </div>
 
-    <!-- Other teams -->
-    {#if otherTeams.length > 0}
+    <!-- Other workspaces -->
+    {#if otherWs.length > 0}
       <div>
-        <h2 class="mb-3 text-sm font-medium text-muted-foreground">Other teams on this device</h2>
+        <h2 class="mb-3 text-sm font-medium text-muted-foreground">Your other workspaces</h2>
         <div class="flex flex-col gap-2">
-          {#each otherTeams as t (t.id)}
+          {#each otherWs as w (w.id)}
             <Card.Root>
               <Card.Content class="flex items-center justify-between gap-3 py-4">
                 <div class="min-w-0">
                   <div class="flex items-center gap-2">
-                    <span class="font-medium">{t.name}</span>
-                    {#if t.role === 'owner'}
-                      <Badge variant="secondary" class="text-xs">Owner</Badge>
-                    {/if}
+                    <span class="font-medium">{w.name}</span>
+                    <Badge variant={w.role === 'owner' ? 'secondary' : 'outline'} class="text-xs">
+                      {w.role}
+                    </Badge>
                   </div>
                   <div class="font-mono-tab text-xs text-muted-foreground">
-                    {t.repoOwner}/{t.repoName}
+                    {w.slug}
+                    {#if w.memberCount != null}· {w.memberCount}
+                      member{w.memberCount === 1 ? '' : 's'}{/if}
                   </div>
                 </div>
                 <div class="flex gap-2">
-                  <Button size="sm" variant="outline" onclick={() => setActive(t)} disabled={busy}>
+                  <Button size="sm" variant="outline" onclick={() => setActive(w)} disabled={busy}>
                     <CheckIcon />
                     Set active
                   </Button>
@@ -461,7 +427,7 @@
                     size="sm"
                     variant="ghost"
                     class="text-destructive hover:text-destructive"
-                    onclick={() => leaveTeam(t)}
+                    onclick={() => leaveWs(w)}
                     disabled={busy}
                   >
                     <TrashIcon />
@@ -474,156 +440,98 @@
       </div>
     {/if}
   {/if}
+
+  <!-- Legacy GitHub teams (deprecated) -->
+  {#if pendingLegacy.length > 0}
+    <div class="mt-4 flex flex-col gap-3">
+      <div
+        class="rounded-md border border-amber-500/40 bg-amber-500/5 px-4 py-3 text-sm text-muted-foreground"
+      >
+        <span class="font-medium text-foreground">Legacy GitHub teams are deprecated.</span>
+        Migrate each one into a cloud workspace to keep syncing. Migration copies profiles, saved
+        rounds and math; the GitHub repo is left untouched. Requires both GitHub and cloud sign-in.
+      </div>
+
+      {#if !githubUser}
+        <Button variant="outline" size="sm" class="self-start" onclick={() => (githubSignInOpen = true)}>
+          <LogInIcon />
+          Sign in with GitHub to migrate
+        </Button>
+      {/if}
+
+      <div class="flex flex-col gap-2">
+        {#each pendingLegacy as t (t.id)}
+          <Card.Root class="border-dashed">
+            <Card.Content class="flex items-center justify-between gap-3 py-4">
+              <div class="min-w-0">
+                <div class="flex items-center gap-2">
+                  <span class="font-medium">{t.name}</span>
+                  {#if t.role === 'owner'}
+                    <Badge variant="secondary" class="text-xs">owner</Badge>
+                  {/if}
+                </div>
+                <div class="font-mono-tab text-xs text-muted-foreground">
+                  {t.repoOwner}/{t.repoName}
+                </div>
+              </div>
+              <Button
+                size="sm"
+                onclick={() => migrate(t)}
+                disabled={busy || migratingId === t.id || !cloudUser || !githubUser}
+              >
+                <UploadCloudIcon class={migratingId === t.id ? 'animate-pulse' : ''} />
+                {migratingId === t.id ? 'Migrating…' : 'Migrate to cloud'}
+              </Button>
+            </Card.Content>
+          </Card.Root>
+        {/each}
+      </div>
+    </div>
+  {/if}
 </main>
 
-<GithubSignInDialog bind:open={signInOpen} {onSignedIn} />
+<CloudSignInDialog bind:open={cloudSignInOpen} onSignedIn={onCloudSignedIn} />
+<GithubSignInDialog bind:open={githubSignInOpen} onSignedIn={onGithubSignedIn} />
 
-<!-- Create team dialog -->
+<!-- Create workspace dialog -->
 <Dialog.Root bind:open={createOpen}>
   <Dialog.Content>
     <Dialog.Header>
-      <Dialog.Title>Create a new team</Dialog.Title>
-      <Dialog.Description>
-        A private GitHub repo will be created to host the workspace.
-      </Dialog.Description>
+      <Dialog.Title>Create a workspace</Dialog.Title>
+      <Dialog.Description>You become the owner. Invite members with a link afterwards.</Dialog.Description>
     </Dialog.Header>
     <div class="my-4 flex flex-col gap-4">
       <div class="flex flex-col gap-2">
-        <Label for="teamName">Team name</Label>
-        <Input id="teamName" bind:value={createName} placeholder="My Slot Team" />
-        <p class="text-xs text-muted-foreground">
-          Repo will be named <span class="font-mono-tab">stake-dev-tool-team-&lt;slug&gt;</span>.
-        </p>
+        <Label for="wsName">Name</Label>
+        <Input id="wsName" bind:value={createName} placeholder="My Slot Team" />
       </div>
-
       <div class="flex flex-col gap-2">
-        <Label for="teamOrg">Account</Label>
-        <select
-          id="teamOrg"
-          bind:value={createOrg}
-          class="h-9 rounded-md border border-input bg-background px-3 py-1 text-sm text-foreground shadow-sm focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
-        >
-          <option value="" class="bg-background text-foreground">
-            @{user?.login} (personal)
-          </option>
-          {#each orgs as o (o.id)}
-            <option value={o.login} class="bg-background text-foreground">
-              {o.login} (organization)
-            </option>
-          {/each}
-        </select>
-        {#if orgs.length === 0}
-          <p class="text-xs text-muted-foreground">
-            No organizations found for your account. You can only create under your personal
-            account.
-          </p>
-        {/if}
+        <Label for="wsSlug">Slug (optional)</Label>
+        <Input id="wsSlug" bind:value={createSlug} placeholder="my-slot-team" />
+        <p class="text-xs text-muted-foreground">Derived from the name if left blank.</p>
       </div>
     </div>
     <Dialog.Footer>
       <Button variant="outline" onclick={() => (createOpen = false)}>Cancel</Button>
-      <Button onclick={createTeam} disabled={busy}>Create</Button>
+      <Button onclick={createWorkspace} disabled={busy}>Create</Button>
     </Dialog.Footer>
   </Dialog.Content>
 </Dialog.Root>
 
-<!-- Join team dialog -->
+<!-- Join dialog -->
 <Dialog.Root bind:open={joinOpen}>
-  <Dialog.Content class="max-w-lg">
-    <Dialog.Header>
-      <Dialog.Title>Join a team</Dialog.Title>
-      <Dialog.Description>
-        Teams you've been invited to show up here automatically.
-      </Dialog.Description>
-    </Dialog.Header>
-
-    <div class="my-2 flex flex-col gap-4">
-      <div>
-        <h3 class="mb-2 text-sm font-medium">Discovered</h3>
-        {#if discoverBusy}
-          <p class="text-xs text-muted-foreground">Searching…</p>
-        {:else if discovered.length === 0}
-          <p class="text-xs text-muted-foreground">
-            No pending invites found. Enter a repo manually below.
-          </p>
-        {:else}
-          <div class="flex flex-col gap-2">
-            {#each discovered as d (d.repoOwner + '/' + d.repoName)}
-              <button
-                type="button"
-                class="flex items-center justify-between rounded-md border px-3 py-2 text-left hover:bg-accent"
-                onclick={() => joinFromDiscovery(d)}
-                disabled={busy}
-              >
-                <div class="min-w-0">
-                  <div class="font-medium">{d.teamName}</div>
-                  <div class="font-mono-tab text-xs text-muted-foreground">
-                    {d.repoOwner}/{d.repoName}
-                  </div>
-                </div>
-                <CheckIcon class="h-4 w-4 text-muted-foreground" />
-              </button>
-            {/each}
-          </div>
-        {/if}
-      </div>
-
-      <Separator />
-
-      <div>
-        <h3 class="mb-2 text-sm font-medium">Or join manually</h3>
-        <div class="flex flex-col gap-2">
-          <Label for="joinOwner">Owner</Label>
-          <Input id="joinOwner" bind:value={joinOwner} placeholder="alice" />
-          <Label for="joinRepo">Repo name</Label>
-          <Input id="joinRepo" bind:value={joinRepo} placeholder="stake-dev-tool-team-foo" />
-        </div>
-      </div>
-    </div>
-
-    <Dialog.Footer>
-      <Button variant="outline" onclick={() => (joinOpen = false)}>Close</Button>
-      <Button onclick={joinManual} disabled={busy || !joinOwner.trim() || !joinRepo.trim()}>
-        Join manually
-      </Button>
-    </Dialog.Footer>
-  </Dialog.Content>
-</Dialog.Root>
-
-<!-- Delete team (owner) dialog -->
-<Dialog.Root bind:open={deleteOpen}>
   <Dialog.Content>
     <Dialog.Header>
-      <Dialog.Title class="text-destructive">Delete this team?</Dialog.Title>
-      <Dialog.Description>
-        This will permanently delete the private GitHub repository
-        {#if deleteTarget}
-          <span class="font-mono-tab text-foreground"
-            >{deleteTarget.repoOwner}/{deleteTarget.repoName}</span
-          >
-        {/if}
-        and all math files, saved rounds and profiles stored in it. All
-        members will lose access immediately. This cannot be undone.
-      </Dialog.Description>
+      <Dialog.Title>Join a workspace</Dialog.Title>
+      <Dialog.Description>Paste the invite link (or token) a workspace owner shared with you.</Dialog.Description>
     </Dialog.Header>
-    {#if deleteTarget}
-      <div class="my-4 flex flex-col gap-2">
-        <Label for="deleteConfirm">
-          Type <span class="font-mono-tab text-foreground">{deleteTarget.name}</span> to confirm
-        </Label>
-        <Input id="deleteConfirm" bind:value={deleteConfirmText} autocomplete="off" />
-      </div>
-    {/if}
+    <div class="my-4 flex flex-col gap-2">
+      <Label for="joinToken">Invite link or token</Label>
+      <Input id="joinToken" bind:value={joinToken} placeholder="https://…/invite/abc123 or abc123" />
+    </div>
     <Dialog.Footer>
-      <Button variant="outline" onclick={() => (deleteOpen = false)}>Cancel</Button>
-      <Button
-        variant="destructive"
-        onclick={confirmDeleteTeam}
-        disabled={busy || !deleteTarget || deleteConfirmText.trim() !== deleteTarget.name}
-      >
-        <TrashIcon />
-        Delete team
-      </Button>
+      <Button variant="outline" onclick={() => (joinOpen = false)}>Cancel</Button>
+      <Button onclick={joinWorkspace} disabled={busy || !joinToken.trim()}>Join</Button>
     </Dialog.Footer>
   </Dialog.Content>
 </Dialog.Root>
@@ -632,20 +540,76 @@
 <Dialog.Root bind:open={inviteOpen}>
   <Dialog.Content>
     <Dialog.Header>
-      <Dialog.Title>Invite a team member</Dialog.Title>
-      <Dialog.Description>
-        GitHub will email them an invitation to collaborate on the private repo.
-      </Dialog.Description>
+      <Dialog.Title>Invite a member</Dialog.Title>
+      <Dialog.Description>Create a one-time-view invite link and share it.</Dialog.Description>
     </Dialog.Header>
-    <div class="my-4 flex flex-col gap-2">
-      <Label for="inviteUser">GitHub username</Label>
-      <Input id="inviteUser" bind:value={inviteUsername} placeholder="alice" />
+    <div class="my-4 flex flex-col gap-3">
+      <div class="flex flex-col gap-2">
+        <Label for="inviteRole">Role</Label>
+        <select
+          id="inviteRole"
+          bind:value={inviteRole}
+          class="h-9 rounded-md border border-input bg-background px-3 py-1 text-sm text-foreground shadow-sm focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+        >
+          <option value="member">member</option>
+          <option value="admin">admin</option>
+        </select>
+      </div>
+      {#if inviteUrl}
+        <div class="flex flex-col gap-2">
+          <Label>Invite link (copy now — shown once)</Label>
+          <div class="flex items-center gap-2">
+            <code
+              class="font-mono-tab min-w-0 flex-1 truncate rounded-md border bg-muted px-3 py-2 text-xs"
+              title={inviteUrl}>{inviteUrl}</code
+            >
+            <Button size="icon" variant={inviteCopied ? 'secondary' : 'outline'} onclick={copyInvite}>
+              {#if inviteCopied}<CheckIcon />{:else}<CopyIcon />{/if}
+            </Button>
+          </div>
+        </div>
+      {/if}
     </div>
     <Dialog.Footer>
-      <Button variant="outline" onclick={() => (inviteOpen = false)}>Cancel</Button>
-      <Button onclick={sendInvite} disabled={busy || !inviteUsername.trim()}>
-        <SendIcon />
-        Send invite
+      <Button variant="outline" onclick={() => (inviteOpen = false)}>Close</Button>
+      {#if !inviteUrl}
+        <Button onclick={createInvite} disabled={busy}>
+          <SendIcon />
+          Create invite
+        </Button>
+      {/if}
+    </Dialog.Footer>
+  </Dialog.Content>
+</Dialog.Root>
+
+<!-- Delete workspace dialog -->
+<Dialog.Root bind:open={deleteOpen}>
+  <Dialog.Content>
+    <Dialog.Header>
+      <Dialog.Title class="text-destructive">Delete this workspace?</Dialog.Title>
+      <Dialog.Description>
+        This permanently deletes the workspace
+        {#if deleteTarget}<span class="font-mono-tab text-foreground">{deleteTarget.slug}</span>{/if}
+        and all its documents and math for every member. This cannot be undone.
+      </Dialog.Description>
+    </Dialog.Header>
+    {#if deleteTarget}
+      <div class="my-4 flex flex-col gap-2">
+        <Label for="delConfirm">
+          Type <span class="font-mono-tab text-foreground">{deleteTarget.name}</span> to confirm
+        </Label>
+        <Input id="delConfirm" bind:value={deleteConfirm} autocomplete="off" />
+      </div>
+    {/if}
+    <Dialog.Footer>
+      <Button variant="outline" onclick={() => (deleteOpen = false)}>Cancel</Button>
+      <Button
+        variant="destructive"
+        onclick={confirmDelete}
+        disabled={busy || !deleteTarget || deleteConfirm.trim() !== deleteTarget.name}
+      >
+        <TrashIcon />
+        Delete workspace
       </Button>
     </Dialog.Footer>
   </Dialog.Content>

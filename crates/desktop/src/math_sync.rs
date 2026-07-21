@@ -14,6 +14,14 @@
 //! - Each chunk is read fully into memory (~1 GiB). Future: stream from disk.
 //! - No progress reporting back to the UI.
 //! - No parallelism: chunks upload serially.
+//!
+//! DEPRECATED (M3): math now syncs over the cloud M2 blob/revision API
+//! (`crate::cloud::math`). This GitHub-Release implementation is retained only
+//! because migration (`crate::cloud::migrate`) still *pulls* legacy team math
+//! through it; the progress event shape (`MathSyncProgress`/`PROGRESS_EVENT`) is
+//! reused by the cloud path so `MathSyncOverlay` keeps working. The `push` path
+//! is no longer wired to any command — hence the module-level `allow(dead_code)`.
+#![allow(dead_code)]
 
 use anyhow::{Context, Result, anyhow};
 use futures_util::stream::{self, StreamExt};

@@ -608,29 +608,40 @@ pub async fn github_logout() -> Result<(), String> {
 }
 
 // ============================================================
-// Teams
+// Teams → cloud workspaces (M3)
+//
+// The command NAMES are the UI contract and are preserved; the bodies now
+// delegate to `crate::cloud` (workspaces + document sync + M2 math) instead of
+// the legacy GitHub-repo system in `crate::teams` (kept only for migration).
 // ============================================================
 
 #[tauri::command]
-pub async fn teams_list() -> Result<Vec<teams::Team>, String> {
-    teams::list_local().await.map_err(|e| format!("{e:#}"))
-}
-
-#[tauri::command]
-pub async fn teams_active() -> Result<Option<teams::Team>, String> {
-    teams::active_team().await.map_err(|e| format!("{e:#}"))
-}
-
-#[tauri::command]
-pub async fn teams_set_active(team_id: Option<String>) -> Result<(), String> {
-    teams::set_active(team_id.as_deref())
+pub async fn teams_list() -> Result<Vec<cloud::workspaces::Workspace>, String> {
+    cloud::workspaces::list()
         .await
         .map_err(|e| format!("{e:#}"))
 }
 
 #[tauri::command]
-pub async fn teams_create(name: String, org: Option<String>) -> Result<teams::Team, String> {
-    teams::create_team(name, org)
+pub async fn teams_active() -> Result<Option<cloud::workspaces::Workspace>, String> {
+    cloud::workspaces::active()
+        .await
+        .map_err(|e| format!("{e:#}"))
+}
+
+#[tauri::command]
+pub async fn teams_set_active(team_id: Option<String>) -> Result<(), String> {
+    cloud::workspaces::set_active(team_id.as_deref())
+        .await
+        .map_err(|e| format!("{e:#}"))
+}
+
+#[tauri::command]
+pub async fn teams_create(
+    name: String,
+    slug: Option<String>,
+) -> Result<cloud::workspaces::Workspace, String> {
+    cloud::workspaces::create(&name, slug.as_deref())
         .await
         .map_err(|e| format!("{e:#}"))
 }
@@ -641,42 +652,65 @@ pub async fn github_list_orgs() -> Result<Vec<github::api::OrgInfo>, String> {
     client.list_user_orgs().await.map_err(|e| format!("{e:#}"))
 }
 
+/// Join a workspace by accepting an invite token (from an invite URL).
 #[tauri::command]
-pub async fn teams_join(owner: String, name: String) -> Result<teams::Team, String> {
-    teams::join_team(owner, name)
+pub async fn teams_join(token: String) -> Result<cloud::workspaces::Workspace, String> {
+    cloud::workspaces::join(&token)
         .await
         .map_err(|e| format!("{e:#}"))
 }
 
 #[tauri::command]
 pub async fn teams_leave(team_id: String) -> Result<(), String> {
-    teams::remove_local(&team_id)
+    cloud::workspaces::leave(&team_id)
         .await
         .map_err(|e| format!("{e:#}"))
 }
 
 #[tauri::command]
 pub async fn teams_delete(team_id: String) -> Result<(), String> {
-    teams::delete_team(&team_id)
+    cloud::workspaces::delete(&team_id)
+        .await
+        .map_err(|e| format!("{e:#}"))
+}
+
+/// Create an invite for a workspace, returning its shareable URL (copy once).
+#[tauri::command]
+pub async fn teams_invite(team_id: String, role: Option<String>) -> Result<String, String> {
+    let role = match role.as_deref() {
+        Some("admin") => protocol::Role::Admin,
+        Some("owner") => protocol::Role::Owner,
+        _ => protocol::Role::Member,
+    };
+    cloud::workspaces::invite(&team_id, role)
         .await
         .map_err(|e| format!("{e:#}"))
 }
 
 #[tauri::command]
-pub async fn teams_invite(team_id: String, username: String) -> Result<(), String> {
-    teams::invite_member(&team_id, &username)
+pub async fn teams_sync(team_id: String) -> Result<cloud::sync::SyncReport, String> {
+    cloud::sync::sync(&team_id)
         .await
         .map_err(|e| format!("{e:#}"))
 }
 
+// ---- Legacy GitHub teams (migration only) ----
+
+/// Lists the legacy GitHub-repo teams still on this device, so the Teams screen
+/// can offer a per-team "Migrate to cloud" action.
 #[tauri::command]
-pub async fn teams_discover() -> Result<Vec<teams::DiscoveredTeam>, String> {
-    teams::discover_teams().await.map_err(|e| format!("{e:#}"))
+pub async fn teams_legacy_list() -> Result<Vec<teams::Team>, String> {
+    teams::list_local().await.map_err(|e| format!("{e:#}"))
 }
 
+/// Migrate a legacy GitHub team into a new cloud workspace (requires both
+/// GitHub and cloud sign-in).
 #[tauri::command]
-pub async fn teams_sync(team_id: String) -> Result<teams::SyncReport, String> {
-    teams::sync_team(&team_id)
+pub async fn teams_migrate_to_cloud(
+    app: AppHandle,
+    team_id: String,
+) -> Result<cloud::migrate::MigrateReport, String> {
+    cloud::migrate::migrate_to_cloud(&app, &team_id)
         .await
         .map_err(|e| format!("{e:#}"))
 }
@@ -692,7 +726,7 @@ pub async fn teams_push_math(
     game_slug: String,
     game_path: String,
 ) -> Result<math_sync::MathSyncReport, String> {
-    math_sync::push(&app, &team_id, &game_slug, game_path)
+    cloud::sync::push_math(&app, &team_id, &game_slug, game_path)
         .await
         .map_err(|e| format!("{e:#}"))
 }
@@ -704,7 +738,7 @@ pub async fn teams_pull_math(
     game_slug: String,
     dest_path: String,
 ) -> Result<math_sync::MathSyncReport, String> {
-    math_sync::pull(&app, &team_id, &game_slug, dest_path)
+    cloud::sync::pull_math(&app, &team_id, &game_slug, dest_path)
         .await
         .map_err(|e| format!("{e:#}"))
 }
@@ -745,35 +779,37 @@ pub async fn preview_build_local(
 
 #[tauri::command]
 pub async fn teams_list_remote_games(team_id: String) -> Result<Vec<String>, String> {
-    math_sync::list_remote_games(&team_id)
+    cloud::sync::list_remote_games(&team_id)
         .await
         .map_err(|e| format!("{e:#}"))
 }
 
 #[tauri::command]
 pub async fn teams_remove_from_catalog(team_id: String, profile_id: String) -> Result<(), String> {
-    teams::remove_from_catalog(&team_id, &profile_id)
+    cloud::sync::remove_from_catalog(&team_id, &profile_id)
         .await
         .map_err(|e| format!("{e:#}"))
 }
 
 #[tauri::command]
 pub async fn teams_push_profile(team_id: String, profile_id: String) -> Result<(), String> {
-    teams::push_local_profile(&team_id, &profile_id)
+    cloud::sync::push_profile(&team_id, &profile_id)
         .await
         .map_err(|e| format!("{e:#}"))
 }
 
 #[tauri::command]
-pub async fn teams_all_catalogs() -> Result<Vec<teams::CatalogEntry>, String> {
-    teams::list_all_catalogs()
+pub async fn teams_all_catalogs() -> Result<Vec<cloud::sync::CatalogEntry>, String> {
+    cloud::sync::all_catalogs()
         .await
         .map_err(|e| format!("{e:#}"))
 }
 
 #[tauri::command]
-pub async fn teams_list_profiles(team_id: String) -> Result<Vec<teams::TeamProfileInfo>, String> {
-    teams::list_team_profiles(&team_id)
+pub async fn teams_list_profiles(
+    team_id: String,
+) -> Result<Vec<cloud::sync::TeamProfileInfo>, String> {
+    cloud::sync::list_profiles(&team_id)
         .await
         .map_err(|e| format!("{e:#}"))
 }
@@ -784,24 +820,26 @@ pub async fn teams_pull_profile(
     team_id: String,
     team_profile_id: String,
 ) -> Result<profiles::Profile, String> {
-    teams::pull_team_profile(&app, &team_id, &team_profile_id)
+    cloud::sync::pull_profile(&app, &team_id, &team_profile_id)
         .await
         .map_err(|e| format!("{e:#}"))
 }
 
 #[tauri::command]
 pub async fn teams_default_math_root(team_id: String) -> Result<String, String> {
-    teams::default_math_root_for(&team_id)
+    let slug = cloud::workspaces::resolve_slug(&team_id)
         .await
+        .map_err(|e| format!("{e:#}"))?;
+    cloud::sync::default_math_root(&slug)
         .map(|p| p.to_string_lossy().into_owned())
         .map_err(|e| format!("{e:#}"))
 }
 
 // ============================================================
-// Cloud (V2 platform) — device-flow sign-in + workspaces.
+// Cloud (V2 platform) — device-flow sign-in, workspaces, live SSE.
 //
-// Additive M3-preparation seam. The GitHub-repo teams commands above are left
-// entirely untouched; their cloud replacement lands in M3 proper.
+// The `teams_*` commands above delegate to this cloud surface. These `cloud_*`
+// commands cover sign-in, the base-URL config, and the workspace event stream.
 // ============================================================
 
 #[tauri::command]
@@ -847,6 +885,38 @@ pub async fn cloud_sign_out() -> Result<(), String> {
 pub async fn cloud_list_workspaces() -> Result<protocol::WorkspacesResponse, String> {
     let client = cloud::api::CloudClient::from_stored_token().map_err(|e| e.to_string())?;
     client.list_workspaces().await.map_err(|e| e.to_string())
+}
+
+/// Start (or restart) the workspace SSE subscription for `workspace_id`. Live
+/// events arrive on the `cloud-workspace-event` Tauri event; any prior stream is
+/// aborted first so only the active workspace is subscribed.
+#[tauri::command]
+pub async fn cloud_subscribe(
+    app: AppHandle,
+    workspace_id: String,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    let slug = cloud::workspaces::resolve_slug(&workspace_id)
+        .await
+        .map_err(|e| format!("{e:#}"))?;
+    let previous = {
+        let mut guard = state.cloud_sse.lock();
+        guard.replace(cloud::sse::spawn(app, slug))
+    };
+    if let Some(handle) = previous {
+        handle.abort();
+    }
+    Ok(())
+}
+
+/// Stop the workspace SSE subscription, if any.
+#[tauri::command]
+pub async fn cloud_unsubscribe(state: State<'_, AppState>) -> Result<(), String> {
+    let previous = state.cloud_sse.lock().take();
+    if let Some(handle) = previous {
+        handle.abort();
+    }
+    Ok(())
 }
 
 #[tauri::command]

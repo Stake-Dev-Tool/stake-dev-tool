@@ -61,8 +61,9 @@ pub fn run() {
             commands::teams_leave,
             commands::teams_delete,
             commands::teams_invite,
-            commands::teams_discover,
             commands::teams_sync,
+            commands::teams_legacy_list,
+            commands::teams_migrate_to_cloud,
             commands::teams_push_math,
             commands::teams_pull_math,
             commands::teams_list_remote_games,
@@ -82,6 +83,8 @@ pub fn run() {
             commands::cloud_current_user,
             commands::cloud_sign_out,
             commands::cloud_list_workspaces,
+            commands::cloud_subscribe,
+            commands::cloud_unsubscribe,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

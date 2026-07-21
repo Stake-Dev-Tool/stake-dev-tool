@@ -12,9 +12,11 @@ use std::time::Duration;
 use serde::de::DeserializeOwned;
 
 use protocol::{
-    CreateInviteRequest, CreateWorkspaceRequest, CreatedInvite, ErrorResponse, Role,
-    WorkspaceDetail, WorkspaceSummary, WorkspacesResponse,
+    AcceptInviteRequest, AcceptInviteResponse, CreateInviteRequest, CreateWorkspaceRequest,
+    CreatedInvite, ErrorResponse, Role, WorkspaceDetail, WorkspaceSummary, WorkspacesResponse,
 };
+use serde::Deserialize;
+use uuid::Uuid;
 
 use super::auth::load_token;
 use super::config;
@@ -155,6 +157,82 @@ impl CloudClient {
         )
         .await
     }
+
+    /// `POST /api/invites/:token/accept` — join the workspace behind an invite.
+    ///
+    /// Note: `crates/server`'s README marks invite-accept as *session* auth,
+    /// which may reject a Bearer device token. The desktop attempts it here and
+    /// surfaces any auth error so the UI can fall back to opening the invite URL
+    /// in the browser (where the user has a cookie session). See the M3 report.
+    pub async fn accept_invite(&self, token: &str) -> Result<AcceptInviteResponse, CloudError> {
+        let req = AcceptInviteRequest {
+            token: token.to_string(),
+        };
+        send(
+            self.request(
+                reqwest::Method::POST,
+                &format!("/api/invites/{token}/accept"),
+            )
+            .json(&req),
+        )
+        .await
+    }
+
+    /// `DELETE /api/workspaces/:slug` — delete a workspace (owner only, 204).
+    pub async fn delete_workspace(&self, slug: &str) -> Result<(), CloudError> {
+        send_empty(self.request(reqwest::Method::DELETE, &format!("/api/workspaces/{slug}"))).await
+    }
+
+    /// `DELETE /api/workspaces/:slug/members/:user_id` — remove a member (used
+    /// to leave: pass the caller's own id).
+    pub async fn remove_member(&self, slug: &str, user_id: Uuid) -> Result<(), CloudError> {
+        send_empty(self.request(
+            reqwest::Method::DELETE,
+            &format!("/api/workspaces/{slug}/members/{user_id}"),
+        ))
+        .await
+    }
+
+    /// `GET /api/workspaces/:slug/games` — the workspace's games with their
+    /// head revision number and count.
+    pub async fn list_games(&self, slug: &str) -> Result<Vec<GameSummary>, CloudError> {
+        let resp: GamesResponse = send(self.request(
+            reqwest::Method::GET,
+            &format!("/api/workspaces/{slug}/games"),
+        ))
+        .await?;
+        Ok(resp.games)
+    }
+}
+
+/// One game row from `GET …/games`. Mirrors the M2 shape leniently (extra
+/// fields ignored); the desktop reads `slug` + `head_number` (has-math), and
+/// keeps `revisions_count` for parity with the wire response.
+#[derive(Debug, Clone, Deserialize)]
+#[allow(dead_code)]
+pub struct GameSummary {
+    pub slug: String,
+    #[serde(default)]
+    pub head_number: Option<i64>,
+    #[serde(default)]
+    pub revisions_count: Option<i64>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct GamesResponse {
+    #[serde(default)]
+    games: Vec<GameSummary>,
+}
+
+/// Like [`send`] but for endpoints that return an empty (204) body on success.
+async fn send_empty(rb: reqwest::RequestBuilder) -> Result<(), CloudError> {
+    let res = rb.send().await?;
+    let status = res.status();
+    if status.is_success() {
+        return Ok(());
+    }
+    let body = res.text().await?;
+    Err(CloudError::from_response(status, &body))
 }
 
 #[cfg(test)]

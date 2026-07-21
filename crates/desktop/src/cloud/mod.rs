@@ -17,3 +17,11 @@
 pub mod api;
 pub mod auth;
 pub mod config;
+pub mod documents;
+pub mod http;
+pub mod math;
+pub mod migrate;
+pub mod sidecar;
+pub mod sse;
+pub mod sync;
+pub mod workspaces;
