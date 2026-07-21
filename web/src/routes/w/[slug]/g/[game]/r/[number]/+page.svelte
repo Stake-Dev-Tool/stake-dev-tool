@@ -1,18 +1,18 @@
 <script lang="ts">
   import { page } from '$app/state';
   import { api, ApiError, type RevisionDetail } from '$lib/api';
-  import {
-    errorText,
-    relativeAge,
-    humanSize,
-    formatCost,
-    formatRtp,
-    formatMultiplier
-  } from '$lib/format';
+  import { errorText, humanSize, formatCost, formatRtp, formatMultiplier } from '$lib/format';
+  import { workspaceName } from '$lib/workspaces.svelte';
+  import { copyText } from '$lib/clipboard';
   import Button from '$lib/components/Button.svelte';
   import Card from '$lib/components/Card.svelte';
   import Badge from '$lib/components/Badge.svelte';
   import FrontUrlDialog from '$lib/components/FrontUrlDialog.svelte';
+  import Breadcrumbs from '$lib/components/Breadcrumbs.svelte';
+  import Skeleton from '$lib/components/Skeleton.svelte';
+  import EmptyState from '$lib/components/EmptyState.svelte';
+  import SectionHeader from '$lib/components/SectionHeader.svelte';
+  import Time from '$lib/components/Time.svelte';
 
   let slug = $derived(page.params.slug ?? '');
   let game = $derived(page.params.game ?? '');
@@ -71,12 +71,12 @@
   let copyTimer: ReturnType<typeof setTimeout> | undefined;
 
   async function copyHash(hash: string) {
-    try {
-      await navigator.clipboard.writeText(hash);
+    const ok = await copyText(hash, 'Hash copied');
+    if (ok) {
       copiedHash = hash;
       clearTimeout(copyTimer);
       copyTimer = setTimeout(() => (copiedHash = null), 1600);
-    } catch {
+    } else {
       copiedHash = null;
     }
   }
@@ -91,22 +91,23 @@
 <svelte:head><title>rev {numParam} · {game} · Stake Cloud</title></svelte:head>
 
 <main class="mx-auto w-full max-w-5xl px-6 py-10">
-  <a
-    href={`/w/${slug}/g/${game}`}
-    class="mb-6 inline-flex items-center gap-1.5 text-sm text-muted transition hover:text-text"
-  >
-    <span aria-hidden="true">←</span> {game}
-  </a>
+  <Breadcrumbs
+    items={[
+      { label: workspaceName(slug), href: `/w/${slug}` },
+      { label: game, href: `/w/${slug}/g/${game}` },
+      { label: `rev ${numParam}` }
+    ]}
+  />
 
   {#if loading}
-    <div class="flex items-center gap-3 py-16 text-muted"><span class="spinner"></span> Loading…</div>
+    <Card class="p-6"><Skeleton /></Card>
   {:else if notFound}
-    <Card class="flex flex-col items-center gap-3 border-dashed px-6 py-16 text-center">
-      <span class="flex h-11 w-11 items-center justify-center rounded-full bg-surface-2 text-xl text-muted">?</span>
-      <h1 class="text-lg font-semibold">Revision not found</h1>
-      <p class="max-w-sm text-sm text-muted">This revision doesn't exist, or you don't have access to it.</p>
-      <Button href={`/w/${slug}/g/${game}`} variant="outline" class="mt-2">Back to revisions</Button>
-    </Card>
+    <EmptyState title="Revision not found">
+      This revision doesn't exist, or you don't have access to it.
+      {#snippet cta()}
+        <Button href={`/w/${slug}/g/${game}`} variant="outline">Back to revisions</Button>
+      {/snippet}
+    </EmptyState>
   {:else if loadError}
     <Card class="p-6">
       <p class="text-sm text-danger">{loadError}</p>
@@ -124,7 +125,7 @@
             <span aria-hidden="true">·</span>
             <span>{detail.author_display_name || 'Unknown author'}</span>
             <span aria-hidden="true">·</span>
-            <span title={detail.created_at}>{relativeAge(detail.created_at)}</span>
+            <Time iso={detail.created_at} />
             <span aria-hidden="true">·</span>
             <span>{detail.files.length} {detail.files.length === 1 ? 'file' : 'files'}</span>
             <span aria-hidden="true">·</span>
@@ -155,7 +156,7 @@
 
     <!-- Stats -->
     <section class="mb-10">
-      <h2 class="mb-3 text-sm font-semibold uppercase tracking-wide text-faint">Bet stats</h2>
+      <SectionHeader title="Bet stats" />
       <Card class="overflow-hidden">
         {#if statsStatus === 'pending'}
           <div class="flex items-center gap-3 px-4 py-8 text-muted">
@@ -207,9 +208,7 @@
 
     <!-- Files -->
     <section>
-      <h2 class="mb-3 text-sm font-semibold uppercase tracking-wide text-faint">
-        Files · {detail.files.length}
-      </h2>
+      <SectionHeader title={`Files · ${detail.files.length}`} />
       <Card class="overflow-hidden">
         {#if detail.files.length === 0}
           <p class="px-4 py-8 text-center text-sm text-muted">No files in this revision.</p>

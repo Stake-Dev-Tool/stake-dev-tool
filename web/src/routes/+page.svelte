@@ -9,10 +9,13 @@
     type WorkspaceMembership
   } from '$lib/api';
   import { roleTone, errorText } from '$lib/format';
+  import { setWorkspaces, loadWorkspaces } from '$lib/workspaces.svelte';
   import Button from '$lib/components/Button.svelte';
   import Input from '$lib/components/Input.svelte';
   import Card from '$lib/components/Card.svelte';
   import Badge from '$lib/components/Badge.svelte';
+  import Skeleton from '$lib/components/Skeleton.svelte';
+  import EmptyState from '$lib/components/EmptyState.svelte';
 
   let memberships = $state<WorkspaceMembership[]>([]);
   let loading = $state(true);
@@ -42,6 +45,8 @@
     loadError = '';
     try {
       memberships = await api.workspaces.list();
+      // Seed the session cache the Nav switcher + breadcrumbs read from.
+      setWorkspaces(memberships);
     } catch (e) {
       loadError = errorText(e);
     } finally {
@@ -61,6 +66,8 @@
     createError = '';
     try {
       const ws = await api.workspaces.create(name.trim(), slug);
+      // Refresh the cached list so the Nav switcher shows the new workspace.
+      void loadWorkspaces(true);
       await goto(`/w/${ws.slug}`);
     } catch (e) {
       if (e instanceof ApiError && e.code === 'slug_taken') {
@@ -128,8 +135,9 @@
   {/if}
 
   {#if loading}
-    <div class="flex items-center gap-3 py-16 text-muted">
-      <span class="spinner"></span> Loading workspaces…
+    <div class="grid gap-3 sm:grid-cols-2">
+      <Card class="p-5"><Skeleton lines={2} /></Card>
+      <Card class="p-5"><Skeleton lines={2} /></Card>
     </div>
   {:else if loadError}
     <Card class="p-6">
@@ -137,22 +145,13 @@
       <Button variant="outline" size="sm" class="mt-4" onclick={load}>Retry</Button>
     </Card>
   {:else if memberships.length === 0 && !showCreate}
-    <!-- Empty state that doesn't look sad -->
-    <Card class="flex flex-col items-center gap-4 border-dashed px-6 py-16 text-center">
-      <span class="flex h-12 w-12 items-center justify-center rounded-xl bg-accent/10 text-accent">
-        <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-          <path d="M3 7a2 2 0 0 1 2-2h4l2 2h6a2 2 0 0 1 2 2v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z" />
-        </svg>
-      </span>
-      <div>
-        <h2 class="text-lg font-semibold">Create your first workspace</h2>
-        <p class="mx-auto mt-1.5 max-w-md text-sm leading-relaxed text-muted">
-          A workspace is where your team's games and math revisions live. You'll be its owner and can
-          invite others in seconds.
-        </p>
-      </div>
-      <Button onclick={openCreate}>New workspace</Button>
-    </Card>
+    <EmptyState title="Create your first workspace">
+      A workspace is where your team's games and math revisions live. You'll be its owner and can
+      invite others in seconds.
+      {#snippet cta()}
+        <Button onclick={openCreate}>New workspace</Button>
+      {/snippet}
+    </EmptyState>
   {:else}
     <div class="grid gap-3 sm:grid-cols-2">
       {#each memberships as m (m.workspace.id || m.workspace.slug)}

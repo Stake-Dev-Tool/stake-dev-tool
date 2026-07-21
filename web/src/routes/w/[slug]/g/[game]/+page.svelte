@@ -1,8 +1,10 @@
 <script lang="ts">
+  import { onMount } from 'svelte';
   import { page } from '$app/state';
   import { goto } from '$app/navigation';
   import { api, ApiError, type Game, type RevisionSummary, type StatsStatus } from '$lib/api';
-  import { errorText, relativeAge, humanSize } from '$lib/format';
+  import { errorText, humanSize } from '$lib/format';
+  import { workspaceName } from '$lib/workspaces.svelte';
   import Button from '$lib/components/Button.svelte';
   import Card from '$lib/components/Card.svelte';
   import Badge from '$lib/components/Badge.svelte';
@@ -12,6 +14,12 @@
   import FrontUrlDialog from '$lib/components/FrontUrlDialog.svelte';
   import PlanBanner from '$lib/components/PlanBanner.svelte';
   import SharePanel from '$lib/components/SharePanel.svelte';
+  import Breadcrumbs from '$lib/components/Breadcrumbs.svelte';
+  import Skeleton from '$lib/components/Skeleton.svelte';
+  import EmptyState from '$lib/components/EmptyState.svelte';
+  import SectionHeader from '$lib/components/SectionHeader.svelte';
+  import Tabs from '$lib/components/Tabs.svelte';
+  import Time from '$lib/components/Time.svelte';
 
   let slug = $derived(page.params.slug ?? '');
   let game = $derived(page.params.game ?? '');
@@ -19,6 +27,18 @@
   let showPush = $state(false);
   let showFrontPush = $state(false);
   let testOpen = $state(false);
+
+  // Client-side tabs (deep-linkable via #revisions / #share).
+  type GameTab = 'revisions' | 'share';
+  let activeTab = $state<GameTab>('revisions');
+  function selectTab(id: string) {
+    activeTab = id as GameTab;
+    if (typeof history !== 'undefined') history.replaceState(history.state, '', `#${id}`);
+  }
+  onMount(() => {
+    const h = location.hash.replace('#', '');
+    if (h === 'revisions' || h === 'share') activeTab = h;
+  });
 
   let gameMeta = $state<Game | null>(null);
   let revisions = $state<RevisionSummary[]>([]);
@@ -93,31 +113,24 @@
 <svelte:head><title>{gameName} · Stake Cloud</title></svelte:head>
 
 <main class="mx-auto w-full max-w-5xl px-6 py-10">
-  <a
-    href={`/w/${slug}`}
-    class="mb-6 inline-flex items-center gap-1.5 text-sm text-muted transition hover:text-text"
-  >
-    <span aria-hidden="true">←</span> Workspace
-  </a>
+  <Breadcrumbs items={[{ label: workspaceName(slug), href: `/w/${slug}` }, { label: gameName }]} />
 
   {#if loading}
-    <div class="flex items-center gap-3 py-16 text-muted"><span class="spinner"></span> Loading…</div>
+    <Card class="p-6"><Skeleton /></Card>
   {:else if notFound}
-    <Card class="flex flex-col items-center gap-3 border-dashed px-6 py-16 text-center">
-      <span class="flex h-11 w-11 items-center justify-center rounded-full bg-surface-2 text-xl text-muted">?</span>
-      <h1 class="text-lg font-semibold">Game not found</h1>
-      <p class="max-w-sm text-sm text-muted">
-        This game doesn't exist in the workspace, or you don't have access to it.
-      </p>
-      <Button href={`/w/${slug}`} variant="outline" class="mt-2">Back to workspace</Button>
-    </Card>
+    <EmptyState title="Game not found">
+      This game doesn't exist in the workspace, or you don't have access to it.
+      {#snippet cta()}
+        <Button href={`/w/${slug}`} variant="outline">Back to workspace</Button>
+      {/snippet}
+    </EmptyState>
   {:else if loadError}
     <Card class="p-6">
       <p class="text-sm text-danger">{loadError}</p>
       <Button variant="outline" size="sm" class="mt-4" onclick={load}>Retry</Button>
     </Card>
   {:else}
-    <header class="mb-8 flex flex-wrap items-center gap-3">
+    <header class="mb-6 flex flex-wrap items-center gap-3">
       <h1 class="text-2xl font-semibold tracking-tight">{gameName}</h1>
       <span class="font-mono-tab text-sm text-muted">{game}</span>
       {#if headNumber != null}
@@ -125,17 +138,14 @@
       {:else}
         <Badge>no revisions</Badge>
       {/if}
-      <div class="ml-auto flex items-center gap-2">
-        {#if headNumber != null}
-          <Button variant="outline" onclick={() => (testOpen = true)}>Open test view</Button>
-        {/if}
-        {#if !showPush}
-          <Button onclick={() => (showPush = true)}>Push a revision</Button>
-        {/if}
-        {#if !showFrontPush}
-          <Button variant="secondary" onclick={() => (showFrontPush = true)}>Push front</Button>
-        {/if}
-      </div>
+      {#if headNumber != null}
+        <div class="ml-auto flex flex-wrap items-center gap-2">
+          <Button href={`/w/${slug}/g/${game}/r/${headNumber}/math`} variant="outline" size="sm">
+            Math report
+          </Button>
+          <Button variant="outline" size="sm" onclick={() => (testOpen = true)}>Open test view</Button>
+        </div>
+      {/if}
     </header>
 
     <PlanBanner {slug} />
@@ -144,54 +154,58 @@
       <FrontUrlDialog bind:open={testOpen} {slug} {game} number={headNumber} />
     {/if}
 
-    {#if showPush}
-      <div class="mb-8">
-        <MathPushPanel
-          {slug}
-          {game}
-          parentNumber={headNumber}
-          ondone={(n) => onPushed(n)}
-          oncancel={() => (showPush = false)}
-        />
-      </div>
-    {/if}
+    <Tabs
+      class="mb-6"
+      tabs={[
+        { id: 'revisions', label: 'Revisions', badge: revisions.length },
+        { id: 'share', label: 'Share' }
+      ]}
+      active={activeTab}
+      onselect={selectTab}
+    />
 
-    {#if showFrontPush}
-      <div class="mb-8">
-        <FrontPushPanel {slug} {game} oncancel={() => (showFrontPush = false)} />
-      </div>
-    {/if}
+    {#if activeTab === 'revisions'}
+      <SectionHeader title="Revisions">
+        {#snippet action()}
+          {#if !showPush}
+            <Button size="sm" onclick={() => (showPush = true)}>Push a revision</Button>
+          {/if}
+          {#if !showFrontPush}
+            <Button variant="secondary" size="sm" onclick={() => (showFrontPush = true)}>
+              Push front
+            </Button>
+          {/if}
+        {/snippet}
+      </SectionHeader>
 
-    {#if revisions.length === 0}
-      <Card class="flex flex-col items-center gap-4 border-dashed px-6 py-16 text-center">
-        <span class="flex h-12 w-12 items-center justify-center rounded-xl bg-accent/10 text-accent">
-          <svg
-            width="22"
-            height="22"
-            viewBox="0 0 24 24"
-            fill="none"
-            stroke="currentColor"
-            stroke-width="2"
-            stroke-linecap="round"
-            stroke-linejoin="round"
-          >
-            <line x1="6" y1="3" x2="6" y2="15" />
-            <circle cx="18" cy="6" r="3" />
-            <circle cx="6" cy="18" r="3" />
-            <path d="M18 9a9 9 0 0 1-9 9" />
-          </svg>
-        </span>
-        <div>
-          <h2 class="text-lg font-semibold">No revisions yet</h2>
-          <p class="mx-auto mt-1.5 max-w-md text-sm leading-relaxed text-muted">
-            Revisions are immutable math snapshots. Push one straight from your browser with
-            <span class="text-text">Push a revision</span> above, or run
-            <span class="font-mono-tab text-text">sdt push</span> from CI.
-          </p>
+      {#if showPush}
+        <div class="mb-6">
+          <MathPushPanel
+            {slug}
+            {game}
+            parentNumber={headNumber}
+            ondone={(n) => onPushed(n)}
+            oncancel={() => (showPush = false)}
+          />
         </div>
-        <div class="w-full max-w-xs"><CopyField value="sdt push" /></div>
-      </Card>
-    {:else}
+      {/if}
+
+      {#if showFrontPush}
+        <div class="mb-6">
+          <FrontPushPanel {slug} {game} oncancel={() => (showFrontPush = false)} />
+        </div>
+      {/if}
+
+      {#if revisions.length === 0}
+        <EmptyState title="No revisions yet">
+          Revisions are immutable math snapshots. Push one straight from your browser with
+          <span class="text-text">Push a revision</span> above, or run
+          <span class="font-mono-tab text-text">sdt push</span> from CI.
+          {#snippet cta()}
+            <div class="w-full max-w-xs"><CopyField value="sdt push" /></div>
+          {/snippet}
+        </EmptyState>
+      {:else}
       <!-- Compare picker -->
       {#if revisions.length >= 2}
         <Card class="mb-4 p-4">
@@ -260,7 +274,7 @@
                     <span class="line-clamp-1 max-w-[22rem] text-text">{r.message || '—'}</span>
                   </td>
                   <td class="px-4 py-3 text-muted">{r.author_display_name || '—'}</td>
-                  <td class="px-4 py-3 text-muted" title={r.created_at}>{relativeAge(r.created_at)}</td>
+                  <td class="px-4 py-3 text-muted"><Time iso={r.created_at} /></td>
                   <td class="px-4 py-3 text-right font-mono-tab text-muted">{r.files_count}</td>
                   <td class="px-4 py-3 text-right font-mono-tab text-muted">{humanSize(r.total_size)}</td>
                   <td class="px-4 py-3">
@@ -275,9 +289,10 @@
             </tbody>
           </table>
         </div>
-      </Card>
+        </Card>
+      {/if}
+    {:else}
+      <SharePanel {slug} {game} {revisions} {headNumber} />
     {/if}
-
-    <SharePanel {slug} {game} {revisions} {headNumber} />
   {/if}
 </main>

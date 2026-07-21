@@ -1,17 +1,16 @@
 <script lang="ts">
   /**
-   * SharePanel — the game page's "Share" section (M5). Three stacked pieces:
+   * SharePanel — the game page's "Share" tab (M5):
    *
-   *   1. Game front card — upload the front build a share serves. Reuses
-   *      MathFolderPicker (root `index.html`, ≤ 2000 files) + `runFrontPush`
-   *      (the same hash → check → upload → commit pipeline as math), with a
-   *      compact inline progress recap.
-   *   2. Create share (owner/admin only) — pin a revision (or track latest),
-   *      optional custom slug / password / expiry / session cap → POST, then
-   *      prepend to the list and show the new URL prominently.
-   *   3. Share links list — every ShareLinkView as a card: URL (CopyField, or a
-   *      "no play domain" hint), rev/bundle/password/expiry/revoked badges,
-   *      counters, and Revoke / Delete actions. Manual Refresh; no polling.
+   *   • Game front status — a best-effort probe of whether this game has an
+   *     uploaded front bundle (the build a share serves). The bundle itself is
+   *     pushed from the Revisions tab (Push front); shares use the latest one.
+   *   • Create share (owner/admin only) — pin a revision (or track latest),
+   *     optional custom slug / password / expiry / session cap → POST, then
+   *     prepend to the list and show the new URL prominently (stays inline).
+   *   • Share links list — every ShareLink as a card: URL (CopyField, or a
+   *     "no play domain" hint), rev/bundle/password/expiry/revoked badges,
+   *     counters, and Revoke / Delete actions. Manual Refresh; no polling.
    *
    * Members can view the list (and copy URLs) but see no create/manage controls.
    */
@@ -26,21 +25,18 @@
     type ShareLink
   } from '$lib/api';
   import { session } from '$lib/session.svelte';
-  import { errorText, formatExpiry, humanSize, relativeAge, formatRtp } from '$lib/format';
-  import {
-    runFrontPush,
-    pushErrorMessage,
-    type FileProgress,
-    type IntakeFile,
-    type PushPhase
-  } from '$lib/push';
+  import { toast } from '$lib/toasts.svelte';
+  import { errorText, formatExpiry, humanSize, formatRtp } from '$lib/format';
   import Button from '$lib/components/Button.svelte';
   import Input from '$lib/components/Input.svelte';
   import Card from '$lib/components/Card.svelte';
   import Badge from '$lib/components/Badge.svelte';
   import CopyField from '$lib/components/CopyField.svelte';
-  import MathFolderPicker from '$lib/components/MathFolderPicker.svelte';
   import UpgradeNotice from '$lib/components/UpgradeNotice.svelte';
+  import SectionHeader from '$lib/components/SectionHeader.svelte';
+  import EmptyState from '$lib/components/EmptyState.svelte';
+  import Skeleton from '$lib/components/Skeleton.svelte';
+  import Time from '$lib/components/Time.svelte';
 
   type Props = {
     slug: string;
@@ -68,6 +64,29 @@
     void slug;
     void game;
     load();
+  });
+
+  // Best-effort front-bundle status: HEAD the same-origin front route the server
+  // serves an uploaded bundle at. Purely informational — a failure reads as "none".
+  let frontStatus = $state<'checking' | 'present' | 'absent'>('checking');
+  $effect(() => {
+    const s = slug;
+    const g = game;
+    frontStatus = 'checking';
+    let cancelled = false;
+    fetch(`/api/ws/${encodeURIComponent(s)}/g/${encodeURIComponent(g)}/front/`, {
+      method: 'HEAD',
+      credentials: 'same-origin'
+    })
+      .then((r) => {
+        if (!cancelled) frontStatus = r.ok ? 'present' : 'absent';
+      })
+      .catch(() => {
+        if (!cancelled) frontStatus = 'absent';
+      });
+    return () => {
+      cancelled = true;
+    };
   });
 
   async function load() {
@@ -190,6 +209,7 @@
     try {
       const updated = await api.shares.revoke(slug, game, s.id);
       shares = shares.map((x) => (x.id === s.id ? updated : x));
+      toast.success(`Share link ${s.slug} revoked.`);
     } catch (e) {
       actionError = shareErrorMessage(e);
     } finally {
@@ -205,6 +225,7 @@
       await api.shares.remove(slug, game, s.id);
       shares = shares.filter((x) => x.id !== s.id);
       if (createdShare?.id === s.id) createdShare = null;
+      toast.success(`Share link ${s.slug} deleted.`);
     } catch (e) {
       actionError = shareErrorMessage(e);
     } finally {
@@ -227,16 +248,37 @@
   }
 </script>
 
-<section class="mt-10">
-  <div class="mb-4 flex flex-wrap items-center justify-between gap-3">
-    <div>
-      <h2 class="text-lg font-semibold tracking-tight">Share</h2>
-      <p class="mt-0.5 text-sm text-muted">
-        Host a playable instance of this game and share the link. Analytics land back here. Upload the game front with the Push front button above; shares use the latest bundle.
-      </p>
+<section>
+  <SectionHeader title="Share" class="mb-4">
+    Host a playable instance of this game and share the link. Analytics land back here.
+    {#snippet action()}
+      <Button variant="outline" size="sm" onclick={refresh} loading={loadingShares}>Refresh</Button>
+    {/snippet}
+  </SectionHeader>
+
+  <!-- Game front status -->
+  <Card class="mb-4 flex flex-wrap items-center justify-between gap-x-4 gap-y-2 p-4">
+    <div class="flex items-center gap-2.5 text-sm">
+      <span
+        class="h-2 w-2 rounded-full {frontStatus === 'present'
+          ? 'bg-accent'
+          : frontStatus === 'checking'
+            ? 'bg-warn'
+            : 'bg-faint'}"
+      ></span>
+      <span class="font-medium text-text">Game front</span>
+      {#if frontStatus === 'checking'}
+        <span class="text-muted">checking…</span>
+      {:else if frontStatus === 'present'}
+        <Badge tone="accent">bundle uploaded</Badge>
+      {:else}
+        <span class="text-muted">no bundle uploaded yet</span>
+      {/if}
     </div>
-    <Button variant="outline" size="sm" onclick={refresh} loading={loadingShares}>Refresh</Button>
-  </div>
+    <span class="text-xs text-faint">
+      Push or update it from the Revisions tab → Push front. Shares serve the latest bundle.
+    </span>
+  </Card>
 
   <!-- 2) Create share (owner/admin) ----------------------------------------->
   {#if canManage}
@@ -368,21 +410,20 @@
 
   <!-- 3) Share links list --------------------------------------------------->
   {#if loadingShares && shares.length === 0}
-    <div class="flex items-center gap-3 py-8 text-muted"><span class="spinner"></span> Loading share links…</div>
+    <Card class="p-6"><Skeleton /></Card>
   {:else if sharesError}
     <Card class="p-6">
       <p class="text-sm text-danger">{sharesError}</p>
       <Button variant="outline" size="sm" class="mt-4" onclick={refresh}>Retry</Button>
     </Card>
   {:else if shares.length === 0}
-    <Card class="flex flex-col items-center gap-2 border-dashed px-6 py-12 text-center">
-      <h3 class="text-base font-semibold">No share links yet</h3>
-      <p class="max-w-sm text-sm text-muted">
-        {canManage
-          ? 'Create a share link above to hand this game to a tester — no install, just a URL.'
-          : 'No one has created a share link for this game yet.'}
-      </p>
-    </Card>
+    <EmptyState title="No share links yet">
+      {#if canManage}
+        Create a share link above to hand this game to a tester — no install, just a URL.
+      {:else}
+        No one has created a share link for this game yet.
+      {/if}
+    </EmptyState>
   {:else}
     <div class="flex flex-col gap-3">
       {#each shares as s (s.id)}
@@ -407,9 +448,7 @@
               {#if s.password_protected}
                 <Badge tone="warn">🔒 password</Badge>
               {/if}
-              <span class="ml-auto text-xs text-faint" title={s.created_at}>
-                created {relativeAge(s.created_at)}
-              </span>
+              <span class="ml-auto text-xs text-faint">created <Time iso={s.created_at} /></span>
             </div>
 
             <!-- URL -->
@@ -446,7 +485,7 @@
               <span>Expires: <span class="text-text">{formatExpiry(s.expires_at)}</span></span>
               <span>Session cap: <span class="text-text">{s.max_concurrent_sessions}</span></span>
               {#if revoked}
-                <span class="text-danger">Revoked {relativeAge(s.revoked_at)}</span>
+                <span class="text-danger">Revoked <Time iso={s.revoked_at} /></span>
               {/if}
               {#if canManage}
                 <div class="ml-auto flex items-center gap-2">

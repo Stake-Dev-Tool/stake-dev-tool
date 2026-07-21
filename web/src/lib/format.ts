@@ -18,6 +18,17 @@ export function formatDate(iso: string | null | undefined): string {
   return d.toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: 'numeric' });
 }
 
+/**
+ * Absolute local date+time for a timestamp, used as the `title=` tooltip that
+ * pairs with a relative age (see the `Time` component). "" for empty/invalid.
+ */
+export function formatAbsolute(iso: string | null | undefined): string {
+  if (!iso) return '';
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return '';
+  return d.toLocaleString(undefined, { dateStyle: 'medium', timeStyle: 'short' });
+}
+
 /** Human "expires" string: never / relative-ish date / expired. */
 export function formatExpiry(iso: string | null | undefined): string {
   if (!iso) return 'Never';
@@ -102,13 +113,13 @@ export function pct(frac: number | null | undefined, dp = 2): string {
 }
 
 /**
- * Odds denominator N → "1 in N". Values ≥ 1e6 collapse to millions with 2dp
- * ("1 in 6.80M"); smaller values are rounded and grouped ("1 in 1,470").
- * Null / non-positive input is an em-dash.
+ * Odds denominator N → "1 in N". Values ≥ 100,000 collapse to millions with 2dp
+ * ("1 in 0.68M", "1 in 6.80M"); smaller values are rounded and grouped
+ * ("1 in 1,470"). Null / non-positive input is an em-dash.
  */
 export function formatOdds(n: number | null | undefined): string {
   if (n == null || !Number.isFinite(n) || n <= 0) return '—';
-  if (n >= 1e6) {
+  if (n >= 100_000) {
     return `1 in ${(n / 1e6).toLocaleString(undefined, {
       minimumFractionDigits: 2,
       maximumFractionDigits: 2

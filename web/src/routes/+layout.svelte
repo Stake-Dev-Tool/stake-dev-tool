@@ -5,6 +5,7 @@
   import { goto } from '$app/navigation';
   import { session, refreshSession } from '$lib/session.svelte';
   import Nav from '$lib/components/Nav.svelte';
+  import Toasts from '$lib/components/Toasts.svelte';
 
   let { children } = $props();
 
@@ -41,3 +42,5 @@
     <span class="spinner"></span>
   </div>
 {/if}
+
+<Toasts />

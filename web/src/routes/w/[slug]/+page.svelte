@@ -15,6 +15,7 @@
   } from '$lib/api';
   import { session } from '$lib/session.svelte';
   import { invalidateBillingStatus } from '$lib/billing';
+  import { toast } from '$lib/toasts.svelte';
   import { roleTone, formatDate, formatExpiry, errorText } from '$lib/format';
   import Button from '$lib/components/Button.svelte';
   import Input from '$lib/components/Input.svelte';
@@ -23,6 +24,11 @@
   import CopyField from '$lib/components/CopyField.svelte';
   import MathPushPanel from '$lib/components/MathPushPanel.svelte';
   import PlanBanner from '$lib/components/PlanBanner.svelte';
+  import Breadcrumbs from '$lib/components/Breadcrumbs.svelte';
+  import Skeleton from '$lib/components/Skeleton.svelte';
+  import EmptyState from '$lib/components/EmptyState.svelte';
+  import SectionHeader from '$lib/components/SectionHeader.svelte';
+  import Tabs from '$lib/components/Tabs.svelte';
 
   let slug = $derived(page.params.slug ?? '');
 
@@ -35,7 +41,14 @@
   let loadError = $state('');
   let actionError = $state('');
   let busyUser = $state<string | null>(null); // user_id currently mutating
-  let upgradedToast = $state('');
+
+  // Client-side tabs (deep-linkable via #games / #settings). Games is primary.
+  type WsTab = 'games' | 'settings';
+  let activeTab = $state<WsTab>('games');
+  function selectTab(id: string) {
+    activeTab = id as WsTab;
+    if (typeof history !== 'undefined') history.replaceState(history.state, '', `#${id}`);
+  }
 
   // Derived permission context
   let myId = $derived(session.user?.id ?? '');
@@ -47,6 +60,9 @@
   );
   let ownersCount = $derived(members.filter((m) => m.role === 'owner').length);
   let canManage = $derived(myRole === 'owner' || myRole === 'admin');
+  let selfMember = $derived(members.find((m) => m.user_id === myId) ?? null);
+  // Sole owners can't leave (would orphan the workspace) — the danger zone says so.
+  let canLeave = $derived(!!selfMember && !(selfMember.role === 'owner' && ownersCount <= 1));
 
   // Load on mount and whenever the :slug param changes (SvelteKit reuses this
   // component across /w/* navigations rather than remounting it).
@@ -60,8 +76,12 @@
   // so PlanBanner re-reads fresh, and strip the param. The redirect is a full page
   // load, so this one-shot onMount is the right hook.
   onMount(() => {
+    // Deep-link to a tab via #hash.
+    const h = location.hash.replace('#', '');
+    if (h === 'settings' || h === 'games') activeTab = h;
+
     if (page.url.searchParams.get('upgraded') !== '1') return;
-    upgradedToast = 'Subscription active — welcome aboard.';
+    toast.success('Subscription active — welcome aboard.');
     invalidateBillingStatus(slug);
     const url = new URL(page.url);
     url.searchParams.delete('upgraded');
@@ -232,12 +252,12 @@
 <svelte:head><title>{detail?.workspace.name ?? slug} · Stake Cloud</title></svelte:head>
 
 <main class="mx-auto w-full max-w-5xl px-6 py-10">
-  <a href="/" class="mb-6 inline-flex items-center gap-1.5 text-sm text-muted transition hover:text-text">
-    <span aria-hidden="true">←</span> Workspaces
-  </a>
+  <Breadcrumbs
+    items={[{ label: 'Workspaces', href: '/' }, { label: detail?.workspace.name ?? slug }]}
+  />
 
   {#if loading}
-    <div class="flex items-center gap-3 py-16 text-muted"><span class="spinner"></span> Loading…</div>
+    <Card class="p-6"><Skeleton /></Card>
   {:else if loadError}
     <Card class="p-6">
       <p class="text-sm text-danger">{loadError}</p>
@@ -248,119 +268,95 @@
       <h1 class="text-2xl font-semibold tracking-tight">{detail.workspace.name}</h1>
       <span class="font-mono-tab text-sm text-muted">{detail.workspace.slug}</span>
       {#if myRole}<Badge tone={roleTone(myRole)}>{myRole}</Badge>{/if}
-      <a
-        href={`/w/${slug}/billing`}
-        class="ml-auto rounded-md border border-border bg-surface-2 px-3 py-1.5 text-sm text-muted transition hover:border-border-strong hover:text-text"
-      >
-        Billing
-      </a>
     </header>
 
     <PlanBanner {slug} />
 
-    {#if upgradedToast}
-      <div
-        class="fade-in mb-6 flex items-center gap-2 rounded-md border border-accent/40 bg-accent/10 px-4 py-3 text-sm text-accent"
-      >
-        <span aria-hidden="true">✓</span>
-        {upgradedToast}
-      </div>
-    {/if}
+    <Tabs
+      class="mb-6"
+      tabs={[
+        { id: 'games', label: 'Games', badge: games.length },
+        { id: 'settings', label: 'Settings' }
+      ]}
+      active={activeTab}
+      onselect={selectTab}
+    />
 
-    {#if actionError}
-      <p class="mb-4 rounded-md border border-danger/30 bg-danger/10 px-3 py-2 text-sm text-danger">
-        {actionError}
-      </p>
-    {/if}
+    {#if activeTab === 'games'}
+      <!-- Games — primary, dominant -->
+      <section>
+        <SectionHeader title={`Games · ${games.length}`}>
+          {#snippet action()}
+            {#if !showNewGame}
+              <Button size="sm" onclick={() => (showNewGame = true)}>New game</Button>
+            {/if}
+          {/snippet}
+        </SectionHeader>
 
-    <!-- Games -->
-    <section class="mb-10">
-      <div class="mb-3 flex items-center justify-between gap-3">
-        <h2 class="text-sm font-semibold uppercase tracking-wide text-faint">
-          Games · {games.length}
-        </h2>
-        {#if !showNewGame}
-          <Button size="sm" onclick={() => (showNewGame = true)}>New game</Button>
+        {#if showNewGame}
+          <div class="mb-4">
+            <MathPushPanel
+              {slug}
+              game={null}
+              parentNumber={null}
+              ondone={(n, gameSlug) => onGamePushed(n, gameSlug)}
+              oncancel={() => (showNewGame = false)}
+            />
+          </div>
         {/if}
-      </div>
 
-      {#if showNewGame}
-        <div class="mb-4">
-          <MathPushPanel
-            {slug}
-            game={null}
-            parentNumber={null}
-            ondone={(n, gameSlug) => onGamePushed(n, gameSlug)}
-            oncancel={() => (showNewGame = false)}
-          />
-        </div>
-      {/if}
-
-      <Card class="overflow-hidden">
         {#if gamesError}
-          <div class="px-4 py-6">
+          <Card class="p-6">
             <p class="text-sm text-danger">{gamesError}</p>
             <Button variant="outline" size="sm" class="mt-3" onclick={loadGames}>Retry</Button>
-          </div>
+          </Card>
         {:else if games.length === 0}
-          <div class="flex flex-col items-center gap-4 px-6 py-14 text-center">
-            <span class="flex h-11 w-11 items-center justify-center rounded-xl bg-accent/10 text-accent">
-              <svg
-                width="20"
-                height="20"
-                viewBox="0 0 24 24"
-                fill="none"
-                stroke="currentColor"
-                stroke-width="2"
-                stroke-linecap="round"
-                stroke-linejoin="round"
-              >
-                <rect x="2" y="6" width="20" height="12" rx="2" />
-                <path d="M6 12h4M8 10v4M15 12h.01M18 12h.01" />
-              </svg>
-            </span>
-            <div>
-              <h3 class="font-semibold">No games yet</h3>
-              <p class="mx-auto mt-1 max-w-sm text-sm leading-relaxed text-muted">
-                Push math straight from your browser with <span class="text-text">New game</span>
-                above, or run <span class="font-mono-tab text-text">sdt push</span> from CI.
-              </p>
-            </div>
-            <div class="w-full max-w-xs"><CopyField value="sdt push" /></div>
-          </div>
+          <EmptyState title="No games yet">
+            Push math straight from your browser with <span class="text-text">New game</span> above,
+            or run <span class="font-mono-tab text-text">sdt push</span> from CI.
+            {#snippet cta()}
+              <div class="w-full max-w-xs"><CopyField value="sdt push" /></div>
+            {/snippet}
+          </EmptyState>
         {:else}
-          {#each games as g (g.id || g.slug)}
-            <a
-              href={`/w/${slug}/g/${g.slug}`}
-              class="flex items-center justify-between gap-4 border-b border-border/60 px-4 py-3.5 transition last:border-0 hover:bg-surface-2"
-            >
-              <div class="min-w-0">
-                <div class="flex items-center gap-2">
-                  <span class="truncate font-medium">{g.name}</span>
-                  {#if g.head_number != null}
-                    <Badge tone="accent">rev {g.head_number}</Badge>
-                  {:else}
-                    <Badge>no revisions</Badge>
-                  {/if}
+          <Card class="overflow-hidden">
+            {#each games as g (g.id || g.slug)}
+              <a
+                href={`/w/${slug}/g/${g.slug}`}
+                class="flex items-center justify-between gap-4 border-b border-border/60 px-4 py-3.5 transition last:border-0 hover:bg-surface-2"
+              >
+                <div class="min-w-0">
+                  <div class="flex items-center gap-2">
+                    <span class="truncate font-medium">{g.name}</span>
+                    {#if g.head_number != null}
+                      <Badge tone="accent">rev {g.head_number}</Badge>
+                    {:else}
+                      <Badge>no revisions</Badge>
+                    {/if}
+                  </div>
+                  <div class="mt-0.5 truncate font-mono-tab text-xs text-muted">{g.slug}</div>
                 </div>
-                <div class="mt-0.5 truncate font-mono-tab text-xs text-muted">{g.slug}</div>
-              </div>
-              <div class="shrink-0 text-xs text-faint">
-                {g.revisions_count}
-                {g.revisions_count === 1 ? 'revision' : 'revisions'}
-              </div>
-            </a>
-          {/each}
+                <div class="shrink-0 text-xs text-faint">
+                  {g.revisions_count}
+                  {g.revisions_count === 1 ? 'revision' : 'revisions'}
+                </div>
+              </a>
+            {/each}
+          </Card>
         {/if}
-      </Card>
-    </section>
+      </section>
+    {:else}
+      <!-- Settings — members, invites, billing, danger zone -->
+      {#if actionError}
+        <p class="mb-4 rounded-md border border-danger/30 bg-danger/10 px-3 py-2 text-sm text-danger">
+          {actionError}
+        </p>
+      {/if}
 
-    <!-- Members -->
-    <section class="mb-10">
-      <h2 class="mb-3 text-sm font-semibold uppercase tracking-wide text-faint">
-        Members · {members.length}
-      </h2>
-      <Card class="overflow-hidden">
+      <!-- Members -->
+      <section class="mb-10">
+        <SectionHeader title={`Members · ${members.length}`} />
+        <Card class="overflow-hidden">
         <div class="overflow-x-auto">
           <table class="w-full min-w-[34rem] text-sm">
             <thead>
@@ -398,14 +394,14 @@
                     {/if}
                   </td>
                   <td class="px-4 py-3 text-right">
-                    {#if canRemove(m)}
+                    {#if !self && canRemove(m)}
                       <Button
-                        variant={self ? 'outline' : 'danger'}
+                        variant="danger"
                         size="sm"
                         disabled={busyUser === m.user_id}
                         onclick={() => removeMember(m)}
                       >
-                        {self ? 'Leave' : 'Remove'}
+                        Remove
                       </Button>
                     {:else}
                       <span class="text-xs text-faint">—</span>
@@ -421,8 +417,8 @@
 
     <!-- Invites (owner/admin only) -->
     {#if canManage}
-      <section>
-        <h2 class="mb-3 text-sm font-semibold uppercase tracking-wide text-faint">Invites</h2>
+      <section class="mb-10">
+        <SectionHeader title="Invites" />
 
         <Card class="mb-4 p-6">
           <form class="flex flex-col gap-4" onsubmit={createInvite}>
@@ -521,6 +517,41 @@
               </table>
             </div>
           {/if}
+        </Card>
+      </section>
+    {/if}
+
+      <!-- Billing -->
+      <section class="mb-10">
+        <SectionHeader title="Billing" />
+        <Card class="flex flex-wrap items-center justify-between gap-3 p-5">
+          <p class="text-sm text-muted">Manage your plan, usage and invoices.</p>
+          <Button href={`/w/${slug}/billing`} variant="secondary" size="sm">Open billing</Button>
+        </Card>
+      </section>
+
+      <!-- Danger zone -->
+      <section>
+        <SectionHeader title="Danger zone" />
+        <Card class="border-danger/30 p-5">
+          <div class="flex flex-wrap items-center justify-between gap-3">
+            <div class="min-w-0">
+              <div class="text-sm font-medium text-text">Leave this workspace</div>
+              <p class="mt-0.5 text-sm text-muted">
+                {canLeave
+                  ? "You'll lose access to its games and math until you're re-invited."
+                  : "You're the only owner — add another owner before you can leave."}
+              </p>
+            </div>
+            <Button
+              variant="danger"
+              size="sm"
+              disabled={!canLeave || busyUser === myId}
+              onclick={() => selfMember && removeMember(selfMember)}
+            >
+              Leave workspace
+            </Button>
+          </div>
         </Card>
       </section>
     {/if}

@@ -11,6 +11,7 @@
   import UpgradeNotice from '$lib/components/UpgradeNotice.svelte';
   import { humanSize } from '$lib/format';
   import { isUpgradeError } from '$lib/api';
+  import { toast } from '$lib/toasts.svelte';
   import {
     runFrontPush,
     pushErrorMessage,
@@ -36,7 +37,6 @@
   let errorUpgrade = $state(false);
   let phase = $state<PushPhase | null>(null);
   let progress = $state<FileProgress[]>([]);
-  let bundleId = $state<string | null>(null);
 
   let canPush = $derived(files.length > 0 && !pushing);
 
@@ -70,7 +70,6 @@
     pushing = true;
     error = '';
     errorUpgrade = false;
-    bundleId = null;
     phase = 'hashing';
     progress = files.map((f) => ({
       path: f.path,
@@ -89,10 +88,10 @@
           }
         }
       );
-      bundleId = res.bundleId;
       files = [];
       pickerKey += 1;
       onuploaded?.(res.bundleId);
+      toast.success('Front bundle uploaded — new shares and the test view use it automatically.');
     } catch (e) {
       error = pushErrorMessage(e);
       errorUpgrade = isUpgradeError(e);
@@ -149,16 +148,6 @@
           style="width: {total > 0 ? Math.round((processed / total) * 100) : 0}%"
         ></div>
       </div>
-    </div>
-  {/if}
-
-  {#if bundleId}
-    <div
-      class="mt-4 flex flex-wrap items-center gap-x-3 gap-y-1 rounded-md border border-accent/30 bg-accent/10 px-3 py-2.5 text-sm text-accent"
-    >
-      <span class="font-medium">Front bundle uploaded.</span>
-      <span class="text-muted">New shares and the test view use it automatically.</span>
-      <span class="font-mono-tab text-xs text-faint">id {bundleId.slice(0, 8)}</span>
     </div>
   {/if}
 

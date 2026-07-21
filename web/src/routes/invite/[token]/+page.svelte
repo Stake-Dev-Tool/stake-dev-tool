@@ -8,6 +8,7 @@
   import Button from '$lib/components/Button.svelte';
   import Card from '$lib/components/Card.svelte';
   import Badge from '$lib/components/Badge.svelte';
+  import Skeleton from '$lib/components/Skeleton.svelte';
 
   let token = $derived(page.params.token ?? '');
 
@@ -89,9 +90,7 @@
 
     <Card class="p-8 text-center">
       {#if loading}
-        <div class="flex items-center justify-center gap-3 py-8 text-muted">
-          <span class="spinner"></span> Checking invite…
-        </div>
+        <div class="py-2"><Skeleton lines={3} /></div>
       {:else if loadError || !preview || !preview.valid}
         <div class="flex flex-col items-center gap-3">
           <span class="flex h-11 w-11 items-center justify-center rounded-full bg-danger/10 text-danger text-xl">!</span>

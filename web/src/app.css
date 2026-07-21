@@ -96,6 +96,35 @@
   animation: fade-in 200ms ease-out backwards;
 }
 
+/* Skeleton loading placeholder — a soft surface bar with a shimmer sweep. Used
+   by the Skeleton component for page-level loading (2–3 lines inside a Card). */
+.skeleton {
+  position: relative;
+  overflow: hidden;
+  background: var(--color-surface-2);
+}
+.skeleton::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  transform: translateX(-100%);
+  background: linear-gradient(90deg, transparent, rgba(255, 255, 255, 0.05), transparent);
+  animation: shimmer 1.5s ease-in-out infinite;
+}
+@keyframes shimmer {
+  100% {
+    transform: translateX(100%);
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .skeleton::after {
+    animation: none;
+  }
+  .fade-in {
+    animation: none;
+  }
+}
+
 /* Slim themed scrollbar */
 ::-webkit-scrollbar {
   width: 10px;

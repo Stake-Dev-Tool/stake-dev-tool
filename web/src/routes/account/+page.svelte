@@ -4,11 +4,14 @@
   import { api, type ApiToken, type CreatedToken, type TokenScope } from '$lib/api';
   import { session, setUser } from '$lib/session.svelte';
   import { formatDate, formatExpiry, errorText } from '$lib/format';
+  import { resetWorkspaces } from '$lib/workspaces.svelte';
   import Button from '$lib/components/Button.svelte';
   import Input from '$lib/components/Input.svelte';
   import Card from '$lib/components/Card.svelte';
   import Badge from '$lib/components/Badge.svelte';
   import CopyField from '$lib/components/CopyField.svelte';
+  import Skeleton from '$lib/components/Skeleton.svelte';
+  import SectionHeader from '$lib/components/SectionHeader.svelte';
 
   const SCOPES: { id: TokenScope; label: string; desc: string }[] = [
     { id: 'full', label: 'full', desc: 'Full access to your workspaces and their data.' },
@@ -85,6 +88,7 @@
       // Even if the network call fails, drop local state and go to login.
     }
     setUser(null);
+    resetWorkspaces();
     await goto('/login');
   }
 </script>
@@ -106,11 +110,11 @@
   </div>
 
   <section>
-    <h2 class="mb-1 text-sm font-semibold uppercase tracking-wide text-faint">API tokens</h2>
-    <p class="mb-4 text-sm text-muted">
-      For CI pipelines and the CLI. Scope them down — <span class="font-mono-tab text-text">push:math</span>
-      is all a math-push job needs.
-    </p>
+    <SectionHeader title="API tokens">
+      For CI pipelines and the CLI. Scope them down — <span class="font-mono-tab text-text"
+        >push:math</span
+      > is all a math-push job needs.
+    </SectionHeader>
 
     <Card class="mb-4 p-6">
       <form class="flex flex-col gap-4" onsubmit={create}>
@@ -175,7 +179,7 @@
 
     <Card class="overflow-hidden">
       {#if loading}
-        <div class="flex items-center gap-3 px-4 py-8 text-muted"><span class="spinner"></span> Loading…</div>
+        <div class="p-4"><Skeleton /></div>
       {:else if loadError}
         <div class="px-4 py-6">
           <p class="text-sm text-danger">{loadError}</p>

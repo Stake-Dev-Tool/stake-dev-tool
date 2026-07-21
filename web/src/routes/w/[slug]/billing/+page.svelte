@@ -12,18 +12,22 @@
     meterFill
   } from '$lib/billing';
   import { humanSize, formatDate, errorText } from '$lib/format';
+  import { toast } from '$lib/toasts.svelte';
+  import { workspaceName } from '$lib/workspaces.svelte';
   import Button from '$lib/components/Button.svelte';
   import Card from '$lib/components/Card.svelte';
   import Badge from '$lib/components/Badge.svelte';
+  import Breadcrumbs from '$lib/components/Breadcrumbs.svelte';
+  import Skeleton from '$lib/components/Skeleton.svelte';
 
   let slug = $derived(page.params.slug ?? '');
 
   let status = $state<BillingStatus | null>(null);
   let role = $state<Role | null>(null);
+  let wsName = $state('');
   let loading = $state(true);
   let loadError = $state('');
 
-  let toast = $state('');
   let checkoutError = $state('');
   let checkoutBusy = $state<PlanId | null>(null);
 
@@ -106,13 +110,14 @@
         billingStatus(slug)
       ]);
       role = detail?.role ?? null;
+      wsName = detail?.workspace.name ?? '';
       status = cached;
 
       // Polar success redirect (?upgraded=1): celebrate, refetch fresh (the
       // cache may predate the subscription), and strip the param. Read here —
       // after the await — so this effect never subscribes to page.url.
       if (page.url.searchParams.get('upgraded') === '1') {
-        toast = 'Subscription active — welcome aboard.';
+        toast.success('Subscription active — welcome aboard.');
         try {
           const fresh = await api.billing.status(slug);
           setBillingStatus(slug, fresh);
@@ -149,29 +154,17 @@
   }
 </script>
 
-<svelte:head><title>Billing · {slug} · Stake Cloud</title></svelte:head>
+<svelte:head><title>Billing · {wsName || workspaceName(slug)} · Stake Cloud</title></svelte:head>
 
 <main class="mx-auto w-full max-w-4xl px-6 py-10">
-  <a
-    href={`/w/${slug}`}
-    class="mb-6 inline-flex items-center gap-1.5 text-sm text-muted transition hover:text-text"
-  >
-    <span aria-hidden="true">←</span> Workspace
-  </a>
+  <Breadcrumbs
+    items={[{ label: wsName || workspaceName(slug), href: `/w/${slug}` }, { label: 'Billing' }]}
+  />
 
   <h1 class="mb-8 text-2xl font-semibold tracking-tight">Billing</h1>
 
-  {#if toast}
-    <div
-      class="fade-in mb-6 flex items-center gap-2 rounded-md border border-accent/40 bg-accent/10 px-4 py-3 text-sm text-accent"
-    >
-      <span aria-hidden="true">✓</span>
-      {toast}
-    </div>
-  {/if}
-
   {#if loading}
-    <div class="flex items-center gap-3 py-16 text-muted"><span class="spinner"></span> Loading…</div>
+    <Card class="p-6"><Skeleton /></Card>
   {:else if loadError}
     <Card class="p-6">
       <p class="text-sm text-danger">{loadError}</p>

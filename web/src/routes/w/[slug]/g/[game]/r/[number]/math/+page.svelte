@@ -9,18 +9,15 @@
     type ModeAnalysis,
     type Volatility
   } from '$lib/api';
-  import {
-    errorText,
-    relativeAge,
-    pct,
-    formatOdds,
-    formatSpins,
-    formatMetric,
-    formatCount
-  } from '$lib/format';
+  import { errorText, pct, formatOdds, formatSpins, formatMetric, formatCount } from '$lib/format';
+  import { workspaceName } from '$lib/workspaces.svelte';
   import Button from '$lib/components/Button.svelte';
   import Card from '$lib/components/Card.svelte';
   import Badge from '$lib/components/Badge.svelte';
+  import Breadcrumbs from '$lib/components/Breadcrumbs.svelte';
+  import Skeleton from '$lib/components/Skeleton.svelte';
+  import EmptyState from '$lib/components/EmptyState.svelte';
+  import Time from '$lib/components/Time.svelte';
 
   let slug = $derived(page.params.slug ?? '');
   let game = $derived(page.params.game ?? '');
@@ -222,22 +219,24 @@
 {/snippet}
 
 <main class="mx-auto w-full max-w-5xl px-6 py-10">
-  <a
-    href={`/w/${slug}/g/${game}/r/${revNum}`}
-    class="mb-6 inline-flex items-center gap-1.5 text-sm text-muted transition hover:text-text"
-  >
-    <span aria-hidden="true">←</span> rev {numParam}
-  </a>
+  <Breadcrumbs
+    items={[
+      { label: workspaceName(slug), href: `/w/${slug}` },
+      { label: game, href: `/w/${slug}/g/${game}` },
+      { label: `rev ${numParam}`, href: `/w/${slug}/g/${game}/r/${revNum}` },
+      { label: 'Math' }
+    ]}
+  />
 
   {#if loading}
-    <div class="flex items-center gap-3 py-16 text-muted"><span class="spinner"></span> Loading…</div>
+    <Card class="p-6"><Skeleton /></Card>
   {:else if notFound}
-    <Card class="flex flex-col items-center gap-3 border-dashed px-6 py-16 text-center">
-      <span class="flex h-11 w-11 items-center justify-center rounded-full bg-surface-2 text-xl text-muted">?</span>
-      <h1 class="text-lg font-semibold">Revision not found</h1>
-      <p class="max-w-sm text-sm text-muted">This revision doesn't exist, or you don't have access to it.</p>
-      <Button href={`/w/${slug}/g/${game}`} variant="outline" class="mt-2">Back to revisions</Button>
-    </Card>
+    <EmptyState title="Revision not found">
+      This revision doesn't exist, or you don't have access to it.
+      {#snippet cta()}
+        <Button href={`/w/${slug}/g/${game}`} variant="outline">Back to revisions</Button>
+      {/snippet}
+    </EmptyState>
   {:else if loadError}
     <Card class="p-6">
       <p class="text-sm text-danger">{loadError}</p>
@@ -252,7 +251,7 @@
         <span aria-hidden="true" class="text-faint">·</span>
         <span class="font-mono-tab text-sm text-text">rev {detail.number}</span>
         <span aria-hidden="true" class="text-faint">·</span>
-        <span class="text-sm text-muted" title={detail.created_at}>{relativeAge(detail.created_at)}</span>
+        <Time iso={detail.created_at} class="text-sm text-muted" />
       </div>
 
       {#if analysis}
@@ -273,7 +272,7 @@
             {analysis.cross_mode_rtp_pass ? 'Consistent' : 'Inconsistent'}
           </span>
           <span class="text-faint">
-            · variance <span class="font-mono-tab">{formatMetric(analysis.cross_mode_rtp_variance, 4)}</span>
+            · variance <span class="font-mono-tab">{pct(analysis.cross_mode_rtp_variance, 2)}</span>
           </span>
         </p>
       {/if}
@@ -568,17 +567,13 @@
       </Card>
     {:else}
       <!-- analysis absent: older revision predating the analyzer -->
-      <Card class="flex flex-col items-center gap-3 border-dashed px-6 py-16 text-center">
-        <span class="flex h-11 w-11 items-center justify-center rounded-full bg-surface-2 text-xl text-muted">
-          ✦
-        </span>
-        <h2 class="text-lg font-semibold">No compliance analysis yet</h2>
-        <p class="max-w-md text-sm leading-relaxed text-muted">
-          This revision predates the compliance analyzer, so it has no Math report. Push a new
-          revision to recompute it — the report appears here automatically once the analysis finishes.
-        </p>
-        <Button href={`/w/${slug}/g/${game}`} variant="outline" class="mt-2">Back to game</Button>
-      </Card>
+      <EmptyState title="No compliance analysis yet">
+        This revision predates the compliance analyzer, so it has no Math report. Push a new revision
+        to recompute it — the report appears here automatically once the analysis finishes.
+        {#snippet cta()}
+          <Button href={`/w/${slug}/g/${game}`} variant="outline">Back to game</Button>
+        {/snippet}
+      </EmptyState>
     {/if}
   {/if}
 </main>

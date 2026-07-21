@@ -1,4 +1,6 @@
 <script lang="ts">
+  import { copyText } from '$lib/clipboard';
+
   type Props = { value: string; label?: string; class?: string };
   let { value, label, class: klass = '' }: Props = $props();
 
@@ -6,12 +8,12 @@
   let timer: ReturnType<typeof setTimeout> | undefined;
 
   async function copy() {
-    try {
-      await navigator.clipboard.writeText(value);
+    const ok = await copyText(value, label ? `${label} copied` : 'Copied to clipboard');
+    if (ok) {
       copied = true;
       clearTimeout(timer);
       timer = setTimeout(() => (copied = false), 1600);
-    } catch {
+    } else {
       copied = false;
     }
   }

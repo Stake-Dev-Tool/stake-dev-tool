@@ -160,7 +160,7 @@
               {#if hostedAvailable === null}
                 <span class="text-faint">(checking…)</span>
               {:else if hostedAvailable === false}
-                <span class="text-faint">— none uploaded yet (push one from the Share section)</span>
+                <span class="text-faint">— none uploaded yet (push one from the Revisions tab)</span>
               {:else}
                 <span class="text-faint">— served by this server, no URL needed</span>
               {/if}

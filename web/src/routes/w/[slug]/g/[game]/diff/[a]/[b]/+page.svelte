@@ -2,9 +2,14 @@
   import { page } from '$app/state';
   import { api, ApiError, type RevisionDiff, type DiffMode } from '$lib/api';
   import { errorText, humanSize, formatCost, formatRtp, formatMultiplier, formatRtpDelta } from '$lib/format';
+  import { workspaceName } from '$lib/workspaces.svelte';
   import Button from '$lib/components/Button.svelte';
   import Card from '$lib/components/Card.svelte';
   import Badge from '$lib/components/Badge.svelte';
+  import Breadcrumbs from '$lib/components/Breadcrumbs.svelte';
+  import Skeleton from '$lib/components/Skeleton.svelte';
+  import EmptyState from '$lib/components/EmptyState.svelte';
+  import SectionHeader from '$lib/components/SectionHeader.svelte';
 
   let slug = $derived(page.params.slug ?? '');
   let game = $derived(page.params.game ?? '');
@@ -74,24 +79,23 @@
 {/snippet}
 
 <main class="mx-auto w-full max-w-5xl px-6 py-10">
-  <a
-    href={`/w/${slug}/g/${game}`}
-    class="mb-6 inline-flex items-center gap-1.5 text-sm text-muted transition hover:text-text"
-  >
-    <span aria-hidden="true">←</span> {game}
-  </a>
+  <Breadcrumbs
+    items={[
+      { label: workspaceName(slug), href: `/w/${slug}` },
+      { label: game, href: `/w/${slug}/g/${game}` },
+      { label: `rev ${b} → rev ${a}` }
+    ]}
+  />
 
   {#if loading}
-    <div class="flex items-center gap-3 py-16 text-muted"><span class="spinner"></span> Loading…</div>
+    <Card class="p-6"><Skeleton /></Card>
   {:else if notFound}
-    <Card class="flex flex-col items-center gap-3 border-dashed px-6 py-16 text-center">
-      <span class="flex h-11 w-11 items-center justify-center rounded-full bg-surface-2 text-xl text-muted">?</span>
-      <h1 class="text-lg font-semibold">Diff not available</h1>
-      <p class="max-w-sm text-sm text-muted">
-        One of these revisions doesn't exist, or you don't have access to this game.
-      </p>
-      <Button href={`/w/${slug}/g/${game}`} variant="outline" class="mt-2">Back to revisions</Button>
-    </Card>
+    <EmptyState title="Diff not available">
+      One of these revisions doesn't exist, or you don't have access to this game.
+      {#snippet cta()}
+        <Button href={`/w/${slug}/g/${game}`} variant="outline">Back to revisions</Button>
+      {/snippet}
+    </EmptyState>
   {:else if loadError}
     <Card class="p-6">
       <p class="text-sm text-danger">{loadError}</p>
@@ -109,7 +113,7 @@
 
     <!-- File summary chips -->
     <section class="mb-8">
-      <h2 class="mb-3 text-sm font-semibold uppercase tracking-wide text-faint">Files</h2>
+      <SectionHeader title="Files" />
       <div class="mb-4 flex flex-wrap gap-2">
         <Badge tone="accent">+{diff.files.added.length} added</Badge>
         <Badge tone="danger">−{diff.files.removed.length} removed</Badge>
@@ -206,7 +210,7 @@
 
     <!-- Stats diff -->
     <section>
-      <h2 class="mb-3 text-sm font-semibold uppercase tracking-wide text-faint">Bet stats</h2>
+      <SectionHeader title="Bet stats" />
       <Card class="overflow-hidden">
         {#if !hasStats}
           <p class="px-4 py-8 text-center text-sm text-muted">
