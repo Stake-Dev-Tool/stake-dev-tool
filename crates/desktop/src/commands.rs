@@ -1,3 +1,4 @@
+use crate::cloud;
 use crate::github;
 use crate::math_sync;
 use crate::preview;
@@ -794,6 +795,58 @@ pub async fn teams_default_math_root(team_id: String) -> Result<String, String> 
         .await
         .map(|p| p.to_string_lossy().into_owned())
         .map_err(|e| format!("{e:#}"))
+}
+
+// ============================================================
+// Cloud (V2 platform) — device-flow sign-in + workspaces.
+//
+// Additive M3-preparation seam. The GitHub-repo teams commands above are left
+// entirely untouched; their cloud replacement lands in M3 proper.
+// ============================================================
+
+#[tauri::command]
+pub async fn cloud_get_base_url() -> Result<String, String> {
+    cloud::config::get().map_err(|e| format!("{e:#}"))
+}
+
+#[tauri::command]
+pub async fn cloud_set_base_url(url: String) -> Result<String, String> {
+    cloud::config::set(&url).map_err(|e| format!("{e:#}"))
+}
+
+#[tauri::command]
+pub async fn cloud_request_device_code() -> Result<protocol::DeviceCodeResponse, String> {
+    cloud::auth::request_device_code()
+        .await
+        .map_err(|e| format!("{e:#}"))
+}
+
+#[tauri::command]
+pub async fn cloud_poll_for_token(
+    device_code: String,
+    current_interval: u64,
+) -> Result<cloud::auth::CloudDeviceFlowPoll, String> {
+    cloud::auth::poll_for_token(&device_code, current_interval)
+        .await
+        .map_err(|e| format!("{e:#}"))
+}
+
+#[tauri::command]
+pub async fn cloud_current_user() -> Result<Option<protocol::User>, String> {
+    cloud::auth::current_user()
+        .await
+        .map_err(|e| format!("{e:#}"))
+}
+
+#[tauri::command]
+pub async fn cloud_sign_out() -> Result<(), String> {
+    cloud::auth::clear_token().map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn cloud_list_workspaces() -> Result<protocol::WorkspacesResponse, String> {
+    let client = cloud::api::CloudClient::from_stored_token().map_err(|e| e.to_string())?;
+    client.list_workspaces().await.map_err(|e| e.to_string())
 }
 
 #[tauri::command]

@@ -1,3 +1,4 @@
+mod cloud;
 mod commands;
 mod file_chunker;
 mod github;
@@ -74,6 +75,13 @@ pub fn run() {
             commands::preview_publish,
             commands::preview_unpublish,
             commands::preview_build_local,
+            commands::cloud_get_base_url,
+            commands::cloud_set_base_url,
+            commands::cloud_request_device_code,
+            commands::cloud_poll_for_token,
+            commands::cloud_current_user,
+            commands::cloud_sign_out,
+            commands::cloud_list_workspaces,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
