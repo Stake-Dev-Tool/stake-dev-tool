@@ -1,5 +1,7 @@
 //! Argon2id password hashing via the `argon2` crate's recommended defaults.
 
+use std::sync::OnceLock;
+
 use argon2::Argon2;
 use argon2::password_hash::rand_core::OsRng;
 use argon2::password_hash::{PasswordHash, PasswordHasher, PasswordVerifier, SaltString};
@@ -26,6 +28,18 @@ pub fn verify_password(password: &str, hash: &str) -> bool {
             .is_ok(),
         Err(_) => false,
     }
+}
+
+/// Burns the same argon2 work as a real verification when no account (or no
+/// usable hash) exists, so login timing cannot reveal whether an email is
+/// registered. The dummy hash is computed once per process.
+pub fn dummy_verify(password: &str) {
+    static DUMMY_HASH: OnceLock<String> = OnceLock::new();
+    let hash = DUMMY_HASH.get_or_init(|| {
+        hash_password("timing-equalizer-dummy-password")
+            .expect("hashing a static string cannot fail")
+    });
+    let _ = verify_password(password, hash);
 }
 
 #[cfg(test)]

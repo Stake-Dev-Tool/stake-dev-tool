@@ -129,11 +129,16 @@ pub async fn login(
     .await?;
 
     // A missing account, a GitHub-only account (NULL hash), and a wrong password
-    // all take the same branch so the response never reveals which.
-    let authenticated = row
-        .as_ref()
-        .and_then(|r| r.password_hash.as_deref())
-        .is_some_and(|hash| passwords::verify_password(&req.password, hash));
+    // all take the same branch — and all burn the same argon2 work (a dummy
+    // verification when no hash exists) — so neither the response nor its
+    // timing reveals whether the email is registered.
+    let authenticated = match row.as_ref().and_then(|r| r.password_hash.as_deref()) {
+        Some(hash) => passwords::verify_password(&req.password, hash),
+        None => {
+            passwords::dummy_verify(&req.password);
+            false
+        }
+    };
     if !authenticated {
         state.login_limiter.record_failure(&ip, email);
         return Err(invalid());
