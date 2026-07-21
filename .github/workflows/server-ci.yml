@@ -1,0 +1,97 @@
+name: Server CI
+
+on:
+  push:
+    branches: [v2]
+    paths:
+      - 'crates/server/**'
+      - 'crates/protocol/**'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - 'docker-compose.dev.yml'
+      - 'ui/src/lib/protocol/**'
+      - '.github/workflows/server-ci.yml'
+  pull_request:
+    branches: [v2, main]
+    paths:
+      - 'crates/server/**'
+      - 'crates/protocol/**'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - 'docker-compose.dev.yml'
+      - 'ui/src/lib/protocol/**'
+      - '.github/workflows/server-ci.yml'
+
+concurrency:
+  group: server-ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
+jobs:
+  server:
+    runs-on: ubuntu-latest
+
+    # crates/server + crates/protocol are pure Rust (axum + sqlx); they need no
+    # webkit/GTK system deps, so this workflow intentionally installs no apt
+    # packages. A real Postgres is provided so the sqlx-backed server tests run
+    # instead of self-skipping.
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: stakedev
+          POSTGRES_PASSWORD: stakedev
+          POSTGRES_DB: stakedev
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U stakedev -d stakedev"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Rust (stable + clippy + rustfmt)
+        shell: bash
+        run: |
+          # Retry rustup to mitigate transient network failures on runners.
+          for attempt in 1 2 3; do
+            rustup update stable --no-self-update && break
+            echo "rustup update attempt $attempt failed, retrying in 10s..." >&2
+            sleep 10
+          done
+          rustup default stable
+          rustup component add clippy rustfmt
+          rustc --version
+
+      - uses: Swatinem/rust-cache@v2
+
+      - run: cargo fmt -p server -p protocol -- --check
+
+      - run: cargo clippy -p server -p protocol --all-targets -- -D warnings
+
+      - name: Run tests
+        env:
+          DATABASE_URL: postgres://stakedev:stakedev@localhost:5432/stakedev
+          TEST_DATABASE_URL: postgres://stakedev:stakedev@localhost:5432/stakedev
+        run: cargo test -p server -p protocol
+
+      - name: TypeScript bindings are fresh
+        shell: bash
+        run: |
+          # `cargo test -p protocol` (run in the test step above) regenerates the
+          # ts-rs TypeScript bindings into ui/src/lib/protocol/. If the committed
+          # bindings differ from what was just generated, the working tree is dirty.
+          # git diff catches modified tracked bindings; git status --porcelain also
+          # catches brand-new (untracked) binding files, which git diff would miss.
+          changed=$(git status --porcelain -- ui/src/lib/protocol)
+          if ! git diff --exit-code -- ui/src/lib/protocol || [ -n "$changed" ]; then
+            echo "::error::TypeScript bindings are out of date. Run 'cargo test -p protocol' and commit the changes under ui/src/lib/protocol/."
+            echo "Changed / untracked binding files:"
+            git status --porcelain -- ui/src/lib/protocol
+            exit 1
+          fi

@@ -1,0 +1,17 @@
+[package]
+name = "protocol"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "Shared request/response types for the Stake Dev Tool cloud platform, with ts-rs TypeScript generation"
+
+[lib]
+name = "protocol"
+path = "src/lib.rs"
+
+[dependencies]
+serde.workspace = true
+ts-rs.workspace = true
+uuid.workspace = true
+chrono.workspace = true

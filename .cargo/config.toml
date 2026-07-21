@@ -1,0 +1,6 @@
+# `cargo test -p protocol` regenerates the shared TypeScript bindings. ts-rs
+# writes them under $TS_RS_EXPORT_DIR/<export_to>; `relative = true` resolves the
+# value to an absolute path from this workspace root, so the output lands in
+# ui/src/lib/protocol/ no matter which directory cargo is invoked from.
+[env]
+TS_RS_EXPORT_DIR = { value = "ui/src/lib", relative = true }

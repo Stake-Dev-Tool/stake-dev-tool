@@ -34,3 +34,7 @@ crates/lgs-wasm/pkg/
 
 # Stray local team math root from running the desktop app in dev.
 /teams/
+
+# Server: local env file and object-store blobs (STORAGE_FS_ROOT default).
+.env
+/data/

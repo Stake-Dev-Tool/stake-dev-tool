@@ -4,6 +4,8 @@ members = [
     "crates/lgs",
     "crates/desktop",
     "crates/lgs-wasm",
+    "crates/server",
+    "crates/protocol",
 ]
 # `lgs-wasm` only makes sense on wasm32. Excluding it from default-members
 # keeps `cargo check`/`cargo build` at the workspace root from trying to
@@ -11,6 +13,8 @@ members = [
 default-members = [
     "crates/lgs",
     "crates/desktop",
+    "crates/server",
+    "crates/protocol",
 ]
 
 [workspace.package]
@@ -60,6 +64,12 @@ base64 = "0.22"
 sha2 = "0.10"
 futures-util = "0.3"
 chrono = { version = "0.4", features = ["serde"] }
+# `macros` is required by `sqlx::migrate!` (compile-time migration embedding);
+# it does not pull in any compile-time `query!` DB checking.
+sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio", "tls-rustls", "macros", "postgres", "migrate", "uuid", "chrono", "json"] }
+object_store = { version = "0.14", features = ["aws"] }
+ts-rs = { version = "12", features = ["uuid-impl", "chrono-impl", "serde-json-impl"] }
+dotenvy = "0.15"
 
 [profile.release]
 opt-level = 3

@@ -1,0 +1,37 @@
+[package]
+name = "server"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "Cloud platform server (axum) for the Stake Dev Tool"
+
+[lib]
+name = "server"
+path = "src/lib.rs"
+
+[[bin]]
+name = "server"
+path = "src/main.rs"
+
+[dependencies]
+tokio.workspace = true
+axum.workspace = true
+# `util` provides `ServiceExt::oneshot`, used to drive the router in tests.
+tower = { workspace = true, features = ["util"] }
+tower-http.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+anyhow.workspace = true
+thiserror.workspace = true
+uuid.workspace = true
+chrono.workspace = true
+sqlx.workspace = true
+object_store.workspace = true
+dotenvy.workspace = true
+protocol = { path = "../protocol" }
+
+[dev-dependencies]
+tempfile.workspace = true
