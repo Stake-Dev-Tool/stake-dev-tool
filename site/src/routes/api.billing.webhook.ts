@@ -1,69 +1,52 @@
-import { createHmac, timingSafeEqual } from 'node:crypto'
 import { createFileRoute } from '@tanstack/react-router'
+import { WebhookVerificationError, validateEvent } from '@polar-sh/sdk/webhooks'
 
 /**
- * Lemon Squeezy webhook receiver. Signature is an HMAC-SHA256 of the raw
- * body with the shared webhook secret, sent in the X-Signature header.
+ * Polar webhook receiver. Polar signs deliveries per the Standard Webhooks
+ * spec (webhook-id / webhook-timestamp / webhook-signature headers); the SDK
+ * helper verifies the signature and returns the typed event.
  *
  * Subscription state belongs to crates/server (M7); this endpoint verifies
  * and acknowledges events so the store can be wired up before that lands,
  * then forwards once the server exposes its billing API.
  */
 
-function verifySignature(rawBody: string, signature: string, secret: string): boolean {
-  const digest = createHmac('sha256', secret).update(rawBody).digest('hex')
-  const a = Buffer.from(digest, 'utf8')
-  const b = Buffer.from(signature, 'utf8')
-  return a.length === b.length && timingSafeEqual(a, b)
-}
-
-type LemonSqueezyEvent = {
-  meta?: {
-    event_name?: string
-    custom_data?: { plan?: string; interval?: string }
-  }
-  data?: { id?: string; type?: string }
-}
-
 export const Route = createFileRoute('/api/billing/webhook')({
   server: {
     handlers: {
       POST: async ({ request }) => {
-        const secret = process.env.LEMONSQUEEZY_WEBHOOK_SECRET
+        const secret = process.env.POLAR_WEBHOOK_SECRET
         if (!secret) {
           return new Response('webhook not configured', { status: 503 })
         }
 
         const rawBody = await request.text()
-        const signature = request.headers.get('x-signature') ?? ''
-        if (!verifySignature(rawBody, signature, secret)) {
-          return new Response('invalid signature', { status: 401 })
-        }
+        const headers = Object.fromEntries(request.headers.entries())
 
-        let event: LemonSqueezyEvent
+        let event: ReturnType<typeof validateEvent>
         try {
-          event = JSON.parse(rawBody) as LemonSqueezyEvent
-        } catch {
-          return new Response('invalid payload', { status: 400 })
+          event = validateEvent(rawBody, headers, secret)
+        } catch (error) {
+          if (error instanceof WebhookVerificationError) {
+            return new Response('invalid signature', { status: 403 })
+          }
+          throw error
         }
 
-        const eventName = event.meta?.event_name ?? 'unknown'
-        switch (eventName) {
-          case 'order_created':
-          case 'subscription_created':
-          case 'subscription_updated':
-          case 'subscription_cancelled':
-          case 'subscription_expired':
-          case 'subscription_payment_failed':
+        switch (event.type) {
+          case 'order.paid':
+          case 'subscription.created':
+          case 'subscription.active':
+          case 'subscription.updated':
+          case 'subscription.canceled':
+          case 'subscription.uncanceled':
+          case 'subscription.revoked':
             // TODO(M7): forward to crates/server so workspace quotas and
             // access follow the subscription state.
-            console.log(
-              `[billing] ${eventName} for ${event.data?.type ?? '?'}#${event.data?.id ?? '?'}`,
-              event.meta?.custom_data ?? {},
-            )
+            console.log(`[billing] ${event.type} #${event.data.id}`, event.data.metadata ?? {})
             break
           default:
-            console.log(`[billing] ignoring event: ${eventName}`)
+            console.log(`[billing] ignoring event: ${event.type}`)
         }
 
         return Response.json({ received: true })

@@ -1,41 +1,42 @@
+import { Polar } from '@polar-sh/sdk'
 import { createServerFn } from '@tanstack/react-start'
 import type { BillingInterval, PlanId } from '../lib/plans'
 
 /**
- * Billing runs through a merchant of record (Lemon Squeezy) so VAT on
+ * Billing runs through Polar (polar.sh) as merchant of record, so VAT on
  * cross-border B2C sales is remitted for us — see V2.md. This module is the
  * only place that talks to their API; the rest of the site only ever sees a
  * checkout URL.
  *
  * All configuration comes from the environment (see site/.env.example).
  * Without it, checkout reports `not_configured` and the pricing page says so
- * instead of half-working.
+ * instead of half-working. Set POLAR_SERVER=sandbox to test the full flow
+ * against Polar's sandbox environment.
  */
 
 type BillingConfig = {
-  apiKey: string
-  storeId: string
+  accessToken: string
+  server: 'production' | 'sandbox'
   siteUrl: string
-  variants: Record<PlanId, Record<BillingInterval, string | undefined>>
+  products: Record<PlanId, Record<BillingInterval, string | undefined>>
 }
 
 function getBillingConfig(): BillingConfig | null {
-  const apiKey = process.env.LEMONSQUEEZY_API_KEY
-  const storeId = process.env.LEMONSQUEEZY_STORE_ID
-  if (!apiKey || !storeId) return null
+  const accessToken = process.env.POLAR_ACCESS_TOKEN
+  if (!accessToken) return null
 
   return {
-    apiKey,
-    storeId,
+    accessToken,
+    server: process.env.POLAR_SERVER === 'sandbox' ? 'sandbox' : 'production',
     siteUrl: process.env.SITE_URL ?? 'http://localhost:3000',
-    variants: {
+    products: {
       solo: {
-        month: process.env.LEMONSQUEEZY_VARIANT_SOLO_MONTHLY,
-        year: process.env.LEMONSQUEEZY_VARIANT_SOLO_YEARLY,
+        month: process.env.POLAR_PRODUCT_SOLO_MONTHLY,
+        year: process.env.POLAR_PRODUCT_SOLO_YEARLY,
       },
       team: {
-        month: process.env.LEMONSQUEEZY_VARIANT_TEAM_MONTHLY,
-        year: process.env.LEMONSQUEEZY_VARIANT_TEAM_YEARLY,
+        month: process.env.POLAR_PRODUCT_TEAM_MONTHLY,
+        year: process.env.POLAR_PRODUCT_TEAM_YEARLY,
       },
     },
   }
@@ -57,52 +58,24 @@ export const createCheckout = createServerFn({ method: 'POST' })
   })
   .handler(async ({ data }): Promise<CheckoutResult> => {
     const config = getBillingConfig()
-    const variantId = config?.variants[data.plan][data.interval]
-    if (!config || !variantId) {
+    const productId = config?.products[data.plan][data.interval]
+    if (!config || !productId) {
       return { url: null, reason: 'not_configured' }
     }
 
-    const response = await fetch('https://api.lemonsqueezy.com/v1/checkouts', {
-      method: 'POST',
-      headers: {
-        Accept: 'application/vnd.api+json',
-        'Content-Type': 'application/vnd.api+json',
-        Authorization: `Bearer ${config.apiKey}`,
-      },
-      body: JSON.stringify({
-        data: {
-          type: 'checkouts',
-          attributes: {
-            checkout_data: {
-              custom: { plan: data.plan, interval: data.interval },
-            },
-            product_options: {
-              redirect_url: `${config.siteUrl}/checkout/success`,
-            },
-          },
-          relationships: {
-            store: { data: { type: 'stores', id: config.storeId } },
-            variant: { data: { type: 'variants', id: variantId } },
-          },
-        },
-      }),
-    })
-
-    if (!response.ok) {
-      console.error(
-        `[billing] checkout creation failed: ${response.status} ${await response.text()}`,
-      )
+    try {
+      const polar = new Polar({
+        accessToken: config.accessToken,
+        server: config.server,
+      })
+      const checkout = await polar.checkouts.create({
+        products: [productId],
+        successUrl: `${config.siteUrl}/checkout/success?checkout_id={CHECKOUT_ID}`,
+        metadata: { plan: data.plan, interval: data.interval },
+      })
+      return { url: checkout.url, reason: null }
+    } catch (error) {
+      console.error('[billing] checkout creation failed:', error)
       return { url: null, reason: 'provider_error' }
     }
-
-    const payload = (await response.json()) as {
-      data?: { attributes?: { url?: string } }
-    }
-    const url = payload.data?.attributes?.url
-    if (!url) {
-      console.error('[billing] checkout response had no URL')
-      return { url: null, reason: 'provider_error' }
-    }
-
-    return { url, reason: null }
   })

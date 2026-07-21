@@ -35,16 +35,19 @@ Content mirrors `V2.md`. Keep pricing and cloud copy in sync with it.
 
 ## Billing
 
-Payments go through Lemon Squeezy as merchant of record (they remit EU VAT
-for us — see V2.md).
+Payments go through Polar (polar.sh) as merchant of record (they remit EU
+VAT for us — see V2.md).
 
 - `src/server/billing.ts`: `createCheckout` server function. Creates a
-  hosted checkout for a plan/interval and returns its URL.
-- `src/routes/api.billing.webhook.ts`: webhook receiver with HMAC-SHA256
-  signature verification. Subscription state forwarding to `crates/server`
-  is a TODO until M7 lands.
+  hosted Polar checkout for a plan/interval and returns its URL.
+- `src/routes/api.billing.webhook.ts`: webhook receiver; signatures are
+  verified with the Polar SDK (Standard Webhooks). Subscription state
+  forwarding to `crates/server` is a TODO until M7 lands.
 - `src/lib/plans.ts`: plan definitions shared by the pricing page and the
   billing layer.
+
+Polar has a full sandbox (`POLAR_SERVER=sandbox`) to test the whole
+checkout + webhook flow before the production store is approved.
 
 Configuration is environment-only; copy `.env.example` and fill in the
 store, variant IDs and webhook secret. Without configuration the pricing
