@@ -11,9 +11,9 @@ use ts_rs::TS;
 pub mod auth;
 pub mod billing;
 pub mod documents;
-pub mod shares;
 pub mod error;
 pub mod math;
+pub mod shares;
 pub mod workspace;
 
 pub use auth::*;
