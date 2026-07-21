@@ -27,8 +27,18 @@ up), so there is no separate migration step.
 
 ## Updates
 
+Routine update (server code only — leaves Caddy untouched, so the only
+downtime is the ~2 s server swap):
+
 ```bash
 git pull
+GIT_SHA=$(git rev-parse --short HEAD) docker compose -f docker-compose.prod.yml --env-file .env.prod up -d --build server
+```
+
+Full rebuild (only when deploy/Caddyfile or deploy/caddy/ changed —
+recreating Caddy drops connections for a few seconds):
+
+```bash
 GIT_SHA=$(git rev-parse --short HEAD) docker compose -f docker-compose.prod.yml --env-file .env.prod up -d --build
 ```
 
