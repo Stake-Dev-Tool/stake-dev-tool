@@ -274,6 +274,43 @@ a {
   }
 }
 
+/* Legal prose pages */
+.legal h2 {
+  margin: 2.4rem 0 0;
+  font-size: 1.05rem;
+  font-weight: 600;
+  color: var(--color-ink);
+}
+
+.legal p,
+.legal li {
+  margin: 0.8rem 0 0;
+  font-size: 0.9rem;
+  line-height: 1.7;
+  color: var(--color-moss);
+}
+
+.legal ul {
+  margin: 0.8rem 0 0;
+  padding-left: 1.2rem;
+  list-style: disc;
+}
+
+.legal li {
+  margin-top: 0.35rem;
+}
+
+.legal a {
+  color: var(--color-mint);
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
+.legal strong {
+  color: var(--color-dim);
+  font-weight: 600;
+}
+
 /* FAQ */
 .faq-item summary {
   cursor: pointer;

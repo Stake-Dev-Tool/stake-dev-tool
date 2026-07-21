@@ -12,8 +12,12 @@ import { Route as rootRouteImport } from './routes/__root'
 import { Route as IndexRouteImport } from './routes/index'
 import { Route as CloudRouteImport } from './routes/cloud'
 import { Route as FeaturesRouteImport } from './routes/features'
+import { Route as LegalRouteImport } from './routes/legal'
 import { Route as OpenSourceRouteImport } from './routes/open-source'
 import { Route as PricingRouteImport } from './routes/pricing'
+import { Route as PrivacyRouteImport } from './routes/privacy'
+import { Route as RefundsRouteImport } from './routes/refunds'
+import { Route as TermsRouteImport } from './routes/terms'
 import { Route as CheckoutCancelledRouteImport } from './routes/checkout.cancelled'
 import { Route as CheckoutSuccessRouteImport } from './routes/checkout.success'
 import { Route as ApiBillingWebhookRouteImport } from './routes/api.billing.webhook'
@@ -33,6 +37,11 @@ const FeaturesRoute = FeaturesRouteImport.update({
   path: '/features',
   getParentRoute: () => rootRouteImport,
 } as any)
+const LegalRoute = LegalRouteImport.update({
+  id: '/legal',
+  path: '/legal',
+  getParentRoute: () => rootRouteImport,
+} as any)
 const OpenSourceRoute = OpenSourceRouteImport.update({
   id: '/open-source',
   path: '/open-source',
@@ -41,6 +50,21 @@ const OpenSourceRoute = OpenSourceRouteImport.update({
 const PricingRoute = PricingRouteImport.update({
   id: '/pricing',
   path: '/pricing',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const PrivacyRoute = PrivacyRouteImport.update({
+  id: '/privacy',
+  path: '/privacy',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const RefundsRoute = RefundsRouteImport.update({
+  id: '/refunds',
+  path: '/refunds',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const TermsRoute = TermsRouteImport.update({
+  id: '/terms',
+  path: '/terms',
   getParentRoute: () => rootRouteImport,
 } as any)
 const CheckoutCancelledRoute = CheckoutCancelledRouteImport.update({
@@ -63,8 +87,12 @@ export interface FileRoutesByFullPath {
   '/': typeof IndexRoute
   '/cloud': typeof CloudRoute
   '/features': typeof FeaturesRoute
+  '/legal': typeof LegalRoute
   '/open-source': typeof OpenSourceRoute
   '/pricing': typeof PricingRoute
+  '/privacy': typeof PrivacyRoute
+  '/refunds': typeof RefundsRoute
+  '/terms': typeof TermsRoute
   '/checkout/cancelled': typeof CheckoutCancelledRoute
   '/checkout/success': typeof CheckoutSuccessRoute
   '/api/billing/webhook': typeof ApiBillingWebhookRoute
@@ -73,8 +101,12 @@ export interface FileRoutesByTo {
   '/': typeof IndexRoute
   '/cloud': typeof CloudRoute
   '/features': typeof FeaturesRoute
+  '/legal': typeof LegalRoute
   '/open-source': typeof OpenSourceRoute
   '/pricing': typeof PricingRoute
+  '/privacy': typeof PrivacyRoute
+  '/refunds': typeof RefundsRoute
+  '/terms': typeof TermsRoute
   '/checkout/cancelled': typeof CheckoutCancelledRoute
   '/checkout/success': typeof CheckoutSuccessRoute
   '/api/billing/webhook': typeof ApiBillingWebhookRoute
@@ -84,8 +116,12 @@ export interface FileRoutesById {
   '/': typeof IndexRoute
   '/cloud': typeof CloudRoute
   '/features': typeof FeaturesRoute
+  '/legal': typeof LegalRoute
   '/open-source': typeof OpenSourceRoute
   '/pricing': typeof PricingRoute
+  '/privacy': typeof PrivacyRoute
+  '/refunds': typeof RefundsRoute
+  '/terms': typeof TermsRoute
   '/checkout/cancelled': typeof CheckoutCancelledRoute
   '/checkout/success': typeof CheckoutSuccessRoute
   '/api/billing/webhook': typeof ApiBillingWebhookRoute
@@ -96,8 +132,12 @@ export interface FileRouteTypes {
     | '/'
     | '/cloud'
     | '/features'
+    | '/legal'
     | '/open-source'
     | '/pricing'
+    | '/privacy'
+    | '/refunds'
+    | '/terms'
     | '/checkout/cancelled'
     | '/checkout/success'
     | '/api/billing/webhook'
@@ -106,8 +146,12 @@ export interface FileRouteTypes {
     | '/'
     | '/cloud'
     | '/features'
+    | '/legal'
     | '/open-source'
     | '/pricing'
+    | '/privacy'
+    | '/refunds'
+    | '/terms'
     | '/checkout/cancelled'
     | '/checkout/success'
     | '/api/billing/webhook'
@@ -116,8 +160,12 @@ export interface FileRouteTypes {
     | '/'
     | '/cloud'
     | '/features'
+    | '/legal'
     | '/open-source'
     | '/pricing'
+    | '/privacy'
+    | '/refunds'
+    | '/terms'
     | '/checkout/cancelled'
     | '/checkout/success'
     | '/api/billing/webhook'
@@ -127,8 +175,12 @@ export interface RootRouteChildren {
   IndexRoute: typeof IndexRoute
   CloudRoute: typeof CloudRoute
   FeaturesRoute: typeof FeaturesRoute
+  LegalRoute: typeof LegalRoute
   OpenSourceRoute: typeof OpenSourceRoute
   PricingRoute: typeof PricingRoute
+  PrivacyRoute: typeof PrivacyRoute
+  RefundsRoute: typeof RefundsRoute
+  TermsRoute: typeof TermsRoute
   CheckoutCancelledRoute: typeof CheckoutCancelledRoute
   CheckoutSuccessRoute: typeof CheckoutSuccessRoute
   ApiBillingWebhookRoute: typeof ApiBillingWebhookRoute
@@ -157,6 +209,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof FeaturesRouteImport
       parentRoute: typeof rootRouteImport
     }
+    '/legal': {
+      id: '/legal'
+      path: '/legal'
+      fullPath: '/legal'
+      preLoaderRoute: typeof LegalRouteImport
+      parentRoute: typeof rootRouteImport
+    }
     '/open-source': {
       id: '/open-source'
       path: '/open-source'
@@ -169,6 +228,27 @@ declare module '@tanstack/react-router' {
       path: '/pricing'
       fullPath: '/pricing'
       preLoaderRoute: typeof PricingRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/privacy': {
+      id: '/privacy'
+      path: '/privacy'
+      fullPath: '/privacy'
+      preLoaderRoute: typeof PrivacyRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/refunds': {
+      id: '/refunds'
+      path: '/refunds'
+      fullPath: '/refunds'
+      preLoaderRoute: typeof RefundsRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/terms': {
+      id: '/terms'
+      path: '/terms'
+      fullPath: '/terms'
+      preLoaderRoute: typeof TermsRouteImport
       parentRoute: typeof rootRouteImport
     }
     '/checkout/cancelled': {
@@ -199,8 +279,12 @@ const rootRouteChildren: RootRouteChildren = {
   IndexRoute: IndexRoute,
   CloudRoute: CloudRoute,
   FeaturesRoute: FeaturesRoute,
+  LegalRoute: LegalRoute,
   OpenSourceRoute: OpenSourceRoute,
   PricingRoute: PricingRoute,
+  PrivacyRoute: PrivacyRoute,
+  RefundsRoute: RefundsRoute,
+  TermsRoute: TermsRoute,
   CheckoutCancelledRoute: CheckoutCancelledRoute,
   CheckoutSuccessRoute: CheckoutSuccessRoute,
   ApiBillingWebhookRoute: ApiBillingWebhookRoute,

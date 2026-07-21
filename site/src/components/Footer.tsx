@@ -83,8 +83,24 @@ export default function Footer() {
       </div>
 
       <div className="border-t border-line">
-        <div className="wrap flex flex-col gap-2 py-6 font-mono text-xs text-faint sm:flex-row sm:items-center sm:justify-between">
+        <div className="wrap flex flex-col gap-3 py-6 font-mono text-xs text-faint sm:flex-row sm:items-center sm:justify-between">
           <span>© {new Date().getFullYear()} simnJS &amp; contributors</span>
+          <nav className="flex flex-wrap gap-x-4 gap-y-1">
+            {[
+              { to: '/legal', label: 'Legal' },
+              { to: '/terms', label: 'Terms' },
+              { to: '/privacy', label: 'Privacy' },
+              { to: '/refunds', label: 'Refunds' },
+            ].map((item) => (
+              <Link
+                key={item.to}
+                to={item.to}
+                className="text-faint no-underline transition-colors hover:text-ink"
+              >
+                {item.label}
+              </Link>
+            ))}
+          </nav>
           <span>Desktop &amp; engine: MIT · Cloud server: AGPL-3.0</span>
         </div>
       </div>
