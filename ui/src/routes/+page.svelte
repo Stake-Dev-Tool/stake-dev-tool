@@ -24,6 +24,7 @@
   import RefreshIcon from '@lucide/svelte/icons/refresh-cw';
   import ShieldIcon from '@lucide/svelte/icons/shield-check';
   import ShieldAlertIcon from '@lucide/svelte/icons/shield-alert';
+  import TriangleAlertIcon from '@lucide/svelte/icons/triangle-alert';
   import DownloadIcon from '@lucide/svelte/icons/download';
   import MonitorIcon from '@lucide/svelte/icons/monitor';
   import ChevronDownIcon from '@lucide/svelte/icons/chevron-down';
@@ -1480,6 +1481,18 @@
         {/if}
       </Dialog.Description>
     </Dialog.Header>
+
+    <!-- Deprecation notice — the WASM/GitHub Pages share path is replaced by
+         hosted share links in V2 (see V2.md, milestone M5). -->
+    <div class="flex items-start gap-3 rounded-md border border-amber-500/30 bg-amber-500/5 p-3">
+      <TriangleAlertIcon class="h-4 w-4 flex-shrink-0 text-amber-400" />
+      <p class="text-xs leading-relaxed text-muted-foreground">
+        <span class="font-semibold text-foreground">Deprecated.</span>
+        WASM previews on GitHub Pages will be replaced by hosted share links
+        backed by a real server-side RGS in V2 — full fidelity, math never
+        leaves the server. Existing links keep working for now.
+      </p>
+    </div>
 
     {#if !githubUser}
       <!-- Sign-in CTA: previews need a GitHub repo to host the bundle.

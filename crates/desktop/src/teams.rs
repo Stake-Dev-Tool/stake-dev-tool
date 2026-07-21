@@ -1,3 +1,12 @@
+//! GitHub-repo-backed teams: shared profiles, saved rounds and math sync.
+//!
+//! # Deprecated
+//!
+//! The whole GitHub-repo team system is deprecated in favour of the V2 cloud
+//! workspaces (server-authoritative document sync + math revisions — see
+//! `V2.md`, milestone M3). It keeps working until the migration path ships,
+//! but no new features should be built on it. Do not extend this module.
+
 use anyhow::{Context, Result, anyhow};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;

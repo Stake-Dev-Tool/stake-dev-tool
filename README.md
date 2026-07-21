@@ -79,11 +79,15 @@ afterwards macOS remembers your decision.
   outcome, bookmark notable rounds (auto-picked min / avg / max per mode).
 - **Local HTTPS** — bundled CA installs into your user trust store. Zero browser
   warnings, no game-code hacks.
-- **Teams** — collaborative workspaces backed by a private GitHub repo. Sync
-  profiles + saved rounds + math files (chunked Release assets).
-- **Share preview link** — one click ships your game as a static page on
-  GitHub Pages. Math + game run in the browser via a WASM RGS — no server,
-  anyone with the URL can play. Three privacy modes (Sampled / Partial / Full).
+- **Teams** *(deprecated)* — collaborative workspaces backed by a private
+  GitHub repo. Sync profiles + saved rounds + math files (chunked Release
+  assets). Replaced by cloud workspaces in V2 (see [V2.md](V2.md)); still
+  works, with a migration path planned.
+- **Share preview link** *(deprecated)* — one click ships your game as a
+  static page on GitHub Pages. Math + game run in the browser via a WASM RGS —
+  no server, anyone with the URL can play. Three privacy modes
+  (Sampled / Partial / Full). Replaced in V2 by hosted share links backed by a
+  real server-side RGS (see [V2.md](V2.md)); existing links keep working.
 - **Profiles** — math folder + front URL + resolution snapshot saved per game,
   one-click reload.
 - **Auto-updater** — Minisign-signed releases, silent install on Windows,
@@ -140,7 +144,7 @@ load from a real browser context with full WebGL support.
   the desktop via `cargo run -p lgs --release`.
 - [`crates/desktop`](crates/desktop/) — Tauri shell + commands.
 - [`crates/lgs-wasm`](crates/lgs-wasm/) — math engine compiled to wasm32 for
-  browser-hosted preview links.
+  browser-hosted preview links (deprecated along with the share path).
 - [`ui/`](ui/) — SvelteKit frontend, builds to static HTML/JS.
 
 ## HTTP endpoints

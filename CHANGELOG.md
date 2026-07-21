@@ -5,6 +5,21 @@ All notable changes to this project are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Deprecated
+
+- **Teams (GitHub-repo sync).** The whole team system — private team repos,
+  profile/saved-round sync, chunked math push/pull — is deprecated in favour
+  of the V2 cloud workspaces (see [V2.md](V2.md), milestone M3). Teams keep
+  working until the migration path ships; a deprecation banner now appears on
+  the Teams page.
+- **Share preview links (WASM / GitHub Pages).** The browser-side WASM share
+  path, including the Sampled / Partial / Full privacy modes, is deprecated in
+  favour of V2 hosted share links backed by a real server-side RGS (see
+  [V2.md](V2.md), milestone M5). Existing links keep working; the share dialog
+  now shows a deprecation notice. `crates/lgs-wasm` is deprecated with it.
+
 ## [1.2.2] — 2026-07-20
 
 ### Fixed

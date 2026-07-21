@@ -1,5 +1,14 @@
 //! Build + publish a browser-side preview of a profile.
 //!
+//! # Deprecated
+//!
+//! The whole WASM/GitHub Pages share path is deprecated in favour of the V2
+//! hosted share links (`<slug>.play.<domain>`, real server-side RGS — see
+//! `V2.md`, milestone M5). With the math staying on the server, the
+//! Sampled/Partial/Full privacy trade-off below disappears entirely.
+//! Existing links keep working until the V2 path ships. Do not extend this
+//! module.
+//!
 //! End result: `https://<user>.github.io/stake-dev-tool-previews/<slug>/` —
 //! a static page that runs the game with the WASM RGS in place of the local
 //! one. Pipeline:

@@ -1,5 +1,11 @@
 //! Push/pull math files between a local folder and a team GitHub repo.
 //!
+//! # Deprecated
+//!
+//! Part of the deprecated GitHub-repo team system. V2 replaces this with
+//! content-addressed math revisions pushed to the cloud server (see `V2.md`,
+//! milestone M2). Do not extend this module.
+//!
 //! The strategy:
 //! - Metadata (file list + SHA-256 per chunk) lives at
 //!   `math-manifests/<game-slug>.json` in the repo.

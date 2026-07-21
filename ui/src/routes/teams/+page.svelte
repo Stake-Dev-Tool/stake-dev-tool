@@ -23,6 +23,7 @@
   import ExternalLinkIcon from '@lucide/svelte/icons/external-link';
   import TrashIcon from '@lucide/svelte/icons/trash-2';
   import CheckIcon from '@lucide/svelte/icons/check';
+  import TriangleAlertIcon from '@lucide/svelte/icons/triangle-alert';
 
   import {
     githubAuth,
@@ -321,6 +322,24 @@
       </div>
     {/if}
   </header>
+
+  <!-- Deprecation notice — GitHub-repo teams are replaced by cloud workspaces
+       in V2 (see V2.md, milestone M3). Keep until the migration path ships. -->
+  <Card.Root class="border-amber-500/30 bg-amber-500/5">
+    <Card.Content class="flex items-start gap-4 pt-6">
+      <div class="flex h-10 w-10 flex-shrink-0 items-center justify-center rounded-lg bg-amber-500/10 text-amber-400">
+        <TriangleAlertIcon class="h-5 w-5" />
+      </div>
+      <div class="flex-1">
+        <h3 class="text-base font-semibold">Teams are deprecated</h3>
+        <p class="mt-1.5 text-sm leading-relaxed text-muted-foreground">
+          GitHub-repo teams will be replaced by cloud workspaces in V2, with a
+          migration path for existing teams. Your teams keep working for now,
+          but avoid building new workflows on top of them.
+        </p>
+      </div>
+    </Card.Content>
+  </Card.Root>
 
   {#if loading}
     <Card.Root>

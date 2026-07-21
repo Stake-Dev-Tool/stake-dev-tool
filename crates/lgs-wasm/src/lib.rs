@@ -10,6 +10,14 @@
 //! Math files are fetched over HTTP at load time (one request per mode for
 //! the weights CSV + the zstd-compressed books). Decompression happens in
 //! WASM via `ruzstd` so we don't depend on a C library.
+//!
+//! # Deprecated
+//!
+//! The share path this crate powers is deprecated: V2 replaces WASM/GitHub
+//! Pages previews with hosted share links backed by a real server-side RGS
+//! (see `V2.md`, milestone M5). This crate is off the critical path and only
+//! survives if a "static offline export" feature is ever wanted. Do not
+//! extend it.
 
 use rand::{Rng, SeedableRng};
 use serde::{Deserialize, Serialize};
