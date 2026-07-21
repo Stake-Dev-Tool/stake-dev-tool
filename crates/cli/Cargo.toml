@@ -13,3 +13,22 @@ path = "src/main.rs"
 [dependencies]
 anyhow.workspace = true
 clap.workspace = true
+reqwest.workspace = true
+tokio.workspace = true
+# `io` feature gives `ReaderStream`, which streams a file off disk into the
+# request body so a book is never buffered whole in memory.
+tokio-util.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+thiserror.workspace = true
+indicatif.workspace = true
+# `StreamExt` powers per-chunk progress and bounded-concurrency uploads.
+futures-util.workspace = true
+# Parses revision `created_at` timestamps to render relative ages.
+chrono.workspace = true
+# Locates the home directory for `~/.config/sdt/config.toml`.
+dirs.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
