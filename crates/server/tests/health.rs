@@ -16,6 +16,7 @@ fn fs_state(database_url: &str, root: PathBuf) -> AppState {
         public_url: None,
         github: None,
         web_dir: None,
+        storage_max_blob_bytes: 8_589_934_592,
     };
     let pool = db::connect_lazy(database_url).expect("lazy pool never connects");
     let store = storage::build_object_store(&config).expect("fs store");

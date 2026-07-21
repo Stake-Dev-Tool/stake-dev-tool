@@ -2,12 +2,15 @@
 //! the sub-router `http::build_router` nests under `/api`.
 
 pub mod auth;
+pub mod documents;
 pub mod invites;
+pub mod math;
 pub mod tokens;
 pub mod workspaces;
+pub mod ws;
 
 use axum::Router;
-use axum::routing::{delete, get, patch, post};
+use axum::routing::{delete, get, patch, post, put};
 
 use crate::AppState;
 use crate::error::ApiError;
@@ -56,5 +59,34 @@ pub fn router() -> Router<AppState> {
         .route("/workspaces/:slug/invites/:id", delete(invites::revoke))
         .route("/invites/:token", get(invites::preview))
         .route("/invites/:token/accept", post(invites::accept))
+        // --- math revisions (M2) ---
+        .route("/workspaces/:slug/games", get(math::list_games))
+        .route(
+            "/workspaces/:slug/games/:game/revisions/check",
+            post(math::check),
+        )
+        .route(
+            "/workspaces/:slug/games/:game/blobs/:hash",
+            put(math::put_blob).get(math::get_blob),
+        )
+        .route(
+            "/workspaces/:slug/games/:game/revisions",
+            get(math::list_revisions).post(math::create_revision),
+        )
+        .route(
+            "/workspaces/:slug/games/:game/revisions/:number",
+            get(math::revision_detail),
+        )
+        .route(
+            "/workspaces/:slug/games/:game/revisions/:number/diff/:other",
+            get(math::revision_diff),
+        )
+        .route(
+            "/workspaces/:slug/games/:game/revisions/:number/files/*path",
+            get(math::download_file),
+        )
+        // --- reserved mount points (stub routers until their milestones land) ---
+        .merge(documents::router()) // M3 — document sync + workspace SSE
+        .merge(ws::router()) // M4 — cloud LGS under /ws/…
         .fallback(not_found)
 }

@@ -37,6 +37,28 @@ pub struct CurrentUser {
     pub scopes: Vec<String>,
 }
 
+impl CurrentUser {
+    /// True when the caller holds `scope` or the catch-all `full` scope.
+    pub fn has_scope(&self, scope: &str) -> bool {
+        self.scopes.iter().any(|s| s == scope || s == "full")
+    }
+
+    /// 403 `insufficient_scope` unless the caller holds `scope` (or `full`).
+    /// Sessions carry `full`, so they always pass; PATs must have been minted
+    /// with the scope. Apply *after* the membership check so a non-member still
+    /// gets a 404 rather than leaking the workspace's existence via a 403.
+    pub fn require_scope(&self, scope: &str) -> ApiResult<()> {
+        if self.has_scope(scope) {
+            Ok(())
+        } else {
+            Err(ApiError::forbidden(
+                "insufficient_scope",
+                format!("this action requires the \"{scope}\" scope"),
+            ))
+        }
+    }
+}
+
 /// Core resolution shared by both extractors. A present-but-invalid Bearer token
 /// is rejected outright rather than falling through to the cookie.
 async fn authenticate(parts: &mut Parts, state: &AppState) -> ApiResult<CurrentUser> {

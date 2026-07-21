@@ -8,6 +8,9 @@ const DEFAULT_DATABASE_URL: &str = "postgres://stakedev:stakedev@localhost:5433/
 const DEFAULT_BIND_ADDR: &str = "127.0.0.1:8080";
 const DEFAULT_FS_ROOT: &str = "./data/blobs";
 const DEFAULT_S3_REGION: &str = "auto";
+/// Upper bound on a single uploaded blob (8 GiB). Beyond it a blob PUT is
+/// rejected with `413 payload_too_large`.
+const DEFAULT_MAX_BLOB_BYTES: u64 = 8_589_934_592;
 
 #[derive(Debug, Error, PartialEq, Eq)]
 pub enum ConfigError {
@@ -17,6 +20,8 @@ pub enum ConfigError {
     MissingBucket,
     #[error("{key} must be a boolean (true/false/1/0), got \"{value}\"")]
     InvalidBool { key: &'static str, value: String },
+    #[error("{key} must be a non-negative integer, got \"{value}\"")]
+    InvalidU64 { key: &'static str, value: String },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -37,6 +42,9 @@ pub struct Config {
     /// Explicit dashboard build directory (`SERVER_WEB_DIR`). When unset,
     /// [`Config::resolve_web_dir`] probes the standard locations.
     pub web_dir: Option<PathBuf>,
+    /// Maximum bytes accepted for a single blob upload (`STORAGE_MAX_BLOB_BYTES`,
+    /// default 8 GiB). A larger streamed body is aborted with `413`.
+    pub storage_max_blob_bytes: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -119,6 +127,10 @@ impl Config {
             other => return Err(ConfigError::InvalidBackend(other.to_string())),
         };
 
+        let storage_max_blob_bytes =
+            parse_u64(get("STORAGE_MAX_BLOB_BYTES"), "STORAGE_MAX_BLOB_BYTES")?
+                .unwrap_or(DEFAULT_MAX_BLOB_BYTES);
+
         let cookie_secure = parse_bool(get("SERVER_COOKIE_SECURE"), "SERVER_COOKIE_SECURE")?;
         // Trailing slashes are trimmed so callers can always append "/path".
         let public_url = get("SERVER_PUBLIC_URL").map(|s| s.trim_end_matches('/').to_string());
@@ -145,6 +157,7 @@ impl Config {
             public_url,
             github,
             web_dir: get("SERVER_WEB_DIR").map(PathBuf::from),
+            storage_max_blob_bytes,
         })
     }
 }
@@ -157,6 +170,20 @@ fn parse_bool(value: Option<String>, key: &'static str) -> Result<bool, ConfigEr
             "false" | "0" | "no" | "off" | "" => Ok(false),
             _ => Err(ConfigError::InvalidBool { key, value: v }),
         },
+    }
+}
+
+/// Parses an optional unsigned integer env var. `None`/empty → `Ok(None)` so the
+/// caller can apply its default; anything non-numeric is a hard error.
+fn parse_u64(value: Option<String>, key: &'static str) -> Result<Option<u64>, ConfigError> {
+    match value {
+        None => Ok(None),
+        Some(v) if v.trim().is_empty() => Ok(None),
+        Some(v) => v
+            .trim()
+            .parse::<u64>()
+            .map(Some)
+            .map_err(|_| ConfigError::InvalidU64 { key, value: v }),
     }
 }
 
@@ -233,6 +260,22 @@ mod tests {
             ConfigError::InvalidBool {
                 key: "STORAGE_S3_ALLOW_HTTP",
                 value: "maybe".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn max_blob_bytes_defaults_and_parses() {
+        let cfg = Config::from_source(|_| None).unwrap();
+        assert_eq!(cfg.storage_max_blob_bytes, DEFAULT_MAX_BLOB_BYTES);
+        let cfg = Config::from_source(source(&[("STORAGE_MAX_BLOB_BYTES", "1048576")])).unwrap();
+        assert_eq!(cfg.storage_max_blob_bytes, 1_048_576);
+        let err = Config::from_source(source(&[("STORAGE_MAX_BLOB_BYTES", "huge")])).unwrap_err();
+        assert_eq!(
+            err,
+            ConfigError::InvalidU64 {
+                key: "STORAGE_MAX_BLOB_BYTES",
+                value: "huge".to_string(),
             }
         );
     }

@@ -1,9 +1,11 @@
 pub mod api;
 pub mod auth;
+pub mod blobs;
 pub mod config;
 pub mod db;
 pub mod error;
 pub mod http;
+pub mod stats;
 pub mod storage;
 
 use std::sync::Arc;

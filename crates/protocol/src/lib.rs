@@ -10,10 +10,12 @@ use ts_rs::TS;
 
 pub mod auth;
 pub mod error;
+pub mod math;
 pub mod workspace;
 
 pub use auth::*;
 pub use error::*;
+pub use math::*;
 pub use workspace::*;
 
 /// Health of a single dependency the server talks to (database, object store).

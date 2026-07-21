@@ -51,6 +51,7 @@ All configuration is via environment variables (loaded from `.env` if present).
 | `STORAGE_S3_ACCESS_KEY_ID` | _(unset)_ | Access key id. |
 | `STORAGE_S3_SECRET_ACCESS_KEY` | _(unset)_ | Secret access key. |
 | `STORAGE_S3_ALLOW_HTTP` | `false` | Allow plaintext HTTP (needed for local MinIO). |
+| `STORAGE_MAX_BLOB_BYTES` | `8589934592` (8 GiB) | Max bytes per blob upload; larger bodies are aborted with `413`. |
 | `SERVER_COOKIE_SECURE` | `false` | `Secure` flag on the session cookie; set `true` behind TLS. |
 | `SERVER_PUBLIC_URL` | _(unset)_ | Public base URL for invite/device/OAuth links; falls back to the bind address. |
 | `GITHUB_CLIENT_ID` | _(unset)_ | GitHub OAuth app client id (enables GitHub sign-in with the two below). |
@@ -95,6 +96,25 @@ mint tokens).
 | `DELETE` | `/api/workspaces/:slug/invites/:id` | user | Revoke an invite (owner/admin). |
 | `GET` | `/api/invites/:token` | — | Public invite preview for the accept page. |
 | `POST` | `/api/invites/:token/accept` | session | Accept an invite (grants membership). |
+
+### Math revisions (M2)
+
+Content-addressed math blobs with per-workspace dedup, immutable numbered
+revisions, file diffs, and per-revision bet stats. Writes need workspace
+membership **and** the `push:math` scope (a session's implicit `full` scope
+satisfies it); reads need membership only. Hashes are lowercase hex sha256.
+
+| Method | Path | Auth | Purpose |
+| --- | --- | --- | --- |
+| `GET` | `/api/workspaces/:slug/games` | member | List games with `head_number` + `revisions_count`. |
+| `POST` | `/api/workspaces/:slug/games/:game/revisions/check` | push:math | Validate a manifest; return the `missing` blob hashes. |
+| `PUT` | `/api/workspaces/:slug/games/:game/blobs/:hash` | push:math | Stream-upload a blob (201 new, 200 exists, 422 hash mismatch, 413 too large). |
+| `GET` | `/api/workspaces/:slug/games/:game/blobs/:hash` | member | Stream a blob's bytes. |
+| `POST` | `/api/workspaces/:slug/games/:game/revisions` | push:math | Commit a revision (409 `missing_blobs` / `stale_parent`). |
+| `GET` | `/api/workspaces/:slug/games/:game/revisions` | member | List revisions (newest first). |
+| `GET` | `/api/workspaces/:slug/games/:game/revisions/:number` | member | Revision detail: manifest + stats. |
+| `GET` | `/api/workspaces/:slug/games/:game/revisions/:number/diff/:other` | member | File + stats diff (`:other` = before, `:number` = after). |
+| `GET` | `/api/workspaces/:slug/games/:game/revisions/:number/files/*path` | member | Stream a file's blob (pull). |
 
 ## Test
 

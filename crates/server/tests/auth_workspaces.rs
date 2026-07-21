@@ -35,6 +35,7 @@ async fn setup() -> Option<Ctx> {
         public_url: None,
         github: None,
         web_dir: None,
+        storage_max_blob_bytes: 8_589_934_592,
     };
     let pool = db::connect_lazy(&database_url).expect("lazy pool");
     let store = storage::build_object_store(&config).expect("fs store");

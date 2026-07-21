@@ -40,7 +40,14 @@ reqwest.workspace = true
 sqlx.workspace = true
 object_store.workspace = true
 dotenvy.workspace = true
+futures-util.workspace = true
+# Small temp dirs for materializing a revision's index.json + lookup CSVs when
+# computing bet stats (books are never downloaded).
+tempfile.workspace = true
 protocol = { path = "../protocol" }
+# The math engine: reused (config load + multi-tenant registry) to compute
+# per-revision bet stats. Path dep is confined to this crate.
+lgs = { path = "../lgs" }
 
 [dev-dependencies]
 tempfile.workspace = true
