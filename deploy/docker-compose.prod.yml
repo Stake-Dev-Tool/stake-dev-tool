@@ -1,0 +1,55 @@
+# Production stack: Postgres + server (API + dashboard + LGS) + Caddy (TLS).
+#   cd deploy && cp .env.prod.example .env.prod   # then edit it
+#   docker compose -f docker-compose.prod.yml --env-file .env.prod up -d --build
+services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: stakedev
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set in .env.prod}
+      POSTGRES_DB: stakedev
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U stakedev -d stakedev"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  server:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+    restart: unless-stopped
+    env_file: .env.prod
+    environment:
+      DATABASE_URL: postgres://stakedev:${POSTGRES_PASSWORD}@postgres:5432/stakedev
+    depends_on:
+      postgres:
+        condition: service_healthy
+    volumes:
+      # Only used with STORAGE_BACKEND=fs (self-host default). Harmless
+      # otherwise; the hosted instance uses S3/R2 instead.
+      - blobdata:/app/data
+
+  caddy:
+    build: ./caddy
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    environment:
+      APP_DOMAIN: ${APP_DOMAIN:?set in .env.prod}
+      PLAY_DOMAIN: ${PLAY_DOMAIN:-play.example.com}
+      CLOUDFLARE_API_TOKEN: ${CLOUDFLARE_API_TOKEN:-}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+
+volumes:
+  pgdata:
+  blobdata:
+  caddy_data:
+  caddy_config:

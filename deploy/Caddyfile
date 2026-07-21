@@ -1,0 +1,21 @@
+# Reverse proxy for the cloud server. Domains come from deploy/.env.prod via
+# compose `environment` so this file needs no per-instance edits.
+
+{$APP_DOMAIN} {
+	encode zstd gzip
+	reverse_proxy server:8080
+}
+
+# ---------------------------------------------------------------------------
+# M5 — share links on wildcard subdomains. Uncomment when share v2 ships.
+# Requires: the cloudflare-dns Caddy build (deploy/caddy/Dockerfile, already
+# used by compose) + CLOUDFLARE_API_TOKEN in .env.prod (Zone → DNS → Edit),
+# and a DNS-only A record for *.play.<domain> pointing at this box.
+# ---------------------------------------------------------------------------
+# *.{$PLAY_DOMAIN} {
+# 	encode zstd gzip
+# 	tls {
+# 		dns cloudflare {env.CLOUDFLARE_API_TOKEN}
+# 	}
+# 	reverse_proxy server:8080
+# }

@@ -11,3 +11,8 @@ web/build
 web/.svelte-kit
 crates/lgs-wasm/pkg
 **/.env
+# Server image (deploy/Dockerfile) context hygiene
+math
+teams
+data
+deploy/.env.prod
