@@ -3,8 +3,10 @@ pub mod auth;
 pub mod blobs;
 pub mod config;
 pub mod db;
+pub mod documents;
 pub mod error;
 pub mod http;
+pub mod lgs_host;
 pub mod stats;
 pub mod storage;
 
@@ -29,6 +31,8 @@ pub struct AppState {
     pub login_limiter: Arc<LoginRateLimiter>,
     /// Reused HTTP client for GitHub OAuth calls.
     pub http_client: reqwest::Client,
+    /// Per-workspace realtime fan-out behind the SSE stream (M3).
+    pub events: Arc<crate::documents::WorkspaceEvents>,
 }
 
 impl AppState {
@@ -39,6 +43,7 @@ impl AppState {
             store,
             login_limiter: Arc::new(LoginRateLimiter::new()),
             http_client: reqwest::Client::new(),
+            events: Arc::new(crate::documents::WorkspaceEvents::new()),
         }
     }
 }

@@ -116,6 +116,37 @@ satisfies it); reads need membership only. Hashes are lowercase hex sha256.
 | `GET` | `/api/workspaces/:slug/games/:game/revisions/:number/diff/:other` | member | File + stats diff (`:other` = before, `:number` = after). |
 | `GET` | `/api/workspaces/:slug/games/:game/revisions/:number/files/*path` | member | Stream a file's blob (pull). |
 
+### Document sync + workspace SSE (M3)
+
+Server-authoritative versioned JSON documents (`profile`, `saved_round`) with
+optimistic concurrency: a `PUT`/`DELETE` carries `base_revision` and applies only
+when it equals the document's current `revision`, otherwise `409 document_conflict`
+with the current server envelope in the body (`{ error, current }`) so the client
+can reconcile. Every write bumps the per-document `revision`, advances the
+workspace-global `seq` cursor, and nudges SSE subscribers with a `document` event.
+Reads need membership; writes need the `full` scope (a `push:math`-only PAT can
+read documents but not edit them). Payloads are validated per kind (required
+fields enforced, unknown fields tolerated and preserved) and capped at 64 KiB.
+
+`DocumentEnvelope = { kind, doc_id, data, revision, seq, updated_by_display,
+updated_at, deleted }`. A list includes tombstones only when `since_seq` is given
+(a sync pull); a plain list omits them.
+
+| Method | Path | Auth | Purpose |
+| --- | --- | --- | --- |
+| `GET` | `/api/workspaces/:slug/documents?kind=&since_seq=` | member | List documents `{ documents, latest_seq }`; `since_seq` pulls newer rows incl. tombstones. |
+| `GET` | `/api/workspaces/:slug/documents/:kind/:doc_id` | member | One live document envelope (404 if tombstoned/missing). |
+| `PUT` | `/api/workspaces/:slug/documents/:kind/:doc_id` | full | Create/update `{ data, base_revision }` → `{ revision, seq }` (409 `document_conflict`). |
+| `DELETE` | `/api/workspaces/:slug/documents/:kind/:doc_id` | full | Tombstone `{ base_revision }` → `{ seq }` (409 `document_conflict`). |
+| `GET` | `/api/workspaces/:slug/events` | member | Workspace SSE stream (cookie or Bearer). |
+| `DELETE` | `/api/workspaces/:slug` | owner | Delete a workspace (204); blob bytes swept asynchronously. |
+
+The SSE stream (`text/event-stream`, cookie or Bearer, keep-alive every 25s)
+carries `document` (`{ kind, doc_id, seq }`) and `revision_pushed`
+(`{ game, number }`, fired from the M2 commit path) events. Clients do not rely
+on Last-Event-ID replay: on (re)connect they pull `?since_seq=<last known>` and
+then stream. (`membership` events are specced but deferred in M3.)
+
 ## Test
 
 ```sh

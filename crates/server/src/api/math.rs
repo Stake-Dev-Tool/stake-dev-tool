@@ -484,6 +484,15 @@ pub async fn create_revision(
 
     tx.commit().await?;
 
+    // M3 hook: nudge the workspace's SSE subscribers that a revision landed.
+    state.events.publish(
+        workspace.id,
+        crate::documents::WorkspaceEvent::RevisionPushed(protocol::RevisionPushedEvent {
+            game: game_slug.clone(),
+            number,
+        }),
+    );
+
     // 5. Compute stats out of band; tests call the same fn deterministically.
     tokio::spawn(stats::compute_stats_for_revision(
         state.pool.clone(),

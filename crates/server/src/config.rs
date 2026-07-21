@@ -11,6 +11,10 @@ const DEFAULT_S3_REGION: &str = "auto";
 /// Upper bound on a single uploaded blob (8 GiB). Beyond it a blob PUT is
 /// rejected with `413 payload_too_large`.
 const DEFAULT_MAX_BLOB_BYTES: u64 = 8_589_934_592;
+/// Byte budget for the on-disk materialized-revision cache used by the
+/// multi-tenant LGS host (20 GiB). Least-recently-used completed revision
+/// directories are evicted once the total exceeds this. See `lgs_host`.
+const DEFAULT_MATH_CACHE_BYTES: u64 = 21_474_836_480;
 
 #[derive(Debug, Error, PartialEq, Eq)]
 pub enum ConfigError {
@@ -45,6 +49,15 @@ pub struct Config {
     /// Maximum bytes accepted for a single blob upload (`STORAGE_MAX_BLOB_BYTES`,
     /// default 8 GiB). A larger streamed body is aborted with `413`.
     pub storage_max_blob_bytes: u64,
+    /// Byte budget for the multi-tenant LGS host's on-disk materialized-revision
+    /// cache (`SERVER_MATH_CACHE_BYTES`, default 20 GiB). Completed revision
+    /// directories are LRU-evicted (by `.complete` marker mtime) past this.
+    pub server_math_cache_bytes: u64,
+    /// Optional per-tenant decompressed-books cap (`SERVER_TENANT_BOOKS_CAP_BYTES`)
+    /// applied to every hosted tenant via `TenantRegistry::set_tenant_cap`.
+    /// `None` (the default) leaves tenants uncapped, sharing the process-global
+    /// books budget. A billing plan can override this per workspace later.
+    pub server_tenant_books_cap_bytes: Option<u64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -131,6 +144,15 @@ impl Config {
             parse_u64(get("STORAGE_MAX_BLOB_BYTES"), "STORAGE_MAX_BLOB_BYTES")?
                 .unwrap_or(DEFAULT_MAX_BLOB_BYTES);
 
+        let server_math_cache_bytes =
+            parse_u64(get("SERVER_MATH_CACHE_BYTES"), "SERVER_MATH_CACHE_BYTES")?
+                .unwrap_or(DEFAULT_MATH_CACHE_BYTES);
+        // Optional: `None` (unset/empty) leaves every tenant uncapped.
+        let server_tenant_books_cap_bytes = parse_u64(
+            get("SERVER_TENANT_BOOKS_CAP_BYTES"),
+            "SERVER_TENANT_BOOKS_CAP_BYTES",
+        )?;
+
         let cookie_secure = parse_bool(get("SERVER_COOKIE_SECURE"), "SERVER_COOKIE_SECURE")?;
         // Trailing slashes are trimmed so callers can always append "/path".
         let public_url = get("SERVER_PUBLIC_URL").map(|s| s.trim_end_matches('/').to_string());
@@ -158,6 +180,8 @@ impl Config {
             github,
             web_dir: get("SERVER_WEB_DIR").map(PathBuf::from),
             storage_max_blob_bytes,
+            server_math_cache_bytes,
+            server_tenant_books_cap_bytes,
         })
     }
 }
@@ -276,6 +300,30 @@ mod tests {
             ConfigError::InvalidU64 {
                 key: "STORAGE_MAX_BLOB_BYTES",
                 value: "huge".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn math_cache_bytes_defaults_and_parses() {
+        let cfg = Config::from_source(|_| None).unwrap();
+        assert_eq!(cfg.server_math_cache_bytes, DEFAULT_MATH_CACHE_BYTES);
+        assert_eq!(cfg.server_tenant_books_cap_bytes, None);
+
+        let cfg = Config::from_source(source(&[
+            ("SERVER_MATH_CACHE_BYTES", "1048576"),
+            ("SERVER_TENANT_BOOKS_CAP_BYTES", "2097152"),
+        ]))
+        .unwrap();
+        assert_eq!(cfg.server_math_cache_bytes, 1_048_576);
+        assert_eq!(cfg.server_tenant_books_cap_bytes, Some(2_097_152));
+
+        let err = Config::from_source(source(&[("SERVER_MATH_CACHE_BYTES", "lots")])).unwrap_err();
+        assert_eq!(
+            err,
+            ConfigError::InvalidU64 {
+                key: "SERVER_MATH_CACHE_BYTES",
+                value: "lots".to_string(),
             }
         );
     }

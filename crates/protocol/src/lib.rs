@@ -9,11 +9,13 @@ use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 
 pub mod auth;
+pub mod documents;
 pub mod error;
 pub mod math;
 pub mod workspace;
 
 pub use auth::*;
+pub use documents::*;
 pub use error::*;
 pub use math::*;
 pub use workspace::*;
