@@ -1,0 +1,116 @@
+@import 'tailwindcss';
+
+/* ============================================================================
+   Design tokens — dark-by-default developer-tool aesthetic, single emerald
+   accent. Exposed through Tailwind v4 @theme so utilities like `bg-surface`,
+   `text-muted`, `border-border`, `text-accent`, `ring-accent/40` all work.
+   ========================================================================== */
+@theme {
+  --font-sans:
+    ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, 'Apple Color Emoji',
+    'Segoe UI Emoji', sans-serif;
+  --font-mono:
+    ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas, 'Liberation Mono', monospace;
+
+  --color-bg: #0a0a0c;
+  --color-surface: #141417;
+  --color-surface-2: #1b1b20;
+  --color-border: #2a2a31;
+  --color-border-strong: #3a3a43;
+  --color-text: #ededf0;
+  --color-muted: #9a9aa4;
+  --color-faint: #6b6b74;
+
+  --color-accent: #10b981; /* emerald-500 — the project's badge color */
+  --color-accent-hover: #059669; /* emerald-600 */
+  --color-accent-ink: #04120c; /* text on top of an accent fill */
+
+  --color-danger: #f43f5e; /* rose-500 */
+  --color-info: #60a5fa; /* blue-400 */
+  --color-warn: #fbbf24; /* amber-400 */
+}
+
+@layer base {
+  :root {
+    color-scheme: dark;
+  }
+  /* v4 defaults borders to currentColor; pin them to our token so a bare
+     `border` utility renders a themed hairline. */
+  *,
+  ::before,
+  ::after {
+    border-color: var(--color-border);
+  }
+  html {
+    font-family: var(--font-sans);
+    font-size: 15px;
+  }
+  body {
+    background: var(--color-bg);
+    color: var(--color-text);
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+    text-rendering: optimizeLegibility;
+  }
+  ::selection {
+    background: var(--color-accent);
+    color: var(--color-accent-ink);
+  }
+}
+
+/* ============================================================================
+   Small utilities (ours)
+   ========================================================================== */
+.font-mono-tab {
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+}
+
+/* Button/loading spinner */
+.spinner {
+  width: 14px;
+  height: 14px;
+  border-radius: 999px;
+  border: 2px solid currentColor;
+  border-right-color: transparent;
+  display: inline-block;
+  animation: spin 0.6s linear infinite;
+}
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+@keyframes fade-in {
+  from {
+    opacity: 0;
+    transform: translateY(4px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+.fade-in {
+  animation: fade-in 200ms ease-out backwards;
+}
+
+/* Slim themed scrollbar */
+::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: var(--color-border);
+  border-radius: 999px;
+  border: 2px solid transparent;
+  background-clip: padding-box;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: var(--color-border-strong);
+  background-clip: padding-box;
+}

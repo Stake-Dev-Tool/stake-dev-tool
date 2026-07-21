@@ -18,7 +18,7 @@ export const PLANS: Record<
       '1 user, unlimited games',
       '10 GB math storage',
       'Share links, fair-use sessions',
-      '14-day trial, no card upfront',
+      '14-day free trial',
     ],
   },
   team: {

@@ -37,7 +37,7 @@ const FAQ = [
   },
   {
     q: 'How does the trial work?',
-    a: 'Every cloud plan starts with 14 days free, no card upfront. Payments and EU VAT are handled by our merchant of record, and you can cancel from the billing portal at any time.',
+    a: 'Every cloud plan starts with a 14-day free trial: you are not charged until the trial ends, and you can cancel from the billing portal at any time. Payments and EU VAT are handled by our merchant of record.',
   },
   {
     q: 'Why AGPL for the server?',

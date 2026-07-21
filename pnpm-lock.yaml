@@ -191,6 +191,39 @@ importers:
         specifier: ^5.4.0
         version: 5.4.21(@types/node@20.19.39)(lightningcss@1.32.0)
 
+  web:
+    devDependencies:
+      '@sveltejs/adapter-static':
+        specifier: ^3.0.6
+        version: 3.0.10(@sveltejs/kit@2.57.1(@sveltejs/vite-plugin-svelte@4.0.4(svelte@5.55.4)(vite@5.4.21(@types/node@20.19.39)(lightningcss@1.32.0)))(svelte@5.55.4)(typescript@5.9.3)(vite@5.4.21(@types/node@20.19.39)(lightningcss@1.32.0)))
+      '@sveltejs/kit':
+        specifier: ^2.16.0
+        version: 2.57.1(@sveltejs/vite-plugin-svelte@4.0.4(svelte@5.55.4)(vite@5.4.21(@types/node@20.19.39)(lightningcss@1.32.0)))(svelte@5.55.4)(typescript@5.9.3)(vite@5.4.21(@types/node@20.19.39)(lightningcss@1.32.0))
+      '@sveltejs/vite-plugin-svelte':
+        specifier: ^4.0.0
+        version: 4.0.4(svelte@5.55.4)(vite@5.4.21(@types/node@20.19.39)(lightningcss@1.32.0))
+      '@tailwindcss/vite':
+        specifier: ^4.0.0
+        version: 4.3.3(vite@5.4.21(@types/node@20.19.39)(lightningcss@1.32.0))
+      '@types/node':
+        specifier: ^20.12.0
+        version: 20.19.39
+      svelte:
+        specifier: ^5.1.0
+        version: 5.55.4
+      svelte-check:
+        specifier: ^4.0.0
+        version: 4.4.6(picomatch@4.0.5)(svelte@5.55.4)(typescript@5.9.3)
+      tailwindcss:
+        specifier: ^4.0.0
+        version: 4.3.3
+      typescript:
+        specifier: ^5.6.0
+        version: 5.9.3
+      vite:
+        specifier: ^5.4.0
+        version: 5.4.21(@types/node@20.19.39)(lightningcss@1.32.0)
+
 packages:
 
   '@acemir/cssom@0.9.31':
@@ -3756,6 +3789,13 @@ snapshots:
       '@tailwindcss/node': 4.2.2
       '@tailwindcss/oxide': 4.2.2
       tailwindcss: 4.2.2
+      vite: 5.4.21(@types/node@20.19.39)(lightningcss@1.32.0)
+
+  '@tailwindcss/vite@4.3.3(vite@5.4.21(@types/node@20.19.39)(lightningcss@1.32.0))':
+    dependencies:
+      '@tailwindcss/node': 4.3.3
+      '@tailwindcss/oxide': 4.3.3
+      tailwindcss: 4.3.3
       vite: 5.4.21(@types/node@20.19.39)(lightningcss@1.32.0)
 
   '@tailwindcss/vite@4.3.3(vite@8.1.5(@types/node@22.20.1)(jiti@2.7.0))':
