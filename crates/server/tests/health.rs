@@ -15,6 +15,7 @@ fn fs_state(database_url: &str, root: PathBuf) -> AppState {
         cookie_secure: false,
         public_url: None,
         github: None,
+        polar: None,
         web_dir: None,
         storage_max_blob_bytes: 8_589_934_592,
         server_math_cache_bytes: 21_474_836_480,

@@ -7,15 +7,19 @@
 }
 
 # ---------------------------------------------------------------------------
-# M5 — share links on wildcard subdomains. Uncomment when share v2 ships.
+# M5 — share links on wildcard subdomains. `<slug>.play.<domain>` is terminated
+# here (wildcard TLS via the Cloudflare DNS challenge) and proxied to the server
+# with the Host header intact; the server's Host-dispatch layer routes it to the
+# share router when SERVER_PLAY_DOMAIN matches.
 # Requires: the cloudflare-dns Caddy build (deploy/caddy/Dockerfile, already
 # used by compose) + CLOUDFLARE_API_TOKEN in .env.prod (Zone → DNS → Edit),
-# and a DNS-only A record for *.play.<domain> pointing at this box.
+# a DNS-only A record for *.play.<domain> pointing at this box, and PLAY_DOMAIN
+# set in .env.prod (matching the server's SERVER_PLAY_DOMAIN, e.g. play.<domain>).
 # ---------------------------------------------------------------------------
-# *.{$PLAY_DOMAIN} {
-# 	encode zstd gzip
-# 	tls {
-# 		dns cloudflare {env.CLOUDFLARE_API_TOKEN}
-# 	}
-# 	reverse_proxy server:8080
-# }
+*.{$PLAY_DOMAIN} {
+	encode zstd gzip
+	tls {
+		dns cloudflare {env.CLOUDFLARE_API_TOKEN}
+	}
+	reverse_proxy server:8080
+}

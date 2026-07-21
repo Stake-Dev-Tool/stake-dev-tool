@@ -240,6 +240,8 @@ pub async fn put_blob(
     request: Request,
 ) -> ApiResult<Response> {
     let workspace = authorize_write(&state, &user, &slug).await?;
+    // M7: block writes on a lapsed trial before touching the body.
+    crate::billing::write_allowed(&state, workspace.id).await?;
     if !blobs::is_hex64_lower(&hash_hex) {
         return Err(ApiError::unprocessable(
             "invalid_hash",
@@ -249,6 +251,7 @@ pub async fn put_blob(
     let expected = blobs::from_hex(&hash_hex).expect("validated hex");
 
     // Idempotent: the workspace already holds this blob — don't re-read the body.
+    // (An already-stored blob adds no bytes, so this precedes the quota check.)
     if let Some(size) = blob_size(&state.pool, workspace.id, &expected).await? {
         return Ok((
             StatusCode::OK,
@@ -258,6 +261,29 @@ pub async fn put_blob(
             }),
         )
             .into_response());
+    }
+
+    // M7 storage quota: pre-check with the declared Content-Length when present.
+    // Absent header → allow the upload; the revision commit re-checks the stored
+    // total (which by then includes these bytes).
+    let limits = crate::billing::limits_for(&state, workspace.id).await?;
+    if let Some(max) = limits.max_storage_bytes {
+        let declared = request
+            .headers()
+            .get(header::CONTENT_LENGTH)
+            .and_then(|v| v.to_str().ok())
+            .and_then(|v| v.parse::<u64>().ok());
+        if let Some(declared) = declared {
+            let current =
+                crate::billing::plan::storage_bytes_live(&state.pool, workspace.id).await? as u64;
+            if current.saturating_add(declared) > max {
+                return Err(ApiError::new(
+                    StatusCode::PAYLOAD_TOO_LARGE,
+                    "storage_quota_exceeded",
+                    "this upload would exceed the workspace storage quota; upgrade the plan",
+                ));
+            }
+        }
     }
 
     let key = blobs::blob_key(workspace.id, &hash_hex);
@@ -386,6 +412,9 @@ pub async fn create_revision(
     let workspace = authorize_write(&state, &user, &slug).await?;
     validate_game_slug(&game_slug)?;
     validate_manifest(&req.files)?;
+    // M7: block commits on a lapsed trial; resolve the storage cap once.
+    crate::billing::write_allowed(&state, workspace.id).await?;
+    let limits = crate::billing::limits_for(&state, workspace.id).await?;
 
     let pairs = distinct_pairs(&req.files);
     let mut tx = state.pool.begin().await?;
@@ -417,6 +446,24 @@ pub async fn create_revision(
             missing,
         };
         return Ok((StatusCode::CONFLICT, Json(body)).into_response());
+    }
+
+    // 1b. Storage quota (commit-time): every referenced blob now exists, so the
+    //     workspace's stored total already reflects this revision's bytes.
+    if let Some(max) = limits.max_storage_bytes {
+        let stored: i64 = sqlx::query_scalar(
+            "SELECT COALESCE(SUM(size), 0)::bigint FROM blobs WHERE workspace_id = $1",
+        )
+        .bind(workspace.id)
+        .fetch_one(&mut *tx)
+        .await?;
+        if stored as u64 > max {
+            return Err(ApiError::new(
+                StatusCode::PAYLOAD_TOO_LARGE,
+                "storage_quota_exceeded",
+                "this workspace has exceeded its storage quota; upgrade the plan",
+            ));
+        }
     }
 
     // 2. Upsert the game (name defaults to the slug), then lock its row so

@@ -1,11 +1,714 @@
 //! M5 — share links: dashboard CRUD for `<slug>.play.<domain>` hosted game
-//! instances. Contract: docs/v2/m4-m5-contract.md §M5. This stub reserves the
-//! mount point so the M5 implementation never edits shared router files.
+//! instances, plus front-bundle push. Contract: docs/v2/m4-m5-contract.md §M5.
+//!
+//! The Host-dispatched *public* share router (what visitors hit) lives in
+//! [`crate::share`]; this module is the authenticated `/api` surface the
+//! dashboard uses.
+//!
+//! ## Authorization
+//! Front-bundle writes mirror the math push flow: workspace membership **and** the
+//! `push:math` scope (a session's implicit `full` scope satisfies it). Share CRUD
+//! requires owner/admin. The membership check always runs before the scope/role
+//! check so a non-member gets a 404, never a permission-leaking 403.
 
+use std::collections::HashSet;
+
+use axum::Json;
 use axum::Router;
+use axum::extract::{Path, State};
+use axum::http::StatusCode;
+use axum::response::{IntoResponse, Response};
+use axum::routing::{get, post};
+use chrono::{DateTime, Duration, Utc};
+use protocol::shares::{
+    CreateFrontBundleRequest, CreateShareRequest, FrontBundleCreated, ShareLinkView,
+    ShareLinksResponse, UpdateShareRequest,
+};
+use protocol::{CheckRequest, CheckResponse, ErrorBody, FileEntry, MissingBlobsResponse};
+use serde_json::{Map, Value};
+use sqlx::PgPool;
+use uuid::Uuid;
 
 use crate::AppState;
+use crate::api::workspaces::{WorkspaceRow, require_admin, require_membership, workspace_by_slug};
+use crate::auth::extract::CurrentUser;
+use crate::auth::passwords;
+use crate::billing;
+use crate::blobs;
+use crate::error::{ApiError, ApiResult};
+use crate::share;
+
+/// Max files in a front bundle (bigger than a math manifest: a web build has many
+/// small assets).
+const MAX_BUNDLE_FILES: usize = 2000;
+/// How many generated-slug candidates to try before giving up.
+const SLUG_RETRIES: usize = 8;
 
 pub fn router() -> Router<AppState> {
     Router::new()
+        .route(
+            "/workspaces/:slug/games/:game/front-bundles/check",
+            post(front_bundle_check),
+        )
+        .route(
+            "/workspaces/:slug/games/:game/front-bundles",
+            post(create_front_bundle),
+        )
+        .route(
+            "/workspaces/:slug/games/:game/shares",
+            get(list_shares).post(create_share),
+        )
+        .route(
+            "/workspaces/:slug/games/:game/shares/:id",
+            axum::routing::patch(update_share).delete(delete_share),
+        )
+}
+
+// ---------------------------------------------------------------------------
+// authorization
+// ---------------------------------------------------------------------------
+
+/// Resolve the workspace + require membership (read).
+async fn authorize_read(
+    state: &AppState,
+    user: &CurrentUser,
+    slug: &str,
+) -> ApiResult<WorkspaceRow> {
+    let workspace = workspace_by_slug(&state.pool, slug).await?;
+    require_membership(&state.pool, workspace.id, user.user_id).await?;
+    Ok(workspace)
+}
+
+/// Membership + `push:math` (front-bundle writes).
+async fn authorize_push(
+    state: &AppState,
+    user: &CurrentUser,
+    slug: &str,
+) -> ApiResult<WorkspaceRow> {
+    let workspace = authorize_read(state, user, slug).await?;
+    user.require_scope("push:math")?;
+    Ok(workspace)
+}
+
+/// Membership + owner/admin (share CRUD).
+async fn authorize_admin(
+    state: &AppState,
+    user: &CurrentUser,
+    slug: &str,
+) -> ApiResult<WorkspaceRow> {
+    let workspace = workspace_by_slug(&state.pool, slug).await?;
+    let role = require_membership(&state.pool, workspace.id, user.user_id).await?;
+    require_admin(role)?;
+    Ok(workspace)
+}
+
+async fn game_id_by_slug(pool: &PgPool, workspace_id: Uuid, slug: &str) -> ApiResult<Uuid> {
+    sqlx::query_scalar("SELECT id FROM games WHERE workspace_id = $1 AND slug = $2")
+        .bind(workspace_id)
+        .bind(slug)
+        .fetch_optional(pool)
+        .await?
+        .ok_or_else(|| ApiError::not_found("game_not_found", "no such game"))
+}
+
+// ---------------------------------------------------------------------------
+// front bundles
+// ---------------------------------------------------------------------------
+
+/// `POST .../front-bundles/check` — which manifest hashes still need uploading
+/// (identical content-addressing to math; bundle blobs upload through the
+/// EXISTING `PUT .../games/:game/blobs/:hash` endpoint).
+async fn front_bundle_check(
+    State(state): State<AppState>,
+    user: CurrentUser,
+    Path((slug, _game)): Path<(String, String)>,
+    Json(req): Json<CheckRequest>,
+) -> ApiResult<Json<CheckResponse>> {
+    let workspace = authorize_push(&state, &user, &slug).await?;
+    validate_bundle_manifest(&req.files)?;
+    let missing = missing_hashes(&state.pool, workspace.id, &req.files).await?;
+    Ok(Json(CheckResponse { missing }))
+}
+
+/// `POST .../front-bundles` — commit a front bundle. Validates the manifest
+/// (index.html at root, <= 2000 files, path rules), 409s with the shared
+/// `missing_blobs` shape if any referenced blob is absent, then stores the
+/// `path -> {hash,size}` manifest.
+async fn create_front_bundle(
+    State(state): State<AppState>,
+    user: CurrentUser,
+    Path((slug, game_slug)): Path<(String, String)>,
+    Json(req): Json<CreateFrontBundleRequest>,
+) -> ApiResult<Response> {
+    let workspace = authorize_push(&state, &user, &slug).await?;
+    validate_bundle_manifest(&req.files)?;
+    let game_id = game_id_by_slug(&state.pool, workspace.id, &game_slug).await?;
+
+    let missing = missing_hashes(&state.pool, workspace.id, &req.files).await?;
+    if !missing.is_empty() {
+        let body = MissingBlobsResponse {
+            error: ErrorBody {
+                code: "missing_blobs".to_string(),
+                message: format!(
+                    "{} blob(s) must be uploaded before this bundle can commit",
+                    missing.len()
+                ),
+            },
+            missing,
+        };
+        return Ok((StatusCode::CONFLICT, Json(body)).into_response());
+    }
+
+    let manifest = build_manifest(&req.files);
+    let row: (Uuid, DateTime<Utc>) = sqlx::query_as(
+        "INSERT INTO front_bundles (game_id, manifest, created_by) VALUES ($1, $2, $3) \
+         RETURNING id, created_at",
+    )
+    .bind(game_id)
+    .bind(Value::Object(manifest))
+    .bind(user.user_id)
+    .fetch_one(&state.pool)
+    .await?;
+
+    Ok((
+        StatusCode::CREATED,
+        Json(FrontBundleCreated {
+            id: row.0,
+            created_at: row.1,
+        }),
+    )
+        .into_response())
+}
+
+/// Build the stored `{ "<path>": { "hash", "size" } }` manifest object.
+fn build_manifest(files: &[FileEntry]) -> Map<String, Value> {
+    let mut map = Map::with_capacity(files.len());
+    for f in files {
+        let mut entry = Map::with_capacity(2);
+        entry.insert("hash".to_string(), Value::String(f.hash.clone()));
+        entry.insert("size".to_string(), Value::from(f.size));
+        map.insert(f.path.clone(), Value::Object(entry));
+    }
+    map
+}
+
+/// The manifest hashes not yet present in this workspace's blobs (deduped hex).
+async fn missing_hashes(
+    pool: &PgPool,
+    workspace_id: Uuid,
+    files: &[FileEntry],
+) -> ApiResult<Vec<String>> {
+    let mut seen = HashSet::new();
+    let mut pairs: Vec<(String, Vec<u8>)> = Vec::new();
+    for f in files {
+        if seen.insert(f.hash.as_str())
+            && let Some(bytes) = blobs::from_hex(&f.hash)
+        {
+            pairs.push((f.hash.clone(), bytes));
+        }
+    }
+    let wanted: Vec<Vec<u8>> = pairs.iter().map(|(_, b)| b.clone()).collect();
+    let existing: Vec<Vec<u8>> =
+        sqlx::query_scalar("SELECT hash FROM blobs WHERE workspace_id = $1 AND hash = ANY($2)")
+            .bind(workspace_id)
+            .bind(&wanted)
+            .fetch_all(pool)
+            .await?;
+    let existing: HashSet<Vec<u8>> = existing.into_iter().collect();
+    Ok(pairs
+        .into_iter()
+        .filter(|(_, bytes)| !existing.contains(bytes))
+        .map(|(hex, _)| hex)
+        .collect())
+}
+
+// ---------------------------------------------------------------------------
+// manifest validation (front bundle)
+// ---------------------------------------------------------------------------
+
+fn invalid(message: impl Into<String>) -> ApiError {
+    ApiError::unprocessable("invalid_manifest", message)
+}
+
+/// Front-bundle manifest rules: 1..=2000 files; every path relative, non-empty,
+/// backslash-free, `..`-free, control-char-free, <= 512 chars; no duplicate
+/// paths; sizes >= 0; hashes exactly 64 lowercase hex; and a root `index.html`.
+/// (Mirrors `api::math::validate_manifest`, which is private to that module.)
+fn validate_bundle_manifest(files: &[FileEntry]) -> ApiResult<()> {
+    if files.is_empty() {
+        return Err(invalid("a bundle must list at least one file"));
+    }
+    if files.len() > MAX_BUNDLE_FILES {
+        return Err(invalid(format!(
+            "a bundle must list at most {MAX_BUNDLE_FILES} files"
+        )));
+    }
+    let mut seen = HashSet::with_capacity(files.len());
+    let mut has_index = false;
+    for f in files {
+        validate_path(&f.path)?;
+        if !seen.insert(f.path.as_str()) {
+            return Err(invalid(format!("duplicate path \"{}\"", f.path)));
+        }
+        if f.size < 0 {
+            return Err(invalid(format!("file \"{}\" has a negative size", f.path)));
+        }
+        if !blobs::is_hex64_lower(&f.hash) {
+            return Err(invalid(format!(
+                "file \"{}\" hash must be 64 lowercase hex characters",
+                f.path
+            )));
+        }
+        if f.path == "index.html" {
+            has_index = true;
+        }
+    }
+    if !has_index {
+        return Err(invalid("a bundle must contain a root \"index.html\""));
+    }
+    Ok(())
+}
+
+fn validate_path(path: &str) -> ApiResult<()> {
+    if path.is_empty() {
+        return Err(invalid("a file path must not be empty"));
+    }
+    if path.len() > 512 {
+        return Err(invalid(format!("path \"{path}\" exceeds 512 characters")));
+    }
+    if path.starts_with('/') {
+        return Err(invalid(format!(
+            "path \"{path}\" must be relative (no leading '/')"
+        )));
+    }
+    if path.contains('\\') {
+        return Err(invalid(format!(
+            "path \"{path}\" must not contain a backslash"
+        )));
+    }
+    if path.chars().any(char::is_control) {
+        return Err(invalid(format!(
+            "path \"{path}\" must not contain control characters"
+        )));
+    }
+    if path.split('/').any(|seg| seg == "..") {
+        return Err(invalid(format!(
+            "path \"{path}\" must not contain a '..' segment"
+        )));
+    }
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// share CRUD
+// ---------------------------------------------------------------------------
+
+/// `POST .../shares` — create a share link.
+async fn create_share(
+    State(state): State<AppState>,
+    user: CurrentUser,
+    Path((slug, game_slug)): Path<(String, String)>,
+    Json(req): Json<CreateShareRequest>,
+) -> ApiResult<Response> {
+    let workspace = authorize_admin(&state, &user, &slug).await?;
+    let game_id = game_id_by_slug(&state.pool, workspace.id, &game_slug).await?;
+    let limits = billing::limits_for(&state, workspace.id).await?;
+
+    // Active-link quota (no-op under the frozen UNLIMITED default).
+    if let Some(max) = limits.max_active_share_links {
+        let active = active_link_count(&state.pool, workspace.id).await?;
+        if active >= max as i64 {
+            return Err(ApiError::new(
+                StatusCode::FORBIDDEN,
+                "upgrade_required",
+                format!("this plan allows at most {max} active share links"),
+            ));
+        }
+    }
+
+    // Optional pins are validated so a bad id fails loudly at create time.
+    if let Some(number) = req.revision_number {
+        ensure_revision_exists(&state.pool, game_id, number).await?;
+    }
+    if let Some(bundle_id) = req.front_bundle_id {
+        ensure_bundle_belongs(&state.pool, game_id, bundle_id).await?;
+    }
+
+    let password_hash = match req.password.as_deref() {
+        Some(pw) if !pw.is_empty() => Some(passwords::hash_password(pw)?),
+        _ => None,
+    };
+    let expires_at = req.expires_in_days.map(days_from_now);
+    let max_sessions = clamp_sessions(req.max_concurrent_sessions.unwrap_or(25), &limits);
+
+    let id = insert_share(
+        &state,
+        &workspace,
+        game_id,
+        &req,
+        password_hash,
+        expires_at,
+        max_sessions,
+        user.user_id,
+    )
+    .await?;
+
+    let view = load_share_view(&state, id).await?;
+    Ok((StatusCode::CREATED, Json(view)).into_response())
+}
+
+/// Insert the row, honoring a custom slug (409 on collision) or retrying a
+/// generated one.
+#[allow(clippy::too_many_arguments)]
+async fn insert_share(
+    state: &AppState,
+    workspace: &WorkspaceRow,
+    game_id: Uuid,
+    req: &CreateShareRequest,
+    password_hash: Option<String>,
+    expires_at: Option<DateTime<Utc>>,
+    max_sessions: i32,
+    created_by: Uuid,
+) -> ApiResult<Uuid> {
+    if let Some(custom) = req.slug.as_deref() {
+        if !share::slug::is_valid_label(custom) {
+            return Err(ApiError::unprocessable(
+                "invalid_slug",
+                "slug must be 1-40 characters of lowercase letters, digits, and hyphens, \
+                 and may not start or end with a hyphen",
+            ));
+        }
+        return match try_insert(
+            state,
+            workspace.id,
+            game_id,
+            custom,
+            req,
+            &password_hash,
+            expires_at,
+            max_sessions,
+            created_by,
+        )
+        .await?
+        {
+            Some(id) => Ok(id),
+            None => Err(ApiError::conflict(
+                "slug_taken",
+                "that slug is already taken",
+            )),
+        };
+    }
+
+    for _ in 0..SLUG_RETRIES {
+        let candidate = share::slug::generate();
+        if let Some(id) = try_insert(
+            state,
+            workspace.id,
+            game_id,
+            &candidate,
+            req,
+            &password_hash,
+            expires_at,
+            max_sessions,
+            created_by,
+        )
+        .await?
+        {
+            return Ok(id);
+        }
+    }
+    Err(ApiError::conflict(
+        "slug_generation_failed",
+        "could not allocate a unique slug, please try again",
+    ))
+}
+
+/// Try one insert; `Ok(None)` on a slug unique-violation so the caller can retry.
+#[allow(clippy::too_many_arguments)]
+async fn try_insert(
+    state: &AppState,
+    workspace_id: Uuid,
+    game_id: Uuid,
+    slug: &str,
+    req: &CreateShareRequest,
+    password_hash: &Option<String>,
+    expires_at: Option<DateTime<Utc>>,
+    max_sessions: i32,
+    created_by: Uuid,
+) -> ApiResult<Option<Uuid>> {
+    let result = sqlx::query_scalar::<_, Uuid>(
+        "INSERT INTO share_links \
+           (workspace_id, game_id, slug, revision_number, front_bundle_id, \
+            password_hash, expires_at, max_concurrent_sessions, created_by) \
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) RETURNING id",
+    )
+    .bind(workspace_id)
+    .bind(game_id)
+    .bind(slug)
+    .bind(req.revision_number)
+    .bind(req.front_bundle_id)
+    .bind(password_hash)
+    .bind(expires_at)
+    .bind(max_sessions)
+    .bind(created_by)
+    .fetch_one(&state.pool)
+    .await;
+    match result {
+        Ok(id) => Ok(Some(id)),
+        Err(e) if crate::error::is_unique_violation(&e) => Ok(None),
+        Err(e) => Err(e.into()),
+    }
+}
+
+/// `GET .../shares` — list a game's share links with counters.
+async fn list_shares(
+    State(state): State<AppState>,
+    user: CurrentUser,
+    Path((slug, game_slug)): Path<(String, String)>,
+) -> ApiResult<Json<ShareLinksResponse>> {
+    let workspace = authorize_read(&state, &user, &slug).await?;
+    let game_id = game_id_by_slug(&state.pool, workspace.id, &game_slug).await?;
+    let rows = sqlx::query_as::<_, ShareRow>(&share_select(
+        "WHERE s.game_id = $1 ORDER BY s.created_at DESC",
+    ))
+    .bind(game_id)
+    .fetch_all(&state.pool)
+    .await?;
+    let shares = rows
+        .into_iter()
+        .map(|row| row.into_view(state.config.play_domain.as_deref()))
+        .collect();
+    Ok(Json(ShareLinksResponse { shares }))
+}
+
+/// `PATCH .../shares/:id` — pin/unpin revision or bundle, set/remove password,
+/// set/clear expiry, change the session cap, revoke/un-revoke.
+async fn update_share(
+    State(state): State<AppState>,
+    user: CurrentUser,
+    Path((slug, game_slug, id)): Path<(String, String, Uuid)>,
+    Json(req): Json<UpdateShareRequest>,
+) -> ApiResult<Json<ShareLinkView>> {
+    let workspace = authorize_admin(&state, &user, &slug).await?;
+    let game_id = game_id_by_slug(&state.pool, workspace.id, &game_slug).await?;
+    ensure_share_in_game(&state.pool, id, game_id).await?;
+    let limits = billing::limits_for(&state, workspace.id).await?;
+
+    // Validate pins before mutating anything.
+    if let Some(Some(number)) = req.revision_number {
+        ensure_revision_exists(&state.pool, game_id, number).await?;
+    }
+    if let Some(Some(bundle_id)) = req.front_bundle_id {
+        ensure_bundle_belongs(&state.pool, game_id, bundle_id).await?;
+    }
+
+    let mut tx = state.pool.begin().await?;
+    if let Some(revision_number) = req.revision_number {
+        sqlx::query("UPDATE share_links SET revision_number = $2 WHERE id = $1")
+            .bind(id)
+            .bind(revision_number)
+            .execute(&mut *tx)
+            .await?;
+    }
+    if let Some(front_bundle_id) = req.front_bundle_id {
+        sqlx::query("UPDATE share_links SET front_bundle_id = $2 WHERE id = $1")
+            .bind(id)
+            .bind(front_bundle_id)
+            .execute(&mut *tx)
+            .await?;
+    }
+    if let Some(password) = &req.password {
+        let hash = match password.as_deref() {
+            Some(pw) if !pw.is_empty() => Some(passwords::hash_password(pw)?),
+            _ => None,
+        };
+        sqlx::query("UPDATE share_links SET password_hash = $2 WHERE id = $1")
+            .bind(id)
+            .bind(hash)
+            .execute(&mut *tx)
+            .await?;
+    }
+    if let Some(expires_in_days) = req.expires_in_days {
+        let expires_at = expires_in_days.map(days_from_now);
+        sqlx::query("UPDATE share_links SET expires_at = $2 WHERE id = $1")
+            .bind(id)
+            .bind(expires_at)
+            .execute(&mut *tx)
+            .await?;
+    }
+    if let Some(max) = req.max_concurrent_sessions {
+        let clamped = clamp_sessions(max, &limits);
+        sqlx::query("UPDATE share_links SET max_concurrent_sessions = $2 WHERE id = $1")
+            .bind(id)
+            .bind(clamped)
+            .execute(&mut *tx)
+            .await?;
+    }
+    if let Some(revoked) = req.revoked {
+        if revoked {
+            sqlx::query(
+                "UPDATE share_links SET revoked_at = COALESCE(revoked_at, now()) WHERE id = $1",
+            )
+            .bind(id)
+            .execute(&mut *tx)
+            .await?;
+        } else {
+            sqlx::query("UPDATE share_links SET revoked_at = NULL WHERE id = $1")
+                .bind(id)
+                .execute(&mut *tx)
+                .await?;
+        }
+    }
+    tx.commit().await?;
+
+    Ok(Json(load_share_view(&state, id).await?))
+}
+
+/// `DELETE .../shares/:id`.
+async fn delete_share(
+    State(state): State<AppState>,
+    user: CurrentUser,
+    Path((slug, game_slug, id)): Path<(String, String, Uuid)>,
+) -> ApiResult<StatusCode> {
+    let workspace = authorize_admin(&state, &user, &slug).await?;
+    let game_id = game_id_by_slug(&state.pool, workspace.id, &game_slug).await?;
+    ensure_share_in_game(&state.pool, id, game_id).await?;
+    sqlx::query("DELETE FROM share_links WHERE id = $1")
+        .bind(id)
+        .execute(&state.pool)
+        .await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+// ---------------------------------------------------------------------------
+// helpers
+// ---------------------------------------------------------------------------
+
+fn days_from_now(days: i64) -> DateTime<Utc> {
+    Utc::now() + Duration::days(days)
+}
+
+/// Clamp a requested session cap to `>= 1` and to the plan's per-link cap.
+fn clamp_sessions(requested: i32, limits: &billing::PlanLimits) -> i32 {
+    let value = requested.max(1);
+    match limits.max_concurrent_share_sessions {
+        Some(cap) => value.min(cap as i32),
+        None => value,
+    }
+}
+
+/// Non-revoked, non-expired links in a workspace (the quota's "active" count).
+async fn active_link_count(pool: &PgPool, workspace_id: Uuid) -> ApiResult<i64> {
+    Ok(sqlx::query_scalar(
+        "SELECT COUNT(*) FROM share_links \
+         WHERE workspace_id = $1 AND revoked_at IS NULL \
+           AND (expires_at IS NULL OR expires_at > now())",
+    )
+    .bind(workspace_id)
+    .fetch_one(pool)
+    .await?)
+}
+
+async fn ensure_revision_exists(pool: &PgPool, game_id: Uuid, number: i32) -> ApiResult<()> {
+    let exists: Option<Uuid> =
+        sqlx::query_scalar("SELECT id FROM revisions WHERE game_id = $1 AND number = $2")
+            .bind(game_id)
+            .bind(number)
+            .fetch_optional(pool)
+            .await?;
+    exists.map(|_| ()).ok_or_else(|| {
+        ApiError::unprocessable("revision_not_found", "no such revision in this game")
+    })
+}
+
+async fn ensure_bundle_belongs(pool: &PgPool, game_id: Uuid, bundle_id: Uuid) -> ApiResult<()> {
+    let exists: Option<Uuid> =
+        sqlx::query_scalar("SELECT id FROM front_bundles WHERE id = $1 AND game_id = $2")
+            .bind(bundle_id)
+            .bind(game_id)
+            .fetch_optional(pool)
+            .await?;
+    exists.map(|_| ()).ok_or_else(|| {
+        ApiError::unprocessable("bundle_not_found", "no such front bundle in this game")
+    })
+}
+
+async fn ensure_share_in_game(pool: &PgPool, id: Uuid, game_id: Uuid) -> ApiResult<()> {
+    let exists: Option<Uuid> =
+        sqlx::query_scalar("SELECT id FROM share_links WHERE id = $1 AND game_id = $2")
+            .bind(id)
+            .bind(game_id)
+            .fetch_optional(pool)
+            .await?;
+    exists
+        .map(|_| ())
+        .ok_or_else(|| ApiError::not_found("share_not_found", "no such share link"))
+}
+
+/// The columns for a `ShareLinkView`, with the NUMERIC counters cast to `float8`
+/// (no bigdecimal/rust_decimal feature is enabled). `where_order` is appended.
+fn share_select(where_order: &str) -> String {
+    format!(
+        "SELECT s.id, s.slug, g.slug AS game, s.revision_number, s.front_bundle_id, \
+                (s.password_hash IS NOT NULL) AS password_protected, s.expires_at, \
+                s.max_concurrent_sessions, s.revoked_at, s.created_at, \
+                s.sessions_count, s.spins_count, \
+                s.total_bet::float8 AS total_bet, s.total_win::float8 AS total_win \
+         FROM share_links s JOIN games g ON g.id = s.game_id {where_order}"
+    )
+}
+
+#[derive(sqlx::FromRow)]
+struct ShareRow {
+    id: Uuid,
+    slug: String,
+    game: String,
+    revision_number: Option<i32>,
+    front_bundle_id: Option<Uuid>,
+    password_protected: bool,
+    expires_at: Option<DateTime<Utc>>,
+    max_concurrent_sessions: i32,
+    revoked_at: Option<DateTime<Utc>>,
+    created_at: DateTime<Utc>,
+    sessions_count: i64,
+    spins_count: i64,
+    total_bet: f64,
+    total_win: f64,
+}
+
+impl ShareRow {
+    fn into_view(self, play_domain: Option<&str>) -> ShareLinkView {
+        let observed_rtp = if self.total_bet > 0.0 {
+            Some(self.total_win / self.total_bet)
+        } else {
+            None
+        };
+        ShareLinkView {
+            url: share::public_url(play_domain, &self.slug),
+            active_sessions: share::active_sessions(self.id),
+            observed_rtp,
+            id: self.id,
+            slug: self.slug,
+            game: self.game,
+            revision_number: self.revision_number,
+            front_bundle_id: self.front_bundle_id,
+            password_protected: self.password_protected,
+            expires_at: self.expires_at,
+            max_concurrent_sessions: self.max_concurrent_sessions,
+            revoked_at: self.revoked_at,
+            created_at: self.created_at,
+            sessions_count: self.sessions_count,
+            spins_count: self.spins_count,
+            total_bet: self.total_bet,
+            total_win: self.total_win,
+        }
+    }
+}
+
+async fn load_share_view(state: &AppState, id: Uuid) -> ApiResult<ShareLinkView> {
+    let row = sqlx::query_as::<_, ShareRow>(&share_select("WHERE s.id = $1"))
+        .bind(id)
+        .fetch_one(&state.pool)
+        .await?;
+    Ok(row.into_view(state.config.play_domain.as_deref()))
 }

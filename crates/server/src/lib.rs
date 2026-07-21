@@ -8,6 +8,7 @@ pub mod documents;
 pub mod error;
 pub mod http;
 pub mod lgs_host;
+pub mod share;
 pub mod stats;
 pub mod storage;
 

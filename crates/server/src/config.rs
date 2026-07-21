@@ -26,6 +26,8 @@ pub enum ConfigError {
     InvalidBool { key: &'static str, value: String },
     #[error("{key} must be a non-negative integer, got \"{value}\"")]
     InvalidU64 { key: &'static str, value: String },
+    #[error("POLAR_SERVER must be \"production\" or \"sandbox\", got \"{0}\"")]
+    InvalidPolarServer(String),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -43,6 +45,11 @@ pub struct Config {
     /// Present only when GitHub OAuth is fully configured (client id, secret,
     /// and a public URL). Absent → the GitHub routes 404.
     pub github: Option<GithubConfig>,
+    /// Present only when Polar billing is fully configured (access token, webhook
+    /// secret, and all four product ids). Absent → billing routes 404, every
+    /// workspace resolves to unlimited, and no quota check ever fires (the
+    /// permanent state on self-hosted instances). See [`PolarConfig`].
+    pub polar: Option<PolarConfig>,
     /// Explicit dashboard build directory (`SERVER_WEB_DIR`). When unset,
     /// [`Config::resolve_web_dir`] probes the standard locations.
     pub web_dir: Option<PathBuf>,
@@ -69,6 +76,41 @@ pub struct Config {
 pub struct GithubConfig {
     pub client_id: String,
     pub client_secret: String,
+}
+
+/// Which Polar environment the instance talks to. Selects the API base URL.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PolarServer {
+    Production,
+    Sandbox,
+}
+
+/// Fully-resolved Polar billing configuration. Only constructed when the access
+/// token, webhook secret, and all four product ids are present (the GitHub
+/// optional-block pattern), so its mere existence means billing is active.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PolarConfig {
+    /// Bearer token for the Polar API (`POLAR_ACCESS_TOKEN`).
+    pub access_token: String,
+    /// Standard-Webhooks signing secret (`POLAR_WEBHOOK_SECRET`); base64, with an
+    /// optional `whsec_` prefix, decoded at verification time.
+    pub webhook_secret: String,
+    pub product_solo_monthly: String,
+    pub product_solo_yearly: String,
+    pub product_team_monthly: String,
+    pub product_team_yearly: String,
+    /// `production` (default) or `sandbox` (`POLAR_SERVER`).
+    pub server: PolarServer,
+}
+
+impl PolarConfig {
+    /// The Polar REST API base for the configured environment.
+    pub fn api_base(&self) -> &'static str {
+        match self.server {
+            PolarServer::Production => "https://api.polar.sh",
+            PolarServer::Sandbox => "https://sandbox-api.polar.sh",
+        }
+    }
 }
 
 impl Config {
@@ -176,6 +218,37 @@ impl Config {
             _ => None,
         };
 
+        // Polar billing stays disabled unless the access token, the webhook
+        // secret, and all four product ids are present. `POLAR_SERVER` is parsed
+        // unconditionally so a typo surfaces even on an otherwise-disabled setup.
+        let polar_server = parse_polar_server(get("POLAR_SERVER"))?;
+        let polar = match (
+            non_empty(get("POLAR_ACCESS_TOKEN")),
+            non_empty(get("POLAR_WEBHOOK_SECRET")),
+            non_empty(get("POLAR_PRODUCT_SOLO_MONTHLY")),
+            non_empty(get("POLAR_PRODUCT_SOLO_YEARLY")),
+            non_empty(get("POLAR_PRODUCT_TEAM_MONTHLY")),
+            non_empty(get("POLAR_PRODUCT_TEAM_YEARLY")),
+        ) {
+            (
+                Some(access_token),
+                Some(webhook_secret),
+                Some(product_solo_monthly),
+                Some(product_solo_yearly),
+                Some(product_team_monthly),
+                Some(product_team_yearly),
+            ) => Some(PolarConfig {
+                access_token,
+                webhook_secret,
+                product_solo_monthly,
+                product_solo_yearly,
+                product_team_monthly,
+                product_team_yearly,
+                server: polar_server,
+            }),
+            _ => None,
+        };
+
         Ok(Self {
             bind_addr,
             database_url,
@@ -183,6 +256,7 @@ impl Config {
             cookie_secure,
             public_url,
             github,
+            polar,
             web_dir: get("SERVER_WEB_DIR").map(PathBuf::from),
             storage_max_blob_bytes,
             server_math_cache_bytes,
@@ -201,6 +275,25 @@ fn parse_bool(value: Option<String>, key: &'static str) -> Result<bool, ConfigEr
             "true" | "1" | "yes" | "on" => Ok(true),
             "false" | "0" | "no" | "off" | "" => Ok(false),
             _ => Err(ConfigError::InvalidBool { key, value: v }),
+        },
+    }
+}
+
+/// Treats an unset or whitespace-only env var as absent, so a stray `KEY=` line
+/// never half-enables an optional block.
+fn non_empty(value: Option<String>) -> Option<String> {
+    value.filter(|v| !v.trim().is_empty())
+}
+
+/// Parses `POLAR_SERVER`. Unset/empty defaults to production; `production` and
+/// `sandbox` (case-insensitive) are accepted; anything else is a hard error.
+fn parse_polar_server(value: Option<String>) -> Result<PolarServer, ConfigError> {
+    match non_empty(value).as_deref().map(str::trim) {
+        None => Ok(PolarServer::Production),
+        Some(v) => match v.to_ascii_lowercase().as_str() {
+            "production" => Ok(PolarServer::Production),
+            "sandbox" => Ok(PolarServer::Sandbox),
+            _ => Err(ConfigError::InvalidPolarServer(v.to_string())),
         },
     }
 }
@@ -369,5 +462,74 @@ mod tests {
         );
         // The trailing slash is trimmed so appended paths stay clean.
         assert_eq!(cfg.public_base_url(), "https://app.example.com");
+    }
+
+    /// The full set of env vars that enable Polar billing.
+    const POLAR_ENV: [(&str, &str); 6] = [
+        ("POLAR_ACCESS_TOKEN", "polar_pat_xxx"),
+        ("POLAR_WEBHOOK_SECRET", "whsec_abc"),
+        ("POLAR_PRODUCT_SOLO_MONTHLY", "prod_solo_m"),
+        ("POLAR_PRODUCT_SOLO_YEARLY", "prod_solo_y"),
+        ("POLAR_PRODUCT_TEAM_MONTHLY", "prod_team_m"),
+        ("POLAR_PRODUCT_TEAM_YEARLY", "prod_team_y"),
+    ];
+
+    #[test]
+    fn polar_disabled_by_default_and_unlimited() {
+        let cfg = Config::from_source(|_| None).unwrap();
+        assert_eq!(cfg.polar, None);
+    }
+
+    #[test]
+    fn polar_enables_only_when_every_var_is_present() {
+        // The full set enables it, defaulting to the production API base.
+        let cfg = Config::from_source(source(&POLAR_ENV)).unwrap();
+        let polar = cfg.polar.expect("billing enabled");
+        assert_eq!(polar.access_token, "polar_pat_xxx");
+        assert_eq!(polar.webhook_secret, "whsec_abc");
+        assert_eq!(polar.product_solo_monthly, "prod_solo_m");
+        assert_eq!(polar.product_team_yearly, "prod_team_y");
+        assert_eq!(polar.server, PolarServer::Production);
+        assert_eq!(polar.api_base(), "https://api.polar.sh");
+
+        // Dropping any single required var disables the whole block.
+        for (i, missing) in POLAR_ENV.iter().enumerate() {
+            let subset: Vec<(&str, &str)> = POLAR_ENV
+                .iter()
+                .enumerate()
+                .filter(|(j, _)| *j != i)
+                .map(|(_, kv)| *kv)
+                .collect();
+            let cfg = Config::from_source(source(&subset)).unwrap();
+            assert_eq!(
+                cfg.polar, None,
+                "missing {} should disable billing",
+                missing.0
+            );
+        }
+
+        // A present-but-empty var counts as absent.
+        let mut with_blank = POLAR_ENV.to_vec();
+        with_blank[0] = ("POLAR_ACCESS_TOKEN", "   ");
+        assert_eq!(
+            Config::from_source(source(&with_blank)).unwrap().polar,
+            None
+        );
+    }
+
+    #[test]
+    fn polar_server_selects_sandbox_base() {
+        let mut env = POLAR_ENV.to_vec();
+        env.push(("POLAR_SERVER", "sandbox"));
+        let polar = Config::from_source(source(&env)).unwrap().polar.unwrap();
+        assert_eq!(polar.server, PolarServer::Sandbox);
+        assert_eq!(polar.api_base(), "https://sandbox-api.polar.sh");
+    }
+
+    #[test]
+    fn polar_server_is_validated_even_when_disabled() {
+        // Invalid value is a hard error regardless of whether the rest is set.
+        let err = Config::from_source(source(&[("POLAR_SERVER", "staging")])).unwrap_err();
+        assert_eq!(err, ConfigError::InvalidPolarServer("staging".to_string()));
     }
 }

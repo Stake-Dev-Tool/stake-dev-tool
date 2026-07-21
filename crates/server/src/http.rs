@@ -1,16 +1,20 @@
+use std::sync::Arc;
 use std::time::Duration;
 
-use axum::extract::State;
+use axum::extract::{Request, State};
 use axum::http::StatusCode;
-use axum::response::IntoResponse;
+use axum::middleware::Next;
+use axum::response::{IntoResponse, Response};
 use axum::routing::get;
-use axum::{Json, Router};
+use axum::{Json, Router, middleware};
 use protocol::{ComponentStatus, HealthResponse, ServiceStatus};
+use tower::ServiceExt;
 use tower_http::services::{ServeDir, ServeFile};
 use tower_http::trace::TraceLayer;
 
 use crate::AppState;
 use crate::api;
+use crate::share::{self, ShareHost};
 use crate::storage;
 
 const DB_CHECK_TIMEOUT: Duration = Duration::from_secs(2);
@@ -44,7 +48,53 @@ pub fn build_router(state: AppState) -> Router {
         }
     }
 
-    router.layer(TraceLayer::new_for_http()).with_state(state)
+    let app = router
+        .layer(TraceLayer::new_for_http())
+        .with_state(state.clone());
+
+    // M5 — Host-based share dispatch. When a play domain is configured, requests
+    // whose Host is `<label>.<play_domain>` are peeled off to the share router
+    // BEFORE the app; every other Host falls through unchanged. The layer is
+    // added ONLY when `play_domain` is set, so an instance without it keeps a
+    // byte-identical app router (the existing health/auth tests exercise that
+    // path with `play_domain: None`).
+    match state.config.play_domain.clone() {
+        Some(play_domain) => {
+            let share_router = share::router().with_state(state);
+            let dispatch = ShareDispatch {
+                play_domain: Arc::from(play_domain.as_str()),
+                share_router,
+            };
+            app.layer(middleware::from_fn_with_state(dispatch, host_dispatch))
+        }
+        None => app,
+    }
+}
+
+/// State for the Host-dispatch middleware: the configured play domain and the
+/// (already state-bound) share router.
+#[derive(Clone)]
+struct ShareDispatch {
+    play_domain: Arc<str>,
+    share_router: Router,
+}
+
+/// Peel share-host requests off to the share router; forward everything else to
+/// the app. Share hosts never reach the app (its cookies live on a different
+/// registrable domain), and app hosts never touch the share router.
+async fn host_dispatch(
+    State(dispatch): State<ShareDispatch>,
+    mut req: Request,
+    next: Next,
+) -> Response {
+    if let Some(label) = share::match_share_label(req.headers(), &dispatch.play_domain) {
+        req.extensions_mut().insert(ShareHost(label));
+        return match dispatch.share_router.clone().oneshot(req).await {
+            Ok(response) => response,
+            Err(infallible) => match infallible {},
+        };
+    }
+    next.run(req).await
 }
 
 /// Liveness + readiness in one probe: 200 when every dependency answers, 503

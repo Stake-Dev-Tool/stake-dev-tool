@@ -15,7 +15,7 @@ use crate::AppState;
 use crate::api::workspaces::{
     WorkspaceRow, require_admin, require_membership, role_from_db, workspace_by_slug,
 };
-use crate::auth::extract::{CurrentUser, SessionUser};
+use crate::auth::extract::CurrentUser;
 use crate::auth::{INVITE_PREFIX, generate_secret, hash_secret};
 use crate::error::{ApiError, ApiResult};
 
@@ -202,14 +202,17 @@ struct AcceptRow {
     uses: i32,
 }
 
-/// Accepts an invite (session-auth), granting membership at the invite's role.
+/// Accepts an invite, granting membership at the invite's role. Requires the
+/// `full` scope: a browser session qualifies, and so does a device-minted PAT
+/// (the desktop's `teams_join`) — but a `push:math`-only CI token does not.
 /// Idempotent if already a member (returns the existing role, consumes no use).
 /// Expiry, revocation, and `max_uses` are enforced atomically inside the tx.
 pub async fn accept(
     State(state): State<AppState>,
-    SessionUser(user): SessionUser,
+    user: CurrentUser,
     Path(token): Path<String>,
 ) -> ApiResult<Json<AcceptInviteResponse>> {
+    user.require_scope("full")?;
     let hash = hash_secret(&token);
     let mut tx = state.pool.begin().await?;
 
@@ -262,6 +265,24 @@ pub async fn accept(
             "invite_exhausted",
             "this invite has no uses left",
         ));
+    }
+
+    // Member quota (M7): refuse a *new* membership once the plan's cap is
+    // reached. Idempotent re-accepts by existing members returned above and
+    // never reach here. Returning Err rolls the tx back, so no use is consumed.
+    let limits = crate::billing::limits_for(&state, invite.workspace_id).await?;
+    if let Some(max) = limits.max_members {
+        let members: i64 =
+            sqlx::query_scalar("SELECT count(*) FROM memberships WHERE workspace_id = $1")
+                .bind(invite.workspace_id)
+                .fetch_one(&mut *tx)
+                .await?;
+        if members >= i64::from(max) {
+            return Err(ApiError::forbidden(
+                "upgrade_required",
+                "this workspace has reached its member limit; upgrade the plan to add more",
+            ));
+        }
     }
 
     // Re-check the guard in SQL so the increment is atomic even under races.
