@@ -12,6 +12,10 @@ fn fs_state(database_url: &str, root: PathBuf) -> AppState {
         bind_addr: "127.0.0.1:0".to_string(),
         database_url: database_url.to_string(),
         storage: StorageConfig::Fs { root },
+        cookie_secure: false,
+        public_url: None,
+        github: None,
+        web_dir: None,
     };
     let pool = db::connect_lazy(database_url).expect("lazy pool never connects");
     let store = storage::build_object_store(&config).expect("fs store");

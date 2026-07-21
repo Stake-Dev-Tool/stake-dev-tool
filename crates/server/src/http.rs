@@ -6,18 +6,45 @@ use axum::response::IntoResponse;
 use axum::routing::get;
 use axum::{Json, Router};
 use protocol::{ComponentStatus, HealthResponse, ServiceStatus};
+use tower_http::services::{ServeDir, ServeFile};
 use tower_http::trace::TraceLayer;
 
 use crate::AppState;
+use crate::api;
 use crate::storage;
 
 const DB_CHECK_TIMEOUT: Duration = Duration::from_secs(2);
 
 pub fn build_router(state: AppState) -> Router {
-    Router::new()
+    let mut router = Router::new()
         .route("/healthz", get(healthz))
-        .layer(TraceLayer::new_for_http())
-        .with_state(state)
+        .nest("/api", api::router());
+
+    // The dashboard is a static SPA (web/build). Serving it from the same
+    // binary keeps cookies same-origin and makes self-hosting a single
+    // artifact. Unmatched non-API paths fall back to index.html so deep links
+    // like /w/:slug resolve client-side.
+    match state.config.resolve_web_dir() {
+        Some(dir) if dir.join("index.html").exists() => {
+            tracing::info!(dir = %dir.display(), "serving dashboard");
+            // `fallback` (not `not_found_service`) so the SPA shell comes back
+            // as 200 — `not_found_service` would force a 404 status onto it.
+            router = router.fallback_service(
+                ServeDir::new(&dir).fallback(ServeFile::new(dir.join("index.html"))),
+            );
+        }
+        Some(dir) => {
+            tracing::warn!(
+                dir = %dir.display(),
+                "SERVER_WEB_DIR has no index.html; dashboard not served"
+            );
+        }
+        None => {
+            tracing::warn!("no dashboard build found (web/build); API-only mode");
+        }
+    }
+
+    router.layer(TraceLayer::new_for_http()).with_state(state)
 }
 
 /// Liveness + readiness in one probe: 200 when every dependency answers, 503

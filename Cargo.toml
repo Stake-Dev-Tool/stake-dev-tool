@@ -27,6 +27,11 @@ license = "MIT"
 tokio = { version = "1.41", features = ["full"] }
 tokio-stream = { version = "0.1", features = ["sync"] }
 axum = { version = "0.7", features = ["macros"] }
+# axum-extra 0.9.x tracks axum 0.7. `cookie` powers session cookies; the
+# `typed-header` feature backs the `Authorization: Bearer` extraction.
+axum-extra = { version = "0.9", features = ["cookie", "typed-header"] }
+# Argon2id password hashing with the crate's recommended (default) params.
+argon2 = "0.5"
 tower = "0.5"
 tower-http = { version = "0.6", features = ["cors", "trace", "fs"] }
 serde = { version = "1.0", features = ["derive"] }

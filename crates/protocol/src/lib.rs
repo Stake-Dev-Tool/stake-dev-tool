@@ -8,6 +8,14 @@
 use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 
+pub mod auth;
+pub mod error;
+pub mod workspace;
+
+pub use auth::*;
+pub use error::*;
+pub use workspace::*;
+
 /// Health of a single dependency the server talks to (database, object store).
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
 #[ts(export, export_to = "protocol/")]

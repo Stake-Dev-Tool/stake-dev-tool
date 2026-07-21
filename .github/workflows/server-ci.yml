@@ -10,6 +10,10 @@ on:
       - 'Cargo.lock'
       - 'docker-compose.dev.yml'
       - 'ui/src/lib/protocol/**'
+      - 'web/**'
+      - 'pnpm-workspace.yaml'
+      - 'pnpm-lock.yaml'
+      - 'package.json'
       - '.github/workflows/server-ci.yml'
   pull_request:
     branches: [v2, main]
@@ -20,6 +24,10 @@ on:
       - 'Cargo.lock'
       - 'docker-compose.dev.yml'
       - 'ui/src/lib/protocol/**'
+      - 'web/**'
+      - 'pnpm-workspace.yaml'
+      - 'pnpm-lock.yaml'
+      - 'package.json'
       - '.github/workflows/server-ci.yml'
 
 concurrency:
@@ -80,7 +88,7 @@ jobs:
           TEST_DATABASE_URL: postgres://stakedev:stakedev@localhost:5432/stakedev
         run: cargo test -p server -p protocol
 
-      - name: TypeScript bindings are fresh
+      - name: TypeScript bindings are fresh (protocol)
         shell: bash
         run: |
           # `cargo test -p protocol` (run in the test step above) regenerates the
@@ -95,3 +103,25 @@ jobs:
             git status --porcelain -- ui/src/lib/protocol
             exit 1
           fi
+
+  # The dashboard SPA the server binary embeds. Kept in the same workflow so a
+  # protocol change that breaks web/ fails the same CI run.
+  web:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: pnpm
+
+      - run: pnpm install --frozen-lockfile --filter web
+
+      - run: pnpm --filter web check
+
+      - run: pnpm --filter web build

@@ -51,8 +51,50 @@ All configuration is via environment variables (loaded from `.env` if present).
 | `STORAGE_S3_ACCESS_KEY_ID` | _(unset)_ | Access key id. |
 | `STORAGE_S3_SECRET_ACCESS_KEY` | _(unset)_ | Secret access key. |
 | `STORAGE_S3_ALLOW_HTTP` | `false` | Allow plaintext HTTP (needed for local MinIO). |
+| `SERVER_COOKIE_SECURE` | `false` | `Secure` flag on the session cookie; set `true` behind TLS. |
+| `SERVER_PUBLIC_URL` | _(unset)_ | Public base URL for invite/device/OAuth links; falls back to the bind address. |
+| `GITHUB_CLIENT_ID` | _(unset)_ | GitHub OAuth app client id (enables GitHub sign-in with the two below). |
+| `GITHUB_CLIENT_SECRET` | _(unset)_ | GitHub OAuth app client secret. |
 | `RUST_LOG` | `info` | `tracing` env-filter directive. |
-| `TEST_DATABASE_URL` | _(unset)_ | Enables the real-database integration test when set. |
+| `TEST_DATABASE_URL` | _(unset)_ | Enables the real-database integration tests when set. |
+
+GitHub OAuth is active only when `GITHUB_CLIENT_ID`, `GITHUB_CLIENT_SECRET`,
+and `SERVER_PUBLIC_URL` are all set; otherwise the `/api/auth/github/*` routes
+return `404` and `GET /api/auth/providers` reports `"github": false`.
+
+## API
+
+All application endpoints live under `/api` and return a uniform error envelope
+on failure: `{"error": {"code": "...", "message": "..."}}`. Authentication is a
+session cookie (`sdt_session`) **or** an `Authorization: Bearer sdt_pat_…`
+personal API token; endpoints marked _session_ reject API tokens (a token cannot
+mint tokens).
+
+| Method | Path | Auth | Purpose |
+| --- | --- | --- | --- |
+| `POST` | `/api/auth/register` | — | Create a password account; sets a session cookie. |
+| `POST` | `/api/auth/login` | — | Password login (rate-limited); sets a session cookie. |
+| `POST` | `/api/auth/logout` | cookie | Delete the session and clear the cookie. |
+| `GET` | `/api/auth/me` | user | The current user. |
+| `GET` | `/api/auth/providers` | — | Capability flags (`password`, `github`). |
+| `GET` | `/api/auth/github/start` | — | Begin GitHub OAuth (404 if unconfigured). |
+| `GET` | `/api/auth/github/callback` | — | GitHub OAuth callback (404 if unconfigured). |
+| `POST` | `/api/auth/device/code` | — | Start device pairing; returns a device + user code. |
+| `POST` | `/api/auth/device/token` | — | Poll for the device token (RFC 8628 error shape). |
+| `POST` | `/api/auth/device/approve` | session | Approve/deny a device by its user code. |
+| `GET` | `/api/tokens` | session | List the caller's API tokens. |
+| `POST` | `/api/tokens` | session | Mint an API token (secret shown once). |
+| `DELETE` | `/api/tokens/:id` | session | Revoke an API token. |
+| `POST` | `/api/workspaces` | user | Create a workspace (caller becomes owner). |
+| `GET` | `/api/workspaces` | user | List the caller's workspaces with roles. |
+| `GET` | `/api/workspaces/:slug` | user | Workspace detail + members (members only). |
+| `PATCH` | `/api/workspaces/:slug/members/:user_id` | user | Change a member's role (owner/admin). |
+| `DELETE` | `/api/workspaces/:slug/members/:user_id` | user | Remove a member / leave. |
+| `POST` | `/api/workspaces/:slug/invites` | user | Create an invite (owner/admin). |
+| `GET` | `/api/workspaces/:slug/invites` | user | List invites (owner/admin). |
+| `DELETE` | `/api/workspaces/:slug/invites/:id` | user | Revoke an invite (owner/admin). |
+| `GET` | `/api/invites/:token` | — | Public invite preview for the accept page. |
+| `POST` | `/api/invites/:token/accept` | session | Accept an invite (grants membership). |
 
 ## Test
 
@@ -60,5 +102,10 @@ All configuration is via environment variables (loaded from `.env` if present).
 cargo test -p server
 ```
 
-Tests pass without any database running: the real-database health check
-self-skips unless `TEST_DATABASE_URL` is set.
+Tests pass without any database running: the real-database health check and the
+auth/workspace integration tests all self-skip unless `TEST_DATABASE_URL` is
+set. To run them for real against the dev Postgres:
+
+```sh
+TEST_DATABASE_URL=postgres://stakedev:stakedev@localhost:5433/stakedev cargo test -p server
+```

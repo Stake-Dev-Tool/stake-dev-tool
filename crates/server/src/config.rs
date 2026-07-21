@@ -24,6 +24,54 @@ pub struct Config {
     pub bind_addr: String,
     pub database_url: String,
     pub storage: StorageConfig,
+    /// `Secure` flag on the session cookie. Off for local http dev; must be on
+    /// behind TLS in production.
+    pub cookie_secure: bool,
+    /// Externally reachable base URL (e.g. `https://app.example.com`). Backs the
+    /// invite/device URLs and the GitHub OAuth redirect. Falls back to the bind
+    /// address when unset.
+    pub public_url: Option<String>,
+    /// Present only when GitHub OAuth is fully configured (client id, secret,
+    /// and a public URL). Absent → the GitHub routes 404.
+    pub github: Option<GithubConfig>,
+    /// Explicit dashboard build directory (`SERVER_WEB_DIR`). When unset,
+    /// [`Config::resolve_web_dir`] probes the standard locations.
+    pub web_dir: Option<PathBuf>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GithubConfig {
+    pub client_id: String,
+    pub client_secret: String,
+}
+
+impl Config {
+    /// Base URL for building externally shared links (invites, device pairing,
+    /// OAuth redirects). Uses `SERVER_PUBLIC_URL` when set, otherwise assumes
+    /// plain http on the bind address (fine for local dev).
+    pub fn public_base_url(&self) -> String {
+        self.public_url
+            .clone()
+            .unwrap_or_else(|| format!("http://{}", self.bind_addr))
+    }
+
+    /// Locates the dashboard's static build (`web/build`). An explicit
+    /// `SERVER_WEB_DIR` wins even if the path is missing (so a typo surfaces as
+    /// a warning instead of silently falling back); otherwise probes the
+    /// packaged location next to the binary's cwd, then the in-repo build for
+    /// `cargo run` from the workspace root.
+    pub fn resolve_web_dir(&self) -> Option<PathBuf> {
+        if let Some(dir) = &self.web_dir {
+            return Some(dir.clone());
+        }
+        let candidates = [
+            PathBuf::from("./web/build"),
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../web/build"),
+        ];
+        candidates
+            .into_iter()
+            .find(|c| c.join("index.html").exists())
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -71,10 +119,32 @@ impl Config {
             other => return Err(ConfigError::InvalidBackend(other.to_string())),
         };
 
+        let cookie_secure = parse_bool(get("SERVER_COOKIE_SECURE"), "SERVER_COOKIE_SECURE")?;
+        // Trailing slashes are trimmed so callers can always append "/path".
+        let public_url = get("SERVER_PUBLIC_URL").map(|s| s.trim_end_matches('/').to_string());
+
+        // GitHub OAuth stays disabled unless the id, the secret, and a public
+        // URL (for the redirect) are all present.
+        let github = match (
+            get("GITHUB_CLIENT_ID"),
+            get("GITHUB_CLIENT_SECRET"),
+            public_url.is_some(),
+        ) {
+            (Some(client_id), Some(client_secret), true) => Some(GithubConfig {
+                client_id,
+                client_secret,
+            }),
+            _ => None,
+        };
+
         Ok(Self {
             bind_addr,
             database_url,
             storage,
+            cookie_secure,
+            public_url,
+            github,
+            web_dir: get("SERVER_WEB_DIR").map(PathBuf::from),
         })
     }
 }
@@ -165,5 +235,40 @@ mod tests {
                 value: "maybe".to_string(),
             }
         );
+    }
+
+    #[test]
+    fn cookie_secure_defaults_off_and_parses() {
+        let cfg = Config::from_source(|_| None).unwrap();
+        assert!(!cfg.cookie_secure);
+        let cfg = Config::from_source(source(&[("SERVER_COOKIE_SECURE", "true")])).unwrap();
+        assert!(cfg.cookie_secure);
+    }
+
+    #[test]
+    fn github_needs_id_secret_and_public_url() {
+        // Missing the public URL keeps GitHub disabled.
+        let cfg = Config::from_source(source(&[
+            ("GITHUB_CLIENT_ID", "id"),
+            ("GITHUB_CLIENT_SECRET", "secret"),
+        ]))
+        .unwrap();
+        assert_eq!(cfg.github, None);
+
+        let cfg = Config::from_source(source(&[
+            ("GITHUB_CLIENT_ID", "id"),
+            ("GITHUB_CLIENT_SECRET", "secret"),
+            ("SERVER_PUBLIC_URL", "https://app.example.com/"),
+        ]))
+        .unwrap();
+        assert_eq!(
+            cfg.github,
+            Some(GithubConfig {
+                client_id: "id".to_string(),
+                client_secret: "secret".to_string(),
+            })
+        );
+        // The trailing slash is trimmed so appended paths stay clean.
+        assert_eq!(cfg.public_base_url(), "https://app.example.com");
     }
 }

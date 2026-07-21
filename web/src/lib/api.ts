@@ -6,11 +6,15 @@
  * types and calls from here, so when field names shift at integration only this
  * file changes.
  *
- * TO BE RECONCILED at integration with the generated bindings in
- * `ui/src/lib/protocol` (ts-rs output from `crates/protocol`). Until the server
- * is finalized, the shapes below are the source of truth for the dashboard and
- * are parsed defensively (see the `normalize*` helpers) so a nested-vs-flat
- * response difference doesn't ripple into the UI.
+ * RECONCILED against the generated bindings in `ui/src/lib/protocol` (ts-rs
+ * output from `crates/protocol`) at M1 integration. Notes from that pass:
+ * - a member's `id` IS the user id (`users.id`), so it matches both
+ *   `session.user.id` and the `/members/:user_id` path parameter;
+ * - accept is `POST /invites/:token/accept` (token in path, no body);
+ * - the server encodes "unlimited" invite uses as `max_uses: 0` — normalized
+ *   to `null` here.
+ * The defensive `normalize*` helpers stay: they are what makes future server
+ * shape changes a one-file fix.
  *
  * Auth is a same-origin HttpOnly session cookie. We never read it — every
  * request just sends `credentials: 'same-origin'`.
@@ -326,7 +330,8 @@ export const api = {
           created_at: String(i.created_at ?? ''),
           expires_at: (i.expires_at as string | null) ?? null,
           uses: Number(i.uses ?? 0),
-          max_uses: i.max_uses == null ? null : Number(i.max_uses),
+          // Server convention: 0 = unlimited.
+          max_uses: !i.max_uses ? null : Number(i.max_uses),
           revoked_at: (i.revoked_at as string | null) ?? null
         } satisfies Invite;
       });
@@ -348,7 +353,8 @@ export const api = {
         token: String(r.token ?? ''),
         role: asRole(info.role),
         expires_at: (info.expires_at as string | null) ?? null,
-        max_uses: info.max_uses == null ? null : Number(info.max_uses)
+        // Server convention: 0 = unlimited.
+        max_uses: !info.max_uses ? null : Number(info.max_uses)
       };
     },
     async revoke(slug: string, id: string): Promise<void> {
@@ -371,13 +377,20 @@ export const api = {
       };
     },
     /**
-     * Accept an invite (requires auth). The membership shape isn't guaranteed to
-     * carry the slug, so we return a best-effort membership and callers fall back
-     * to re-listing workspaces if `workspace.slug` is empty.
+     * Accept an invite (requires a browser session). The response is
+     * `{ workspace: WorkspaceSummary }` where the summary carries the caller's
+     * role and the slug, so callers can navigate straight to /w/[slug].
      */
     async accept(token: string): Promise<WorkspaceMembership> {
-      const r = await request<unknown>('POST', '/invites/accept', { token });
-      return normalizeMembership(r);
+      const r = (await request<unknown>(
+        'POST',
+        `/invites/${encodeURIComponent(token)}/accept`
+      )) as Record<string, unknown>;
+      const summary = (r.workspace ?? r) as Record<string, unknown>;
+      return {
+        workspace: normalizeWorkspace(summary),
+        role: asRole(summary.role)
+      };
     }
   },
 

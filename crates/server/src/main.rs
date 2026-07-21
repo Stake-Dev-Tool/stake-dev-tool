@@ -1,3 +1,5 @@
+use std::net::SocketAddr;
+
 use server::config::Config;
 use server::{AppState, db, http, storage};
 use tracing_subscriber::{EnvFilter, fmt};
@@ -27,9 +29,14 @@ async fn main() -> anyhow::Result<()> {
 
     let listener = tokio::net::TcpListener::bind(&bind_addr).await?;
     tracing::info!(addr = %listener.local_addr()?, "server listening");
-    axum::serve(listener, app)
-        .with_graceful_shutdown(shutdown_signal())
-        .await?;
+    // `into_make_service_with_connect_info` surfaces the peer address so the
+    // login rate limiter can key on it (behind a proxy, X-Forwarded-For wins).
+    axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<SocketAddr>(),
+    )
+    .with_graceful_shutdown(shutdown_signal())
+    .await?;
     Ok(())
 }
 
