@@ -21,13 +21,32 @@ The Nitro preset can be switched (static hosting, Cloudflare, etc.) via
 
 ## Structure
 
-- `src/routes/index.tsx`: the landing page (hero, features, cloud/V2,
-  pricing, open source, FAQ).
-- `src/components/TestViewFigure.tsx`: the hero figure. Nested viewport
-  frames with a live SSE event ticker, echoing the multi-resolution test
-  view.
+- `src/routes/`: one file per page — `index` (home), `features`, `cloud`,
+  `pricing`, `open-source`, plus `checkout.success` / `checkout.cancelled`
+  and the `api.billing.webhook` server route.
+- `src/components/TestViewFigure.tsx`: the hero figure. The same mini slot
+  front at three resolutions inside one app window, with a live SSE event
+  ticker.
 - `src/styles.css`: design tokens (spruce/mint/amber palette, Bricolage
   Grotesque + Geist type) and the few custom CSS pieces (ticker, frames,
   section rules).
 
 Content mirrors `V2.md`. Keep pricing and cloud copy in sync with it.
+
+## Billing
+
+Payments go through Lemon Squeezy as merchant of record (they remit EU VAT
+for us — see V2.md).
+
+- `src/server/billing.ts`: `createCheckout` server function. Creates a
+  hosted checkout for a plan/interval and returns its URL.
+- `src/routes/api.billing.webhook.ts`: webhook receiver with HMAC-SHA256
+  signature verification. Subscription state forwarding to `crates/server`
+  is a TODO until M7 lands.
+- `src/lib/plans.ts`: plan definitions shared by the pricing page and the
+  billing layer.
+
+Configuration is environment-only; copy `.env.example` and fill in the
+store, variant IDs and webhook secret. Without configuration the pricing
+page shows "Checkout is not available yet on this deployment" instead of a
+broken flow.

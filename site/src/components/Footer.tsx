@@ -1,18 +1,15 @@
+import { Link } from '@tanstack/react-router'
+
 const COLUMNS = [
   {
     title: 'Product',
     links: [
+      { label: 'Features', href: '/features' },
+      { label: 'Cloud', href: '/cloud' },
+      { label: 'Pricing', href: '/pricing' },
       {
         label: 'Download',
         href: 'https://github.com/simnJS/stake-dev-tool/releases/latest',
-      },
-      {
-        label: 'All releases',
-        href: 'https://github.com/simnJS/stake-dev-tool/releases',
-      },
-      {
-        label: 'V2 plan',
-        href: 'https://github.com/simnJS/stake-dev-tool/blob/v2/V2.md',
       },
       { label: 'Stake Engine', href: 'https://stake-engine.com/' },
     ],
@@ -20,6 +17,7 @@ const COLUMNS = [
   {
     title: 'Project',
     links: [
+      { label: 'Open source', href: '/open-source' },
       { label: 'GitHub', href: 'https://github.com/simnJS/stake-dev-tool' },
       {
         label: 'Issues',
@@ -36,6 +34,22 @@ const COLUMNS = [
     ],
   },
 ]
+
+function FooterLink({ label, href }: { label: string; href: string }) {
+  const className = 'text-sm text-moss no-underline transition-colors hover:text-ink'
+  if (href.startsWith('/')) {
+    return (
+      <Link to={href} className={className}>
+        {label}
+      </Link>
+    )
+  }
+  return (
+    <a href={href} target="_blank" rel="noopener noreferrer" className={className}>
+      {label}
+    </a>
+  )
+}
 
 export default function Footer() {
   return (
@@ -60,14 +74,7 @@ export default function Footer() {
             <ul className="mt-4 space-y-2.5 pl-0" style={{ listStyle: 'none' }}>
               {col.links.map((link) => (
                 <li key={link.label}>
-                  <a
-                    href={link.href}
-                    target="_blank"
-                    rel="noopener noreferrer"
-                    className="text-sm text-moss no-underline transition-colors hover:text-ink"
-                  >
-                    {link.label}
-                  </a>
+                  <FooterLink label={link.label} href={link.href} />
                 </li>
               ))}
             </ul>
@@ -78,7 +85,7 @@ export default function Footer() {
       <div className="border-t border-line">
         <div className="wrap flex flex-col gap-2 py-6 font-mono text-xs text-faint sm:flex-row sm:items-center sm:justify-between">
           <span>© {new Date().getFullYear()} simnJS &amp; contributors</span>
-          <span>Desktop &amp; engine: MIT · Cloud server (V2): AGPL-3.0</span>
+          <span>Desktop &amp; engine: MIT · Cloud server: AGPL-3.0</span>
         </div>
       </div>
     </footer>

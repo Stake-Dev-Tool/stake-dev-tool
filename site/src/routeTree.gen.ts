@@ -10,33 +10,128 @@
 
 import { Route as rootRouteImport } from './routes/__root'
 import { Route as IndexRouteImport } from './routes/index'
+import { Route as CloudRouteImport } from './routes/cloud'
+import { Route as FeaturesRouteImport } from './routes/features'
+import { Route as OpenSourceRouteImport } from './routes/open-source'
+import { Route as PricingRouteImport } from './routes/pricing'
+import { Route as CheckoutCancelledRouteImport } from './routes/checkout.cancelled'
+import { Route as CheckoutSuccessRouteImport } from './routes/checkout.success'
+import { Route as ApiBillingWebhookRouteImport } from './routes/api.billing.webhook'
 
 const IndexRoute = IndexRouteImport.update({
   id: '/',
   path: '/',
   getParentRoute: () => rootRouteImport,
 } as any)
+const CloudRoute = CloudRouteImport.update({
+  id: '/cloud',
+  path: '/cloud',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const FeaturesRoute = FeaturesRouteImport.update({
+  id: '/features',
+  path: '/features',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const OpenSourceRoute = OpenSourceRouteImport.update({
+  id: '/open-source',
+  path: '/open-source',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const PricingRoute = PricingRouteImport.update({
+  id: '/pricing',
+  path: '/pricing',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const CheckoutCancelledRoute = CheckoutCancelledRouteImport.update({
+  id: '/checkout/cancelled',
+  path: '/checkout/cancelled',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const CheckoutSuccessRoute = CheckoutSuccessRouteImport.update({
+  id: '/checkout/success',
+  path: '/checkout/success',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const ApiBillingWebhookRoute = ApiBillingWebhookRouteImport.update({
+  id: '/api/billing/webhook',
+  path: '/api/billing/webhook',
+  getParentRoute: () => rootRouteImport,
+} as any)
 
 export interface FileRoutesByFullPath {
   '/': typeof IndexRoute
+  '/cloud': typeof CloudRoute
+  '/features': typeof FeaturesRoute
+  '/open-source': typeof OpenSourceRoute
+  '/pricing': typeof PricingRoute
+  '/checkout/cancelled': typeof CheckoutCancelledRoute
+  '/checkout/success': typeof CheckoutSuccessRoute
+  '/api/billing/webhook': typeof ApiBillingWebhookRoute
 }
 export interface FileRoutesByTo {
   '/': typeof IndexRoute
+  '/cloud': typeof CloudRoute
+  '/features': typeof FeaturesRoute
+  '/open-source': typeof OpenSourceRoute
+  '/pricing': typeof PricingRoute
+  '/checkout/cancelled': typeof CheckoutCancelledRoute
+  '/checkout/success': typeof CheckoutSuccessRoute
+  '/api/billing/webhook': typeof ApiBillingWebhookRoute
 }
 export interface FileRoutesById {
   __root__: typeof rootRouteImport
   '/': typeof IndexRoute
+  '/cloud': typeof CloudRoute
+  '/features': typeof FeaturesRoute
+  '/open-source': typeof OpenSourceRoute
+  '/pricing': typeof PricingRoute
+  '/checkout/cancelled': typeof CheckoutCancelledRoute
+  '/checkout/success': typeof CheckoutSuccessRoute
+  '/api/billing/webhook': typeof ApiBillingWebhookRoute
 }
 export interface FileRouteTypes {
   fileRoutesByFullPath: FileRoutesByFullPath
-  fullPaths: '/'
+  fullPaths:
+    | '/'
+    | '/cloud'
+    | '/features'
+    | '/open-source'
+    | '/pricing'
+    | '/checkout/cancelled'
+    | '/checkout/success'
+    | '/api/billing/webhook'
   fileRoutesByTo: FileRoutesByTo
-  to: '/'
-  id: '__root__' | '/'
+  to:
+    | '/'
+    | '/cloud'
+    | '/features'
+    | '/open-source'
+    | '/pricing'
+    | '/checkout/cancelled'
+    | '/checkout/success'
+    | '/api/billing/webhook'
+  id:
+    | '__root__'
+    | '/'
+    | '/cloud'
+    | '/features'
+    | '/open-source'
+    | '/pricing'
+    | '/checkout/cancelled'
+    | '/checkout/success'
+    | '/api/billing/webhook'
   fileRoutesById: FileRoutesById
 }
 export interface RootRouteChildren {
   IndexRoute: typeof IndexRoute
+  CloudRoute: typeof CloudRoute
+  FeaturesRoute: typeof FeaturesRoute
+  OpenSourceRoute: typeof OpenSourceRoute
+  PricingRoute: typeof PricingRoute
+  CheckoutCancelledRoute: typeof CheckoutCancelledRoute
+  CheckoutSuccessRoute: typeof CheckoutSuccessRoute
+  ApiBillingWebhookRoute: typeof ApiBillingWebhookRoute
 }
 
 declare module '@tanstack/react-router' {
@@ -48,11 +143,67 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof IndexRouteImport
       parentRoute: typeof rootRouteImport
     }
+    '/cloud': {
+      id: '/cloud'
+      path: '/cloud'
+      fullPath: '/cloud'
+      preLoaderRoute: typeof CloudRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/features': {
+      id: '/features'
+      path: '/features'
+      fullPath: '/features'
+      preLoaderRoute: typeof FeaturesRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/open-source': {
+      id: '/open-source'
+      path: '/open-source'
+      fullPath: '/open-source'
+      preLoaderRoute: typeof OpenSourceRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/pricing': {
+      id: '/pricing'
+      path: '/pricing'
+      fullPath: '/pricing'
+      preLoaderRoute: typeof PricingRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/checkout/cancelled': {
+      id: '/checkout/cancelled'
+      path: '/checkout/cancelled'
+      fullPath: '/checkout/cancelled'
+      preLoaderRoute: typeof CheckoutCancelledRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/checkout/success': {
+      id: '/checkout/success'
+      path: '/checkout/success'
+      fullPath: '/checkout/success'
+      preLoaderRoute: typeof CheckoutSuccessRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/api/billing/webhook': {
+      id: '/api/billing/webhook'
+      path: '/api/billing/webhook'
+      fullPath: '/api/billing/webhook'
+      preLoaderRoute: typeof ApiBillingWebhookRouteImport
+      parentRoute: typeof rootRouteImport
+    }
   }
 }
 
 const rootRouteChildren: RootRouteChildren = {
   IndexRoute: IndexRoute,
+  CloudRoute: CloudRoute,
+  FeaturesRoute: FeaturesRoute,
+  OpenSourceRoute: OpenSourceRoute,
+  PricingRoute: PricingRoute,
+  CheckoutCancelledRoute: CheckoutCancelledRoute,
+  CheckoutSuccessRoute: CheckoutSuccessRoute,
+  ApiBillingWebhookRoute: ApiBillingWebhookRoute,
 }
 export const routeTree = rootRouteImport
   ._addFileChildren(rootRouteChildren)

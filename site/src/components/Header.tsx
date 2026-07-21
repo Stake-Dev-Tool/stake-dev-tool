@@ -1,30 +1,33 @@
+import { Link } from '@tanstack/react-router'
+
 const NAV = [
-  { href: '#features', label: 'Features' },
-  { href: '#cloud', label: 'Cloud' },
-  { href: '#pricing', label: 'Pricing' },
-  { href: '#open-source', label: 'Open source' },
-]
+  { to: '/features', label: 'Features' },
+  { to: '/cloud', label: 'Cloud' },
+  { to: '/pricing', label: 'Pricing' },
+  { to: '/open-source', label: 'Open source' },
+] as const
 
 export default function Header() {
   return (
     <header className="sticky top-0 z-40 border-b border-line bg-pit/85 backdrop-blur-md">
-      <div className="wrap flex h-16 items-center justify-between gap-4">
-        <a href="/" className="flex items-center gap-2.5 no-underline">
+      <div className="wrap flex flex-wrap items-center justify-between gap-x-4 gap-y-0 py-3 md:h-16 md:py-0">
+        <Link to="/" className="flex items-center gap-2.5 no-underline">
           <img src="/icon-32.png" alt="" className="h-6 w-6" />
           <span className="display text-[1.02rem] font-bold tracking-tight">
             Stake Dev Tool
           </span>
-        </a>
+        </Link>
 
-        <nav className="hidden items-center gap-7 md:flex">
+        <nav className="order-3 -mb-1 flex w-full items-center gap-6 overflow-x-auto pt-2 pb-2 md:order-none md:w-auto md:gap-7 md:pt-0 md:pb-0">
           {NAV.map((item) => (
-            <a
-              key={item.href}
-              href={item.href}
-              className="text-sm text-moss no-underline transition-colors hover:text-ink"
+            <Link
+              key={item.to}
+              to={item.to}
+              className="text-sm whitespace-nowrap text-moss no-underline transition-colors hover:text-ink"
+              activeProps={{ className: 'text-ink' }}
             >
               {item.label}
-            </a>
+            </Link>
           ))}
         </nav>
 
