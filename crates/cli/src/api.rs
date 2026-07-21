@@ -15,9 +15,12 @@ use reqwest::header::CONTENT_TYPE;
 use reqwest::{Client, RequestBuilder, Response};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use thiserror::Error;
+use tokio::io::AsyncWriteExt;
 use tokio_util::io::ReaderStream;
 
+use crate::hash;
 use crate::output::FileProgress;
 
 /// Read size for streaming a file into an upload body.
@@ -171,6 +174,112 @@ pub struct RevisionList {
     pub revisions: Vec<RevisionSummary>,
 }
 
+/// One workspace row from `GET /api/workspaces`. Lenient: unknown fields (id,
+/// created_at, …) are preserved in `extra` so `--json` stays faithful.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WorkspaceInfo {
+    pub slug: String,
+    #[serde(default)]
+    pub name: Option<String>,
+    /// `"owner" | "admin" | "member"`.
+    #[serde(default)]
+    pub role: Option<String>,
+    #[serde(flatten)]
+    pub extra: BTreeMap<String, serde_json::Value>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WorkspacesResponse {
+    #[serde(default)]
+    pub workspaces: Vec<WorkspaceInfo>,
+}
+
+/// One game row from `GET …/games`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GameInfo {
+    pub slug: String,
+    #[serde(default)]
+    pub name: Option<String>,
+    /// Highest revision number, or `null` when the game has no revisions yet.
+    #[serde(default)]
+    pub head_number: Option<i64>,
+    #[serde(default)]
+    pub revisions_count: Option<i64>,
+    #[serde(flatten)]
+    pub extra: BTreeMap<String, serde_json::Value>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GamesResponse {
+    #[serde(default)]
+    pub games: Vec<GameInfo>,
+}
+
+/// A file present in both revisions but with different content (diff).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ChangedFile {
+    pub path: String,
+    #[serde(default)]
+    pub before_size: Option<i64>,
+    #[serde(default)]
+    pub after_size: Option<i64>,
+    #[serde(flatten)]
+    pub extra: BTreeMap<String, serde_json::Value>,
+}
+
+/// File-level diff: `before` = the `:other` revision, `after` = the `:number`.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct FileDiff {
+    #[serde(default)]
+    pub added: Vec<FileEntry>,
+    #[serde(default)]
+    pub removed: Vec<FileEntry>,
+    #[serde(default)]
+    pub changed: Vec<ChangedFile>,
+    #[serde(default)]
+    pub unchanged: u32,
+}
+
+/// Before/after stats for a single mode. Either side is `null` when its
+/// revision's stats aren't `ok`, or when the mode is absent on that side.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ModeStatDiff {
+    pub mode: String,
+    #[serde(default)]
+    pub before: Option<ModeStat>,
+    #[serde(default)]
+    pub after: Option<ModeStat>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct StatsDiff {
+    #[serde(default)]
+    pub modes: Vec<ModeStatDiff>,
+}
+
+/// `GET …/revisions/:number/diff/:other` response.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RevisionDiff {
+    #[serde(default)]
+    pub files: FileDiff,
+    #[serde(default)]
+    pub stats: StatsDiff,
+}
+
+/// Everything a single file pull needs, bundled to keep the download signature
+/// under clippy's argument-count limit.
+pub struct FileDownload<'a> {
+    pub ws: &'a str,
+    pub game: &'a str,
+    pub number: i64,
+    /// Forward-slashed path inside the revision (the `*path` route segment).
+    pub remote_path: &'a str,
+    /// Where to write the bytes on disk.
+    pub dest: PathBuf,
+    /// The lowercase-hex sha256 the downloaded bytes must match.
+    pub expected_hash: &'a str,
+}
+
 /// Response to `POST …/device/code`.
 #[derive(Debug, Clone, Deserialize)]
 pub struct DeviceCodeResponse {
@@ -235,6 +344,58 @@ pub trait RevisionApi {
         game: &str,
         number: i64,
     ) -> impl std::future::Future<Output = ClientResult<RevisionDetail>>;
+}
+
+/// The full platform surface the `mcp` server and the read commands drive.
+/// A supertrait of [`RevisionApi`] so `push` orchestration keeps working
+/// through it, while the extra read/download operations let the whole MCP tool
+/// dispatch be exercised offline against a single fake implementation.
+pub trait PlatformApi: RevisionApi {
+    /// `GET /api/workspaces` — raw JSON, echoed faithfully.
+    fn list_workspaces(&self)
+    -> impl std::future::Future<Output = ClientResult<serde_json::Value>>;
+
+    /// `GET …/games` — raw JSON.
+    fn list_games(
+        &self,
+        ws: &str,
+    ) -> impl std::future::Future<Output = ClientResult<serde_json::Value>>;
+
+    /// `GET …/revisions` (newest first) — raw JSON.
+    fn list_revisions(
+        &self,
+        ws: &str,
+        game: &str,
+        limit: Option<u32>,
+    ) -> impl std::future::Future<Output = ClientResult<serde_json::Value>>;
+
+    /// `GET …/revisions/:after/diff/:before` — raw JSON.
+    fn get_diff(
+        &self,
+        ws: &str,
+        game: &str,
+        after: i64,
+        before: i64,
+    ) -> impl std::future::Future<Output = ClientResult<serde_json::Value>>;
+
+    /// `GET …/revisions/:number/files/*path` — stream to `spec.dest`, verifying
+    /// the sha256 while writing and advancing `progress`.
+    fn download_file(
+        &self,
+        spec: &FileDownload<'_>,
+        progress: FileProgress,
+    ) -> impl std::future::Future<Output = ClientResult<()>>;
+}
+
+/// Resolves a game's head (highest) revision number from the revisions list.
+pub async fn resolve_head<C: PlatformApi>(client: &C, ws: &str, game: &str) -> ClientResult<i64> {
+    let value = client.list_revisions(ws, game, Some(1)).await?;
+    let list: RevisionList = serde_json::from_value(value)
+        .map_err(|e| ClientError::Other(format!("could not parse revisions: {e}")))?;
+    list.revisions
+        .first()
+        .map(|r| r.number)
+        .ok_or_else(|| ClientError::Other(format!("game '{game}' has no revisions yet")))
 }
 
 // ---------------------------------------------------------------------------
@@ -313,6 +474,16 @@ impl ApiClient {
             req = req.query(&[("limit", n.to_string())]);
         }
         let resp = req.send().await.map_err(map_transport)?;
+        read_body_typed(resp).await
+    }
+
+    /// `GET /api/auth/me` — the current user, as raw JSON.
+    pub async fn get_me(&self) -> ClientResult<serde_json::Value> {
+        let resp = self
+            .authed(self.http.get(self.url("/api/auth/me")))
+            .send()
+            .await
+            .map_err(map_transport)?;
         read_body_typed(resp).await
     }
 }
@@ -400,6 +571,105 @@ impl RevisionApi for ApiClient {
             .await
             .map_err(map_transport)?;
         read_body_typed(resp).await
+    }
+}
+
+impl PlatformApi for ApiClient {
+    async fn list_workspaces(&self) -> ClientResult<serde_json::Value> {
+        let resp = self
+            .authed(self.http.get(self.url("/api/workspaces")))
+            .send()
+            .await
+            .map_err(map_transport)?;
+        read_body_typed(resp).await
+    }
+
+    async fn list_games(&self, ws: &str) -> ClientResult<serde_json::Value> {
+        let resp = self
+            .authed(
+                self.http
+                    .get(self.url(&format!("/api/workspaces/{ws}/games"))),
+            )
+            .send()
+            .await
+            .map_err(map_transport)?;
+        read_body_typed(resp).await
+    }
+
+    async fn list_revisions(
+        &self,
+        ws: &str,
+        game: &str,
+        limit: Option<u32>,
+    ) -> ClientResult<serde_json::Value> {
+        // Delegate to the inherent raw method the `revisions` command uses.
+        self.list_revisions_raw(ws, game, limit).await
+    }
+
+    async fn get_diff(
+        &self,
+        ws: &str,
+        game: &str,
+        after: i64,
+        before: i64,
+    ) -> ClientResult<serde_json::Value> {
+        let resp = self
+            .authed(self.http.get(self.url(&format!(
+                "/api/workspaces/{ws}/games/{game}/revisions/{after}/diff/{before}"
+            ))))
+            .send()
+            .await
+            .map_err(map_transport)?;
+        read_body_typed(resp).await
+    }
+
+    async fn download_file(
+        &self,
+        spec: &FileDownload<'_>,
+        progress: FileProgress,
+    ) -> ClientResult<()> {
+        let resp = self
+            .authed(self.http.get(self.url(&format!(
+                "/api/workspaces/{}/games/{}/revisions/{}/files/{}",
+                spec.ws, spec.game, spec.number, spec.remote_path
+            ))))
+            .send()
+            .await
+            .map_err(map_transport)?;
+        // Surface a structured error before touching the disk.
+        let status = resp.status();
+        if !status.is_success() {
+            let bytes = resp.bytes().await.map_err(map_transport)?;
+            return Err(ClientError::Api(parse_api_error(status.as_u16(), &bytes)));
+        }
+
+        let mut file = tokio::fs::File::create(&spec.dest)
+            .await
+            .map_err(|e| ClientError::Other(format!("create {}: {e}", spec.dest.display())))?;
+        let mut hasher = Sha256::new();
+        let mut stream = resp.bytes_stream();
+        while let Some(chunk) = stream.next().await {
+            let chunk = chunk.map_err(map_transport)?;
+            hasher.update(&chunk);
+            file.write_all(&chunk)
+                .await
+                .map_err(|e| ClientError::Other(format!("write {}: {e}", spec.dest.display())))?;
+            progress.inc(chunk.len() as u64);
+        }
+        file.flush()
+            .await
+            .map_err(|e| ClientError::Other(format!("flush {}: {e}", spec.dest.display())))?;
+
+        let got = hash::to_hex(&hasher.finalize());
+        if got != spec.expected_hash {
+            // Remove the corrupt file so a retry starts clean.
+            let _ = tokio::fs::remove_file(&spec.dest).await;
+            return Err(ClientError::Other(format!(
+                "sha256 mismatch for {}: expected {}, got {got}",
+                spec.remote_path, spec.expected_hash
+            )));
+        }
+        Ok(())
     }
 }
 

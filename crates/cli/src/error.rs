@@ -62,6 +62,21 @@ impl CliError {
         self.kind as u8
     }
 
+    /// A stable machine string for this error class, used as the `code` in MCP
+    /// tool-call error content.
+    pub fn code(&self) -> &'static str {
+        match self.kind {
+            ExitKind::Usage => "usage",
+            ExitKind::Auth => "auth",
+            ExitKind::Server => "server",
+        }
+    }
+
+    /// The human message (the full anyhow chain), for MCP error content.
+    pub fn message(&self) -> String {
+        format!("{:#}", self.error)
+    }
+
     /// Prints the error chain to stderr in the conventional `error: …` form.
     pub fn report(&self) {
         eprintln!("error: {:#}", self.error);

@@ -19,7 +19,7 @@ use crate::api::{
 };
 use crate::error::CliError;
 use crate::hash::{self, HashedFile, ManifestEntry};
-use crate::output::{self, FileProgress, Reporter};
+use crate::output::{self, FileProgress, Reporter, Transfer};
 
 /// How many blob uploads run at once. Enough to fill the pipe on a fast
 /// connection without opening an unbounded number of files or sockets.
@@ -42,28 +42,37 @@ struct PushJob<'a> {
     files: &'a [FileEntry],
 }
 
-/// What a push produced, for the recap.
+/// What a push produced, for the recap (and the `mcp` `push_math` result).
 #[derive(Debug)]
-struct PushOutcome {
-    detail: RevisionDetail,
-    total_files: usize,
-    total_bytes: u64,
-    uploaded_count: usize,
-    uploaded_bytes: u64,
+pub struct PushOutcome {
+    pub detail: RevisionDetail,
+    pub total_files: usize,
+    pub total_bytes: u64,
+    pub uploaded_count: usize,
+    pub uploaded_bytes: u64,
 }
 
-/// Entry point for the `push` subcommand.
-pub async fn run(client: &ApiClient, args: PushArgs) -> Result<(), CliError> {
+/// Scan → hash → check → upload only missing blobs → commit. Shared by the
+/// `push` command (progress reporter) and the `mcp` server's `push_math` tool
+/// (quiet reporter). Generic over [`RevisionApi`] so it is testable offline.
+pub async fn push_folder<C: RevisionApi>(
+    client: &C,
+    path: &std::path::Path,
+    ws: &str,
+    game: &str,
+    message: &str,
+    parent: Option<i64>,
+    reporter: &Reporter,
+) -> Result<PushOutcome, CliError> {
     // Validate the folder and build a deterministic manifest.
-    let entries = hash::scan_manifest(&args.path).map_err(CliError::usage)?;
+    let entries = hash::scan_manifest(path).map_err(CliError::usage)?;
     if entries.is_empty() {
         return Err(CliError::usage_msg(
             "nothing to push: the folder has no files",
         ));
     }
 
-    let reporter = Reporter::new(args.no_progress);
-    let hashed = hash_all(entries, &reporter)?;
+    let hashed = hash_all(entries, reporter)?;
     reporter.println(&output::push_summary(&hashed));
 
     let files: Vec<FileEntry> = hashed
@@ -75,21 +84,36 @@ pub async fn run(client: &ApiClient, args: PushArgs) -> Result<(), CliError> {
         })
         .collect();
     let job = PushJob {
-        ws: &args.workspace,
-        game: &args.game,
-        message: &args.message,
-        parent: args.parent,
+        ws,
+        game,
+        message,
+        parent,
         hashed: &hashed,
         files: &files,
     };
 
+    execute_push(client, &job, reporter).await
+}
+
+/// Entry point for the `push` subcommand.
+pub async fn run(client: &ApiClient, args: PushArgs) -> Result<(), CliError> {
+    let reporter = Reporter::new(args.no_progress);
     let PushOutcome {
         detail: initial,
         total_files,
         total_bytes,
         uploaded_count,
         uploaded_bytes,
-    } = execute_push(client, &job, &reporter).await?;
+    } = push_folder(
+        client,
+        &args.path,
+        &args.workspace,
+        &args.game,
+        &args.message,
+        args.parent,
+        &reporter,
+    )
+    .await?;
 
     // Optionally wait for the server to compute bet-stats.
     let detail = if args.wait_stats {
@@ -235,7 +259,7 @@ async fn upload_missing<C: RevisionApi>(
 ) -> Result<u64, CliError> {
     let results: Vec<ClientResult<u64>> = stream::iter(uploads.iter())
         .map(|upload| async move {
-            let task = reporter.start_file(&upload.rel_path, upload.size);
+            let task = reporter.start_file(&upload.rel_path, upload.size, Transfer::Upload);
             let progress = task.progress();
             let outcome = upload_one(client, ws, game, upload, &progress).await;
             match &outcome {
@@ -282,7 +306,8 @@ async fn upload_one<C: RevisionApi>(
 
 /// Polls the revision until stats stop being `pending` or the timeout elapses.
 /// On timeout the (still pending) detail is returned for the caller to note.
-async fn wait_for_stats(
+/// Shared with the `stats --wait` command.
+pub(crate) async fn wait_for_stats(
     client: &ApiClient,
     ws: &str,
     game: &str,

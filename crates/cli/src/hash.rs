@@ -118,7 +118,7 @@ pub fn hash_file(path: &Path) -> io::Result<String> {
 }
 
 /// Renders bytes as lowercase hex without pulling in the `hex` crate.
-fn to_hex(bytes: &[u8]) -> String {
+pub(crate) fn to_hex(bytes: &[u8]) -> String {
     const HEX: &[u8; 16] = b"0123456789abcdef";
     let mut s = String::with_capacity(bytes.len() * 2);
     for &b in bytes {

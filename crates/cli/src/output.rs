@@ -11,7 +11,7 @@ use std::time::Duration;
 
 use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
 
-use crate::api::{RevisionDetail, RevisionSummary};
+use crate::api::{FileDiff, GameInfo, RevisionDetail, RevisionSummary, StatsDiff, WorkspaceInfo};
 use crate::hash::HashedFile;
 
 /// Files at or above this size get a byte-rate progress bar; smaller ones get a
@@ -33,6 +33,9 @@ enum Mode {
     /// Non-interactive or `--no-progress`: plain log lines to stderr. Tests use
     /// this mode too (its output is captured by the test harness).
     Plain,
+    /// Fully silent: no progress and no log lines. Used by the `mcp` server so a
+    /// reused push/pull never writes to the process's stdout/stderr streams.
+    Quiet,
 }
 
 impl Reporter {
@@ -47,6 +50,11 @@ impl Reporter {
         Self { mode }
     }
 
+    /// A reporter that emits nothing at all (for the `mcp` server).
+    pub fn quiet() -> Self {
+        Self { mode: Mode::Quiet }
+    }
+
     /// Prints a block of human text, safely interleaved above any live bars.
     pub fn println(&self, msg: &str) {
         match &self.mode {
@@ -54,11 +62,12 @@ impl Reporter {
                 let _ = mp.println(msg);
             }
             Mode::Plain => eprintln!("{msg}"),
+            Mode::Quiet => {}
         }
     }
 
-    /// Starts a progress handle for one file upload.
-    pub fn start_file(&self, name: &str, size: u64) -> FileTask {
+    /// Starts a progress handle for one file transfer (upload or download).
+    pub fn start_file(&self, name: &str, size: u64, dir: Transfer) -> FileTask {
         match &self.mode {
             Mode::Fancy(mp) => {
                 let pb = if size >= BIG_FILE {
@@ -77,13 +86,17 @@ impl Reporter {
                 }
             }
             Mode::Plain => {
-                eprintln!("  uploading {name} ({})", human_bytes(size));
+                eprintln!("  {} {name} ({})", dir.ing(), human_bytes(size));
                 FileTask {
                     kind: TaskKind::Plain {
                         name: name.to_string(),
+                        dir,
                     },
                 }
             }
+            Mode::Quiet => FileTask {
+                kind: TaskKind::Hidden,
+            },
         }
     }
 
@@ -101,11 +114,36 @@ impl Reporter {
                 eprintln!("{msg}…");
                 SpinnerHandle { bar: None }
             }
+            Mode::Quiet => SpinnerHandle { bar: None },
         }
     }
 }
 
-/// Progress handle for a single upload, owned by the orchestrator so it can
+/// Direction of a file transfer, so plain-mode log lines read correctly for
+/// both `push` (upload) and `pull` (download).
+#[derive(Clone, Copy)]
+pub enum Transfer {
+    Upload,
+    Download,
+}
+
+impl Transfer {
+    fn ing(self) -> &'static str {
+        match self {
+            Transfer::Upload => "uploading",
+            Transfer::Download => "downloading",
+        }
+    }
+
+    fn ed(self) -> &'static str {
+        match self {
+            Transfer::Upload => "uploaded",
+            Transfer::Download => "downloaded",
+        }
+    }
+}
+
+/// Progress handle for a single transfer, owned by the orchestrator so it can
 /// report the terminal outcome after the transfer future resolves.
 pub struct FileTask {
     kind: TaskKind,
@@ -113,33 +151,38 @@ pub struct FileTask {
 
 enum TaskKind {
     Bar(ProgressBar),
-    Plain { name: String },
+    Plain { name: String, dir: Transfer },
+    Hidden,
 }
 
 impl FileTask {
     /// A cheap, cloneable byte-counter fed into the upload stream. Clones share
     /// the same underlying bar, so `reset` on retry affects every copy. Plain
-    /// mode has no bar to advance, so it hands back a no-op counter.
+    /// and hidden modes have no bar to advance, so they hand back a no-op.
     pub fn progress(&self) -> FileProgress {
         match &self.kind {
             TaskKind::Bar(pb) => FileProgress {
                 bar: Some(pb.clone()),
             },
-            TaskKind::Plain { .. } => FileProgress::hidden(),
+            TaskKind::Plain { .. } | TaskKind::Hidden => FileProgress::hidden(),
         }
     }
 
     pub fn finish_success(&self, size: u64) {
         match &self.kind {
             TaskKind::Bar(pb) => pb.finish_with_message(format!("done ({})", human_bytes(size))),
-            TaskKind::Plain { name } => eprintln!("  uploaded {name} ({})", human_bytes(size)),
+            TaskKind::Plain { name, dir } => {
+                eprintln!("  {} {name} ({})", dir.ed(), human_bytes(size))
+            }
+            TaskKind::Hidden => {}
         }
     }
 
     pub fn finish_error(&self, msg: &str) {
         match &self.kind {
             TaskKind::Bar(pb) => pb.abandon_with_message(format!("failed: {msg}")),
-            TaskKind::Plain { name } => eprintln!("  FAILED {name}: {msg}"),
+            TaskKind::Plain { name, .. } => eprintln!("  FAILED {name}: {msg}"),
+            TaskKind::Hidden => {}
         }
     }
 }
@@ -297,6 +340,185 @@ pub fn stats_table(detail: &RevisionDetail) -> String {
         })
         .collect();
     render_table(&headers, &rows)
+}
+
+/// Renders the `sdt workspaces` table.
+pub fn workspaces_table(workspaces: &[WorkspaceInfo]) -> String {
+    if workspaces.is_empty() {
+        return "No workspaces.".to_string();
+    }
+    let headers = ["SLUG", "NAME", "ROLE"];
+    let rows: Vec<Vec<String>> = workspaces
+        .iter()
+        .map(|w| {
+            vec![
+                w.slug.clone(),
+                w.name.clone().unwrap_or_else(|| "-".into()),
+                w.role.clone().unwrap_or_else(|| "-".into()),
+            ]
+        })
+        .collect();
+    render_table(&headers, &rows)
+}
+
+/// Renders the `sdt games` table.
+pub fn games_table(games: &[GameInfo]) -> String {
+    if games.is_empty() {
+        return "No games.".to_string();
+    }
+    let headers = ["SLUG", "NAME", "HEAD", "REVISIONS"];
+    let rows: Vec<Vec<String>> = games
+        .iter()
+        .map(|g| {
+            vec![
+                g.slug.clone(),
+                g.name.clone().unwrap_or_else(|| "-".into()),
+                g.head_number
+                    .map(|n| format!("#{n}"))
+                    .unwrap_or_else(|| "-".into()),
+                g.revisions_count
+                    .map(|n| n.to_string())
+                    .unwrap_or_else(|| "-".into()),
+            ]
+        })
+        .collect();
+    render_table(&headers, &rows)
+}
+
+/// True when ANSI colour should be used: stderr is a TTY and `NO_COLOR` is
+/// unset. The render functions take an explicit `color` flag so tests stay
+/// deterministic; commands pass this at the call site.
+pub fn colors_enabled() -> bool {
+    std::io::stderr().is_terminal() && std::env::var_os("NO_COLOR").is_none()
+}
+
+fn paint(s: &str, code: &str, on: bool) -> String {
+    if on {
+        format!("\x1b[{code}m{s}\x1b[0m")
+    } else {
+        s.to_string()
+    }
+}
+
+/// One-line file-change summary: `+added  -removed  ~changed  =unchanged`.
+pub fn diff_files_summary(files: &FileDiff, color: bool) -> String {
+    let added = paint(&format!("+{} added", files.added.len()), "32", color);
+    let removed = paint(&format!("-{} removed", files.removed.len()), "31", color);
+    let changed = paint(&format!("~{} changed", files.changed.len()), "33", color);
+    let unchanged = paint(&format!("={} unchanged", files.unchanged), "2", color);
+    format!("Files: {added}  {removed}  {changed}  {unchanged}")
+}
+
+/// Treats an RTP `<= 1.5` as a fraction (0.965 -> 96.5), else already a percent.
+fn to_percent(r: f64) -> f64 {
+    if r <= 1.5 { r * 100.0 } else { r }
+}
+
+/// Per-mode RTP diff table: before/after RTP and a signed Δ in percentage
+/// points, the Δ column coloured (green up, red down) when `color` is set.
+///
+/// The Δ is the last column, so wrapping it in ANSI never disturbs alignment
+/// (only preceding, padded columns must stay ANSI-free for widths to be right).
+pub fn diff_stats_table(diff: &StatsDiff, before_num: i64, after_num: i64, color: bool) -> String {
+    if diff.modes.is_empty() {
+        return "No comparable mode stats (one or both revisions lack ok stats).".to_string();
+    }
+    let headers = [
+        "MODE".to_string(),
+        format!("RTP #{before_num}"),
+        format!("RTP #{after_num}"),
+        "Δ pp".to_string(),
+    ];
+
+    // Plain cells drive the column widths; the Δ is coloured only at print time.
+    struct Row {
+        cells: [String; 4],
+        delta_sign: i8,
+    }
+    let rows: Vec<Row> = diff
+        .modes
+        .iter()
+        .map(|m| {
+            let before = m.before.as_ref().and_then(|s| s.rtp);
+            let after = m.after.as_ref().and_then(|s| s.rtp);
+            let before_cell = before.map(fmt_rtp).unwrap_or_else(|| "-".into());
+            let after_cell = after.map(fmt_rtp).unwrap_or_else(|| "-".into());
+            let (delta_cell, sign) = match (before, after) {
+                (Some(b), Some(a)) => {
+                    let d = to_percent(a) - to_percent(b);
+                    let sign = if d > 1e-9 {
+                        1
+                    } else if d < -1e-9 {
+                        -1
+                    } else {
+                        0
+                    };
+                    (format!("{d:+.2}pp"), sign)
+                }
+                _ => ("-".into(), 0),
+            };
+            Row {
+                cells: [m.mode.clone(), before_cell, after_cell, delta_cell],
+                delta_sign: sign,
+            }
+        })
+        .collect();
+
+    // Column widths from plain header + cell text.
+    let mut widths = [0usize; 4];
+    for (i, h) in headers.iter().enumerate() {
+        widths[i] = h.chars().count();
+    }
+    for row in &rows {
+        for (i, cell) in row.cells.iter().enumerate() {
+            widths[i] = widths[i].max(cell.chars().count());
+        }
+    }
+
+    let mut out = String::new();
+    // Header + underline (plain).
+    push_diff_row(&mut out, &headers, &widths, None);
+    let underline: [String; 4] = std::array::from_fn(|i| "-".repeat(widths[i]));
+    push_diff_row(&mut out, &underline, &widths, None);
+    for row in &rows {
+        let code = match row.delta_sign {
+            1 => Some("32"),
+            -1 => Some("31"),
+            _ => None,
+        };
+        let code = if color { code } else { None };
+        push_diff_row(&mut out, &row.cells, &widths, code);
+    }
+    out.trim_end().to_string()
+}
+
+/// Emits one row of the diff table. The last cell (Δ) is not padded, so an
+/// optional ANSI `color_last` never affects alignment.
+fn push_diff_row(
+    out: &mut String,
+    cells: &[String; 4],
+    widths: &[usize; 4],
+    color_last: Option<&str>,
+) {
+    let mut line = String::new();
+    for (i, cell) in cells.iter().enumerate() {
+        if i > 0 {
+            line.push_str("  ");
+        }
+        if i == cells.len() - 1 {
+            // Last column: colour if asked, never pad.
+            match color_last {
+                Some(code) => line.push_str(&paint(cell, code, true)),
+                None => line.push_str(cell),
+            }
+        } else {
+            line.push_str(cell);
+            let pad = widths[i].saturating_sub(cell.chars().count());
+            line.push_str(&" ".repeat(pad));
+        }
+    }
+    out.push_str(line.trim_end());
+    out.push('\n');
 }
 
 fn stats_badge(status: Option<&str>) -> String {
