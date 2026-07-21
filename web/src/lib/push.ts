@@ -155,6 +155,14 @@ export function pushErrorMessage(e: unknown): string {
         return 'Some files could not be uploaded. Please try again.';
       case 'network_error':
         return 'Could not reach the server. Check your connection and try again.';
+      case 'cloudflare_proxy_limit':
+        return e.message;
+      // Billing gates (M7). Prefer the server's copy — it already names the fix —
+      // and let the panel pair it with an "Upgrade →" link (see `isUpgradeError`).
+      case 'upgrade_required':
+        return e.message || "This workspace's trial has ended — upgrade the plan to push.";
+      case 'storage_quota_exceeded':
+        return e.message || 'This push would exceed the workspace storage limit — upgrade for more space.';
     }
     if (e.status === 413) return 'A file is larger than the server allows.';
     return e.message || 'The push failed.';

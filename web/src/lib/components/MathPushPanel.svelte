@@ -8,7 +8,7 @@
    * per-file + global progress. On success it hands the new revision number back
    * to the parent, which navigates to the revision page (where stats poll).
    */
-  import { isValidSlug, slugFromName } from '$lib/api';
+  import { isValidSlug, isUpgradeError, slugFromName } from '$lib/api';
   import { humanSize } from '$lib/format';
   import {
     runPush,
@@ -21,6 +21,7 @@
   import Input from '$lib/components/Input.svelte';
   import Card from '$lib/components/Card.svelte';
   import MathFolderPicker from '$lib/components/MathFolderPicker.svelte';
+  import UpgradeNotice from '$lib/components/UpgradeNotice.svelte';
 
   type Props = {
     slug: string;
@@ -52,6 +53,9 @@
 
   let pushing = $state(false);
   let pushError = $state('');
+  // True when `pushError` is a billing gate (expired trial / quota) — the panel
+  // then shows an inline "Upgrade →" link instead of a plain error.
+  let pushErrorUpgrade = $state(false);
   let phase = $state<PushPhase | null>(null);
   let progress = $state<FileProgress[]>([]);
 
@@ -130,6 +134,7 @@
     const targetGame = isNew ? gameSlug.trim() : (game ?? '');
     pushing = true;
     pushError = '';
+    pushErrorUpgrade = false;
     phase = 'hashing';
     progress = pickedFiles.map((f) => ({
       path: f.path,
@@ -157,6 +162,7 @@
       ondone?.(res.number, targetGame);
     } catch (e) {
       pushError = pushErrorMessage(e);
+      pushErrorUpgrade = isUpgradeError(e);
       phase = null;
     } finally {
       pushing = false;
@@ -212,9 +218,13 @@
     />
 
     {#if pushError}
-      <p class="rounded-md border border-danger/30 bg-danger/10 px-3 py-2 text-sm text-danger">
-        {pushError}
-      </p>
+      {#if pushErrorUpgrade}
+        <UpgradeNotice {slug} message={pushError} />
+      {:else}
+        <p class="rounded-md border border-danger/30 bg-danger/10 px-3 py-2 text-sm text-danger">
+          {pushError}
+        </p>
+      {/if}
     {/if}
 
     {#if phase}

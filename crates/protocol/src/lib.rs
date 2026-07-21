@@ -45,6 +45,10 @@ pub enum ServiceStatus {
 pub struct HealthResponse {
     pub status: ServiceStatus,
     pub version: String,
+    /// Git commit the running binary was built from (`SERVER_BUILD_SHA`,
+    /// stamped by the deploy image). Absent on ad-hoc local builds.
+    #[serde(default)]
+    pub build: Option<String>,
     pub db: ComponentStatus,
     pub object_store: ComponentStatus,
 }

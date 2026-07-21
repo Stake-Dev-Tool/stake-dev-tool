@@ -9,6 +9,7 @@
   import CopyField from '$lib/components/CopyField.svelte';
   import MathPushPanel from '$lib/components/MathPushPanel.svelte';
   import FrontUrlDialog from '$lib/components/FrontUrlDialog.svelte';
+  import PlanBanner from '$lib/components/PlanBanner.svelte';
 
   let slug = $derived(page.params.slug ?? '');
   let game = $derived(page.params.game ?? '');
@@ -130,6 +131,8 @@
         {/if}
       </div>
     </header>
+
+    <PlanBanner {slug} />
 
     {#if headNumber != null}
       <FrontUrlDialog bind:open={testOpen} {slug} {game} number={headNumber} />

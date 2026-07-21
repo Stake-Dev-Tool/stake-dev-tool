@@ -54,7 +54,8 @@ static asset or `/api/*`. That fallback is what makes deep links work.
   auth guard and redirects unauthenticated users to `/login?next=…`. `/login`
   and `/invite/:token` are the only public routes.
 - **Routes:** `/login`, `/` (workspaces), `/w/[slug]` (games + members +
-  invites), `/w/[slug]/g/[game]` (revision list), `/w/[slug]/g/[game]/r/[number]`
+  invites), `/w/[slug]/billing` (plan + usage + upgrade),
+  `/w/[slug]/g/[game]` (revision list), `/w/[slug]/g/[game]/r/[number]`
   (revision detail), `/w/[slug]/g/[game]/diff/[a]/[b]` (revision diff),
   `/invite/[token]` (public accept), `/device` (device-code approval),
   `/account` (API tokens + logout).
@@ -133,3 +134,49 @@ the implicit `full` scope (which satisfies `push:math`), so no token is needed.
 `ApiError` now carries a `details` field (the parsed error body) so the commit
 handler can read the top-level `missing` array a 409 returns. Adds one runtime
 dependency, **`hash-wasm`**.
+
+## Billing & plans (M7)
+
+Polar-backed subscriptions, surfaced without ever hiding the app behind a
+paywall — the free/self-host experience stays fully usable. The paywall moments
+are exactly three: the trial countdown, the expired-trial banner, and
+quota-hit errors. The whole surface degrades to **nothing** on a self-hosted
+instance (`GET /billing` → `enabled: false`, every limit unlimited).
+
+- **Client** (`src/lib/api.ts`, `api.billing.*`): `status(slug)` (member-visible,
+  always reachable) and `checkout(slug, plan, interval)` (owner-only; returns the
+  hosted Polar URL to navigate to). Wire shapes go through `normalize*` helpers
+  like the rest of the surface — reconciled against the generated
+  `crates/protocol` bindings (`BillingStatusResponse`, `BillingUsage`,
+  `BillingLimits`, `CheckoutRequest/Response`, `PlanId`, `BillingInterval`).
+  `bigint` usage counts are coerced to plain numbers (a 50 GiB cap is far under
+  `Number.MAX_SAFE_INTEGER`). `isUpgradeError(e)` classifies the two write-gate
+  codes (`upgrade_required`, `storage_quota_exceeded`).
+- **`src/lib/billing.ts`**: a small per-slug status **cache** (a module `Map`) so
+  the `PlanBanner` mounted on the workspace page and both game pages shares **one**
+  `GET /billing` per slug per session, plus pure presentation helpers
+  (`planLabel`, `statusLabel`, `intervalLabel`, `daysUntil`, and a `meter()` that
+  drives the usage bars — amber at ≥ 80%, red at 100%).
+- **`PlanBanner.svelte`** (self-fetching, `{slug}`): renders **nothing** when
+  billing is disabled; a subtle banner on **trial** (`N days left · Upgrade`); a
+  prominent banner when **expired** (writes disabled); a warning banner on
+  **past_due** (grace period); a tiny plan **chip** on a healthy Solo/Team plan.
+  A failed fetch renders nothing — it never breaks the page.
+- **`/w/[slug]/billing`**: the current plan (label, Polar status, interval,
+  renewal / trial-end date), a usage section (members, storage via `humanSize`,
+  active share links vs limits, `∞` when unlimited), and an upgrade section with
+  Solo/Team cards, a per-card Monthly/Yearly toggle, and indicative pricing
+  (from `V2.md` — "final price at checkout"; yearly = 2 months free). The Upgrade
+  button POSTs checkout and does a **full navigation** to `checkout_url`;
+  non-owners see the cards with the button disabled. Polar's success redirect
+  (`?upgraded=1`) shows a green toast, refetches fresh status, and strips the
+  param. `enabled: false` collapses the page to a single calm "self-hosted runs
+  unlimited" card. Reached from a **Billing** link in the workspace header and
+  from every `PlanBanner` Upgrade link.
+- **Write-gate surfacing**: `push.ts` maps `upgrade_required` /
+  `storage_quota_exceeded` to friendly copy, and `MathPushPanel` pairs it with an
+  inline **`UpgradeNotice`** (message + "Upgrade →" link to the billing page)
+  instead of a bare error. The invite-accept page gives a clear "ask the owner to
+  upgrade" message when a workspace is at its member cap (the invitee has no
+  billing access, so no dead link). There is no share-create UI in `web/` yet, so
+  that path has nothing to surface here.

@@ -113,6 +113,9 @@ async fn healthz(State(state): State<AppState>) -> impl IntoResponse {
             ServiceStatus::Degraded
         },
         version: env!("CARGO_PKG_VERSION").to_string(),
+        build: std::env::var("SERVER_BUILD_SHA")
+            .ok()
+            .filter(|s| !s.is_empty()),
         db,
         object_store,
     };

@@ -200,6 +200,56 @@ export interface RevisionDiff {
 }
 
 // ---------------------------------------------------------------------------
+// Billing & subscriptions (M7)
+// ---------------------------------------------------------------------------
+
+/** A purchasable plan (mirrors the generated `PlanId` binding). */
+export type PlanId = 'solo' | 'team';
+/** Billing cadence chosen at checkout (mirrors the generated `BillingInterval`). */
+export type BillingInterval = 'monthly' | 'yearly';
+
+/**
+ * The resolved plan label the status endpoint reports. `unlimited` = billing
+ * disabled (self-host, everything unlimited); `expired` = trial lapsed with no
+ * subscription (reads work, writes are blocked with `upgrade_required`). Kept
+ * open to `string` so an unknown server value is never a runtime throw.
+ */
+export type PlanLabel = 'trial' | 'solo' | 'team' | 'unlimited' | 'expired';
+
+/**
+ * Current resource usage. The wire fields are `bigint` in the generated
+ * bindings; we coerce to plain numbers (a 50 GiB cap is ~5.4e10, far under
+ * `Number.MAX_SAFE_INTEGER`) so `humanSize`/arithmetic just work.
+ */
+export interface BillingUsage {
+  members: number;
+  storage_bytes: number;
+  active_share_links: number;
+}
+
+/** Effective quota limits; `null` on any field means unlimited. */
+export interface BillingLimits {
+  max_members: number | null;
+  max_storage_bytes: number | null;
+  max_active_share_links: number | null;
+  max_concurrent_share_sessions: number | null;
+}
+
+/** `GET /workspaces/:slug/billing` — member-visible, always reachable. */
+export interface BillingStatus {
+  /** Whether Polar billing is configured on this instance. `false` → unlimited. */
+  enabled: boolean;
+  plan: PlanLabel | string;
+  /** Polar's status verbatim ("active", "trialing", "past_due", …) or null. */
+  status: string | null;
+  interval: BillingInterval | null;
+  /** Period end (subscription) or trial expiry (trial); null when neither applies. */
+  current_period_end: string | null;
+  usage: BillingUsage;
+  limits: BillingLimits;
+}
+
+// ---------------------------------------------------------------------------
 // Error type
 // ---------------------------------------------------------------------------
 
@@ -230,6 +280,19 @@ export class ApiError extends Error {
 /** True when the failure is specifically an unauthenticated one (redirect to login). */
 export function isUnauthorized(e: unknown): boolean {
   return e instanceof ApiError && e.status === 401;
+}
+
+/**
+ * True when a write was refused for a billing reason: `upgrade_required` (the
+ * workspace's trial lapsed, or its member cap is reached on invite-accept) or
+ * `storage_quota_exceeded`. Callers surface an inline "Upgrade →" affordance
+ * for these instead of a bare error.
+ */
+export function isUpgradeError(e: unknown): boolean {
+  return (
+    e instanceof ApiError &&
+    (e.code === 'upgrade_required' || e.code === 'storage_quota_exceeded')
+  );
 }
 
 // ---------------------------------------------------------------------------
@@ -461,6 +524,46 @@ function normalizeRevisionDiff(raw: unknown): RevisionDiff {
   return { files, stats: { modes } };
 }
 
+// ---- Billing (M7) ----------------------------------------------------------
+
+function asInterval(v: unknown): BillingInterval | null {
+  return v === 'monthly' || v === 'yearly' ? v : null;
+}
+
+function normalizeBillingUsage(raw: unknown): BillingUsage {
+  const u = (raw ?? {}) as Record<string, unknown>;
+  return {
+    members: num(u.members),
+    storage_bytes: num(u.storage_bytes),
+    active_share_links: num(u.active_share_links)
+  };
+}
+
+function normalizeBillingLimits(raw: unknown): BillingLimits {
+  const l = (raw ?? {}) as Record<string, unknown>;
+  return {
+    max_members: numOrNull(l.max_members),
+    max_storage_bytes: numOrNull(l.max_storage_bytes),
+    max_active_share_links: numOrNull(l.max_active_share_links),
+    max_concurrent_share_sessions: numOrNull(l.max_concurrent_share_sessions)
+  };
+}
+
+function normalizeBillingStatus(raw: unknown): BillingStatus {
+  const b = (raw ?? {}) as Record<string, unknown>;
+  return {
+    enabled: Boolean(b.enabled),
+    // Default to `unlimited` (the no-restrictions plan) if the server ever omits
+    // it, so a shape surprise never invents a false paywall.
+    plan: String(b.plan ?? 'unlimited'),
+    status: strOrNull(b.status),
+    interval: asInterval(b.interval),
+    current_period_end: strOrNull(b.current_period_end),
+    usage: normalizeBillingUsage(b.usage),
+    limits: normalizeBillingLimits(b.limits)
+  };
+}
+
 /**
  * Extract a list of lowercase blob hashes from a `{ missing: [...] }` payload or
  * a bare array. Accepts either plain hash strings or `{ hash }` objects, so the
@@ -657,7 +760,27 @@ export const api = {
         throw new ApiError(0, 'network_error', 'Could not reach the server. Is it running?');
       }
       const data = await readJson(res);
-      if (!res.ok) throw errorFrom(res.status, res.statusText, data);
+      if (!res.ok) {
+        // Diagnostic breadcrumbs for upload failures: which status, and —
+        // decisive for 413s — whether the response came from Cloudflare's
+        // proxy (its free plan caps uploads at 100 MB) instead of our server.
+        const cfRay = res.headers.get('cf-ray');
+        console.error(
+          `[push] PUT blob ${hash.slice(0, 12)}… (${file.size} B) -> ${res.status}`,
+          cfRay ? `via CLOUDFLARE proxy (cf-ray ${cfRay}) — stale DNS?` : 'direct server',
+          data ?? ''
+        );
+        const err = errorFrom(res.status, res.statusText, data);
+        if (res.status === 413 && cfRay) {
+          throw new ApiError(
+            413,
+            'cloudflare_proxy_limit',
+            "Your browser is still reaching Cloudflare's proxy (100 MB upload cap). " +
+              'Flush your DNS cache and fully restart the browser, then retry.'
+          );
+        }
+        throw err;
+      }
       onProgress?.(file.size);
       return res.status === 201 ? 'created' : 'exists';
     },
@@ -798,6 +921,31 @@ export const api = {
     },
     async remove(id: string): Promise<void> {
       await request<void>('DELETE', `/tokens/${encodeURIComponent(id)}`);
+    }
+  },
+
+  billing: {
+    /**
+     * Member-visible plan / usage / limits. Always reachable — on a self-hosted
+     * instance it returns `enabled: false` with every limit unlimited.
+     */
+    async status(slug: string): Promise<BillingStatus> {
+      const raw = await request<unknown>('GET', `/workspaces/${encodeURIComponent(slug)}/billing`);
+      return normalizeBillingStatus(raw);
+    },
+    /**
+     * Owner-only: start a Polar checkout for `plan`/`interval`. Returns the
+     * hosted checkout URL to navigate to (`window.location.href = url`). The
+     * endpoint 404s when billing is disabled on the instance.
+     */
+    async checkout(slug: string, plan: PlanId, interval: BillingInterval): Promise<string> {
+      const raw = await request<unknown>(
+        'POST',
+        `/workspaces/${encodeURIComponent(slug)}/billing/checkout`,
+        { plan, interval }
+      );
+      const r = (raw ?? {}) as Record<string, unknown>;
+      return String(r.checkout_url ?? '');
     }
   },
 

@@ -37,8 +37,11 @@ COPY --from=frontend /repo/web/build /app/web
 # Pre-owned by the runtime user so the blobdata volume (fs storage backend)
 # initializes writable — named volumes copy ownership from the image path.
 RUN mkdir -p /app/data && chown -R nobody /app/data
+# Stamped into /healthz ("build") so "is prod running commit X?" is one curl.
+ARG GIT_SHA=unknown
 ENV SERVER_WEB_DIR=/app/web \
-    SERVER_BIND_ADDR=0.0.0.0:8080
+    SERVER_BIND_ADDR=0.0.0.0:8080 \
+    SERVER_BUILD_SHA=$GIT_SHA
 EXPOSE 8080
 HEALTHCHECK --interval=30s --timeout=5s --retries=3 \
     CMD curl -fsS http://127.0.0.1:8080/healthz || exit 1

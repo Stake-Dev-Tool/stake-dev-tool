@@ -1,6 +1,7 @@
 <script lang="ts">
+  import { onMount } from 'svelte';
   import { page } from '$app/state';
-  import { goto } from '$app/navigation';
+  import { goto, replaceState } from '$app/navigation';
   import {
     api,
     ApiError,
@@ -13,6 +14,7 @@
     type Game
   } from '$lib/api';
   import { session } from '$lib/session.svelte';
+  import { invalidateBillingStatus } from '$lib/billing';
   import { roleTone, formatDate, formatExpiry, errorText } from '$lib/format';
   import Button from '$lib/components/Button.svelte';
   import Input from '$lib/components/Input.svelte';
@@ -20,6 +22,7 @@
   import Badge from '$lib/components/Badge.svelte';
   import CopyField from '$lib/components/CopyField.svelte';
   import MathPushPanel from '$lib/components/MathPushPanel.svelte';
+  import PlanBanner from '$lib/components/PlanBanner.svelte';
 
   let slug = $derived(page.params.slug ?? '');
 
@@ -32,6 +35,7 @@
   let loadError = $state('');
   let actionError = $state('');
   let busyUser = $state<string | null>(null); // user_id currently mutating
+  let upgradedToast = $state('');
 
   // Derived permission context
   let myId = $derived(session.user?.id ?? '');
@@ -49,6 +53,19 @@
   $effect(() => {
     void slug; // track the param
     load();
+  });
+
+  // Polar checkout success redirects here (the server's success_url is
+  // /w/:slug?upgraded=1). Celebrate, drop any cached (pre-upgrade) billing status
+  // so PlanBanner re-reads fresh, and strip the param. The redirect is a full page
+  // load, so this one-shot onMount is the right hook.
+  onMount(() => {
+    if (page.url.searchParams.get('upgraded') !== '1') return;
+    upgradedToast = 'Subscription active — welcome aboard.';
+    invalidateBillingStatus(slug);
+    const url = new URL(page.url);
+    url.searchParams.delete('upgraded');
+    replaceState(url.pathname + url.search, {});
   });
 
   async function load() {
@@ -227,11 +244,28 @@
       <Button variant="outline" size="sm" class="mt-4" onclick={load}>Retry</Button>
     </Card>
   {:else if detail}
-    <header class="mb-8 flex flex-wrap items-center gap-3">
+    <header class="mb-6 flex flex-wrap items-center gap-3">
       <h1 class="text-2xl font-semibold tracking-tight">{detail.workspace.name}</h1>
       <span class="font-mono-tab text-sm text-muted">{detail.workspace.slug}</span>
       {#if myRole}<Badge tone={roleTone(myRole)}>{myRole}</Badge>{/if}
+      <a
+        href={`/w/${slug}/billing`}
+        class="ml-auto rounded-md border border-border bg-surface-2 px-3 py-1.5 text-sm text-muted transition hover:border-border-strong hover:text-text"
+      >
+        Billing
+      </a>
     </header>
+
+    <PlanBanner {slug} />
+
+    {#if upgradedToast}
+      <div
+        class="fade-in mb-6 flex items-center gap-2 rounded-md border border-accent/40 bg-accent/10 px-4 py-3 text-sm text-accent"
+      >
+        <span aria-hidden="true">✓</span>
+        {upgradedToast}
+      </div>
+    {/if}
 
     {#if actionError}
       <p class="mb-4 rounded-md border border-danger/30 bg-danger/10 px-3 py-2 text-sm text-danger">

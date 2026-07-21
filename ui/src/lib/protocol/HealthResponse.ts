@@ -5,4 +5,9 @@ import type { ServiceStatus } from "./ServiceStatus";
 /**
  * Response body of `GET /healthz`.
  */
-export type HealthResponse = { status: ServiceStatus, version: string, db: ComponentStatus, object_store: ComponentStatus, };
+export type HealthResponse = { status: ServiceStatus, version: string, 
+/**
+ * Git commit the running binary was built from (`SERVER_BUILD_SHA`,
+ * stamped by the deploy image). Absent on ad-hoc local builds.
+ */
+build: string | null, db: ComponentStatus, object_store: ComponentStatus, };
