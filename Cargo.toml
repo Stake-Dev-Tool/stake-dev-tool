@@ -6,6 +6,7 @@ members = [
     "crates/lgs-wasm",
     "crates/server",
     "crates/protocol",
+    "crates/cli",
 ]
 # `lgs-wasm` only makes sense on wasm32. Excluding it from default-members
 # keeps `cargo check`/`cargo build` at the workspace root from trying to
@@ -15,6 +16,7 @@ default-members = [
     "crates/desktop",
     "crates/server",
     "crates/protocol",
+    "crates/cli",
 ]
 
 [workspace.package]
@@ -75,6 +77,9 @@ sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio",
 object_store = { version = "0.14", features = ["aws"] }
 ts-rs = { version = "12", features = ["uuid-impl", "chrono-impl", "serde-json-impl"] }
 dotenvy = "0.15"
+clap = { version = "4.5", features = ["derive", "env"] }
+indicatif = "0.17"
+tokio-util = { version = "0.7", features = ["io"] }
 
 [profile.release]
 opt-level = 3

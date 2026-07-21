@@ -1,0 +1,15 @@
+[package]
+name = "cli"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "Stake Dev Tool CLI — push math revisions to the cloud from CI"
+
+[[bin]]
+name = "sdt"
+path = "src/main.rs"
+
+[dependencies]
+anyhow.workspace = true
+clap.workspace = true
