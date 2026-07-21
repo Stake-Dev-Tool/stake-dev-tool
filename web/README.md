@@ -178,5 +178,55 @@ instance (`GET /billing` → `enabled: false`, every limit unlimited).
   inline **`UpgradeNotice`** (message + "Upgrade →" link to the billing page)
   instead of a bare error. The invite-accept page gives a clear "ask the owner to
   upgrade" message when a workspace is at its member cap (the invitee has no
-  billing access, so no dead link). There is no share-create UI in `web/` yet, so
-  that path has nothing to surface here.
+  billing access, so no dead link). The **share-create** flow (see below) does the
+  same: a 403 `upgrade_required` on the active-link quota renders `UpgradeNotice`.
+
+## Share links & front bundles (M5)
+
+A game can be handed to a tester as a hosted, playable **share link**
+(`<slug>.play.<domain>`) — no install, just a URL — and the spins that come back
+are surfaced as analytics. The whole surface is a **Share** section on the game
+page (`/w/[slug]/g/[game]`), in **`src/lib/components/SharePanel.svelte`**, with
+three stacked pieces:
+
+- **Game front** card: a share serves the game's front build (the web bundle
+  players load). Upload it once — the picker is the **same `MathFolderPicker`**,
+  reused with a `requiredRootFile="index.html"` prop (default stays `index.json`,
+  so math flows are untouched), `maxFiles={2000}`, and a custom drop label. Upload
+  runs **`runFrontPush`** with a compact inline progress recap (phase line +
+  global bar; no per-file table — a web build is many small files). On success it
+  confirms the new bundle id and notes that **new shares use the latest bundle
+  automatically** (there is no list-bundles endpoint, so nothing is fetched back).
+- **Create share** (owner/admin only — hidden for members): pin a revision
+  (**Latest** tracks head, or any revision number, reusing the page's already-
+  loaded revisions list) plus optional custom **slug**
+  (validated `^[a-z0-9][a-z0-9-]{0,38}[a-z0-9]$`, or blank for a generated one),
+  **password**, **expiry** (days), and **max concurrent sessions** (default 25).
+  On success the new link is prepended to the list and its URL shown in a
+  prominent copy callout. A 403 `upgrade_required` renders `UpgradeNotice`.
+- **Share links list**: each `ShareLinkView` as a card — the full URL as a
+  **`CopyField`** (or a "no play domain configured on this instance" hint when
+  `url` is null), status/rev/bundle/`🔒 password` badges, counters (sessions,
+  spins, observed RTP %, active now), expiry + session cap, and **Revoke**
+  (confirm) / **Delete** (confirm) actions. Members can view and copy links but
+  see no manage controls. Refresh is **manual** (a button) — nothing polls.
+
+**Pipeline reuse** (`src/lib/push.ts`): front bundles content-address exactly
+like math, so the hash → check → upload → commit orchestration is shared. The
+common steps live in a private **`runPipeline`** (streaming hash, upload
+planning, the bounded upload pool, and the 409 `missing_blobs` re-upload-and-
+retry-once); `runPush` and **`runFrontPush`** are thin wrappers that inject only
+the two endpoint-specific steps — `check` and `commit`. Bundle blobs upload
+through the **same** `PUT …/blobs/:hash` (`api.games.putBlob`) as math. `runPush`
+keeps its exact signature and `PushResult` shape (no caller change).
+
+**API** (`src/lib/api.ts`): `api.shares.{list, create, update, revoke, remove}`
+(revoke is a convenience `update {revoked:true}`; `update` forwards a partial
+patch whose absent-vs-`null` keys carry the server's tri-state semantics, since
+`JSON.stringify` drops `undefined`) and `api.games.frontCheck` / `frontCommit`.
+Wire shapes go through `normalize*` helpers (`normalizeShareLink` coerces the
+`bigint` counters to plain numbers) like the rest of the surface, reconciled
+against the generated `crates/protocol` bindings (`ShareLinkView`,
+`CreateShareRequest`, `UpdateShareRequest`, `CreateFrontBundleRequest`,
+`FrontBundleCreated`, `ShareLinksResponse`). `isValidShareSlug` mirrors the
+server's subdomain-label rule.

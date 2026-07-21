@@ -250,6 +250,80 @@ export interface BillingStatus {
 }
 
 // ---------------------------------------------------------------------------
+// Share links & front bundles (M5)
+// ---------------------------------------------------------------------------
+
+/**
+ * A hosted share link (`<slug>.play.<domain>`), as returned by create/list. The
+ * wire counters (`sessions_count`, `spins_count`, `active_sessions`) are `bigint`
+ * in the generated bindings; coerced to plain numbers here (a spin count is far
+ * under `Number.MAX_SAFE_INTEGER`) so arithmetic/formatting just works.
+ */
+export interface ShareLink {
+  id: string;
+  slug: string;
+  /** Full `https://<slug>.<play_domain>/`, or null when the instance has no play domain. */
+  url: string | null;
+  /** The game slug this link serves. */
+  game: string;
+  /** null = tracks the game's latest revision; else the pinned revision number. */
+  revision_number: number | null;
+  /** null = serves the game's latest bundle; else the pinned bundle id. */
+  front_bundle_id: string | null;
+  password_protected: boolean;
+  expires_at: string | null;
+  max_concurrent_sessions: number;
+  revoked_at: string | null;
+  created_at: string;
+  sessions_count: number;
+  spins_count: number;
+  total_bet: number;
+  total_win: number;
+  /** `total_win / total_bet` when `total_bet > 0`, else null. */
+  observed_rtp: number | null;
+  /** Best-effort visitor sessions seen in the last 30 min on this node. */
+  active_sessions: number;
+}
+
+/** Body for `POST …/shares`. Omitted fields take their server default. */
+export interface CreateShareInput {
+  /** Custom subdomain label; omit for a generated `word-word-nnn`. */
+  slug?: string;
+  /** Pin a revision number; omit to track the latest revision. */
+  revision_number?: number;
+  /** Pin a front bundle id; omit to serve the latest bundle. */
+  front_bundle_id?: string;
+  /** Optional password (plaintext; hashed server-side). */
+  password?: string;
+  /** Expiry in days from now; omit for no expiry. */
+  expires_in_days?: number;
+  /** Concurrent visitor-session cap; omit for the default of 25. */
+  max_concurrent_sessions?: number;
+}
+
+/**
+ * Body for `PATCH …/shares/:id`. Tri-state on the nullable fields: leave a key
+ * ABSENT (undefined) to keep it unchanged, pass `null` to clear it (track latest
+ * / remove password / never expire), or a value to set it. `undefined` keys are
+ * dropped by `JSON.stringify`, so this object maps straight onto the server's
+ * absent-vs-null semantics.
+ */
+export interface UpdateShareInput {
+  revision_number?: number | null;
+  front_bundle_id?: string | null;
+  password?: string | null;
+  expires_in_days?: number | null;
+  max_concurrent_sessions?: number;
+  revoked?: boolean;
+}
+
+/** `201` payload after a front bundle commits. */
+export interface FrontBundleCreated {
+  id: string;
+  created_at: string;
+}
+
+// ---------------------------------------------------------------------------
 // Error type
 // ---------------------------------------------------------------------------
 
@@ -564,6 +638,31 @@ function normalizeBillingStatus(raw: unknown): BillingStatus {
   };
 }
 
+// ---- Share links (M5) ------------------------------------------------------
+
+function normalizeShareLink(raw: unknown): ShareLink {
+  const s = (raw ?? {}) as Record<string, unknown>;
+  return {
+    id: String(s.id ?? ''),
+    slug: String(s.slug ?? ''),
+    url: strOrNull(s.url),
+    game: String(s.game ?? ''),
+    revision_number: numOrNull(s.revision_number),
+    front_bundle_id: strOrNull(s.front_bundle_id),
+    password_protected: Boolean(s.password_protected),
+    expires_at: strOrNull(s.expires_at),
+    max_concurrent_sessions: num(s.max_concurrent_sessions, 25),
+    revoked_at: strOrNull(s.revoked_at),
+    created_at: String(s.created_at ?? ''),
+    sessions_count: num(s.sessions_count),
+    spins_count: num(s.spins_count),
+    total_bet: num(s.total_bet),
+    total_win: num(s.total_win),
+    observed_rtp: numOrNull(s.observed_rtp),
+    active_sessions: num(s.active_sessions)
+  };
+}
+
 /**
  * Extract a list of lowercase blob hashes from a `{ missing: [...] }` payload or
  * a bare array. Accepts either plain hash strings or `{ hash }` objects, so the
@@ -591,6 +690,17 @@ export const SLUG_RE = /^[a-z0-9][a-z0-9-]{1,38}[a-z0-9]$/;
 
 export function isValidSlug(slug: string): boolean {
   return SLUG_RE.test(slug);
+}
+
+/**
+ * Share-link label rule (a subdomain label): `^[a-z0-9][a-z0-9-]{0,38}[a-z0-9]$`
+ * — 2–40 chars, lowercase alphanumerics + hyphens, no leading/trailing hyphen.
+ * Looser than `SLUG_RE` (share labels may be as short as 2 chars).
+ */
+export const SHARE_SLUG_RE = /^[a-z0-9][a-z0-9-]{0,38}[a-z0-9]$/;
+
+export function isValidShareSlug(slug: string): boolean {
+  return SHARE_SLUG_RE.test(slug);
 }
 
 /** Live-derive a candidate slug from a workspace name. */
@@ -805,6 +915,102 @@ export const api = {
       const r = (raw ?? {}) as Record<string, unknown>;
       const rev = (r.revision ?? r) as Record<string, unknown>;
       return { number: num(rev.number) };
+    },
+
+    // ---- Front bundles (M5) -----------------------------------------------
+    // A share serves the game's front build. Bundles content-address exactly
+    // like math: `frontCheck` learns the missing hashes, blobs upload through
+    // the SAME `putBlob` (`PUT …/blobs/:hash`), then `frontCommit` stores the
+    // manifest. Membership + `push:math` (the session's `full` scope) authorizes
+    // it, so the browser calls these directly.
+
+    /** Front-bundle sibling of `check`: which of a build's blobs are still missing. */
+    async frontCheck(slug: string, game: string, files: RevisionFile[]): Promise<string[]> {
+      const raw = await request<unknown>(
+        'POST',
+        `/workspaces/${encodeURIComponent(slug)}/games/${encodeURIComponent(game)}/front-bundles/check`,
+        { files }
+      );
+      return normalizeHashList(raw);
+    },
+
+    /**
+     * Commit a front bundle from an already-uploaded manifest (root `index.html`,
+     * ≤ 2000 files). Returns the new bundle's id + created_at. Throws ApiError on
+     * 409 `missing_blobs` (its `.details.missing` lists hashes to re-upload) or
+     * 422 `invalid_manifest`.
+     */
+    async frontCommit(slug: string, game: string, files: RevisionFile[]): Promise<FrontBundleCreated> {
+      const raw = await request<unknown>(
+        'POST',
+        `/workspaces/${encodeURIComponent(slug)}/games/${encodeURIComponent(game)}/front-bundles`,
+        { files }
+      );
+      const r = (raw ?? {}) as Record<string, unknown>;
+      return { id: String(r.id ?? ''), created_at: String(r.created_at ?? '') };
+    }
+  },
+
+  shares: {
+    /** List a game's share links (newest first) with their counters. */
+    async list(slug: string, game: string): Promise<ShareLink[]> {
+      const raw = await request<unknown>(
+        'GET',
+        `/workspaces/${encodeURIComponent(slug)}/games/${encodeURIComponent(game)}/shares`
+      );
+      const arr = Array.isArray(raw)
+        ? raw
+        : ((raw as { shares?: unknown[] } | undefined)?.shares ?? []);
+      return arr.map(normalizeShareLink);
+    },
+
+    /**
+     * Create a share link (owner/admin). A 403 `upgrade_required` is thrown when
+     * the plan's active-link quota is reached (surface via `isUpgradeError`).
+     */
+    async create(slug: string, game: string, input: CreateShareInput = {}): Promise<ShareLink> {
+      const raw = await request<unknown>(
+        'POST',
+        `/workspaces/${encodeURIComponent(slug)}/games/${encodeURIComponent(game)}/shares`,
+        input
+      );
+      return normalizeShareLink(raw);
+    },
+
+    /**
+     * Patch a share link (owner/admin). Only the keys present in `patch` change;
+     * see `UpdateShareInput` for the absent-vs-null tri-state rules.
+     */
+    async update(
+      slug: string,
+      game: string,
+      id: string,
+      patch: UpdateShareInput
+    ): Promise<ShareLink> {
+      const raw = await request<unknown>(
+        'PATCH',
+        `/workspaces/${encodeURIComponent(slug)}/games/${encodeURIComponent(game)}/shares/${encodeURIComponent(id)}`,
+        patch
+      );
+      return normalizeShareLink(raw);
+    },
+
+    /** Revoke a share link (a convenience `update` with `revoked: true`). */
+    async revoke(slug: string, game: string, id: string): Promise<ShareLink> {
+      const raw = await request<unknown>(
+        'PATCH',
+        `/workspaces/${encodeURIComponent(slug)}/games/${encodeURIComponent(game)}/shares/${encodeURIComponent(id)}`,
+        { revoked: true } satisfies UpdateShareInput
+      );
+      return normalizeShareLink(raw);
+    },
+
+    /** Permanently delete a share link. */
+    async remove(slug: string, game: string, id: string): Promise<void> {
+      await request<void>(
+        'DELETE',
+        `/workspaces/${encodeURIComponent(slug)}/games/${encodeURIComponent(game)}/shares/${encodeURIComponent(id)}`
+      );
     }
   },
 

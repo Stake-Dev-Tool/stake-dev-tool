@@ -15,7 +15,11 @@ const config = {
       fallback: 'index.html',
       precompress: false,
       strict: true
-    })
+    }),
+    // Deploys replace the hashed chunks; open tabs referencing the old ones
+    // would die on dynamic imports. Polling version.json lets SvelteKit do a
+    // full reload on the next navigation after a deploy instead.
+    version: { pollInterval: 60_000 }
   }
 };
 

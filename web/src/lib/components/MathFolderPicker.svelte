@@ -14,15 +14,28 @@
 
   type Props = {
     disabled?: boolean;
+    /** The file the folder must contain at its root. Default `index.json` (math). */
+    requiredRootFile?: string;
+    /** Max files allowed in the folder. Default 1000 (math); front bundles pass 2000. */
+    maxFiles?: number;
+    /** Bold call-to-action in the drop zone. Default targets math folders. */
+    label?: string;
     /** Fired with the accepted files and the detected top folder name (may be ''). */
     onpicked?: (files: IntakeFile[], rootName: string) => void;
     /** Fired when the selection is cleared or rejected. */
     oncleared?: () => void;
   };
 
-  let { disabled = false, onpicked, oncleared }: Props = $props();
+  let {
+    disabled = false,
+    requiredRootFile = 'index.json',
+    maxFiles = 1000,
+    label = 'Drop your math folder here',
+    onpicked,
+    oncleared
+  }: Props = $props();
 
-  const MAX_FILES = 1000;
+  let MAX_FILES = $derived(maxFiles);
 
   let dragOver = $state(false);
   let error = $state('');
@@ -111,8 +124,8 @@
       reject(`Too many files: ${finalFiles.length.toLocaleString()} (max ${MAX_FILES.toLocaleString()}).`);
       return;
     }
-    if (!hasRootIndex(finalFiles.map((f) => f.path))) {
-      reject('No index.json at the folder root. A math revision needs one there.');
+    if (!hasRootIndex(finalFiles.map((f) => f.path), requiredRootFile)) {
+      reject(`No ${requiredRootFile} at the folder root. One is required there.`);
       return;
     }
 
@@ -211,12 +224,12 @@
       </svg>
     </span>
     <div class="text-sm">
-      <span class="font-medium text-text">Drop your math folder here</span>
+      <span class="font-medium text-text">{label}</span>
       <span class="text-muted"> or </span>
       <span class="text-accent underline-offset-2 hover:underline">browse</span>
     </div>
     <p class="text-xs text-faint">
-      The folder must contain an <span class="font-mono-tab text-muted">index.json</span> at its root · up to {MAX_FILES.toLocaleString()} files
+      The folder must contain an <span class="font-mono-tab text-muted">{requiredRootFile}</span> at its root · up to {MAX_FILES.toLocaleString()} files
     </p>
     <input
       bind:this={inputEl}

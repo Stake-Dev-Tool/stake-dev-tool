@@ -77,12 +77,15 @@ export interface PushResult {
 // Pure helpers (no network, no DOM) — unit-testable
 // ---------------------------------------------------------------------------
 
-/** The one file a manifest must contain at its root. */
+/** The file a math manifest must contain at its root (the picker default). */
 export const ROOT_INDEX = 'index.json';
 
-/** True when the manifest has an `index.json` at its root. */
-export function hasRootIndex(paths: readonly string[]): boolean {
-  return paths.includes(ROOT_INDEX);
+/**
+ * True when the manifest has the required root file. Defaults to `index.json`
+ * (math); front bundles pass `'index.html'`.
+ */
+export function hasRootIndex(paths: readonly string[], root: string = ROOT_INDEX): boolean {
+  return paths.includes(root);
 }
 
 /** Build the wire manifest from hashed files, sorted by path for stable output. */
@@ -255,25 +258,40 @@ function missingFromError(e: ApiError): string[] {
 /** Max concurrent blob uploads. Small: books are large; keep the pipe steady. */
 const UPLOAD_CONCURRENCY = 3;
 
-export interface PushInput {
-  slug: string;
-  /** Target game slug. For a new game this is the (implicitly created) slug. */
-  game: string;
-  message: string;
-  /** The game's current head number, or null for a brand-new game. */
-  parentNumber: number | null;
-  files: IntakeFile[];
+/** Aggregate upload/dedup totals every pipeline run reports. */
+interface PipelineTotals {
+  totalFiles: number;
+  uploadedFiles: number;
+  uploadedBytes: number;
+  deduplicatedFiles: number;
 }
 
 /**
- * Run the full push: hash → check → upload missing → commit. Reports progress
- * through `hooks`. On a 409 `missing_blobs` race at commit time it re-uploads
- * exactly the hashes the server names and retries the commit once. Throws
- * ApiError (map it with `pushErrorMessage`) on any unrecoverable failure.
+ * The two endpoint-specific steps a push varies by: `check` (which blobs are
+ * missing) and `commit` (turn the uploaded manifest into a revision or a bundle).
+ * Everything else — streaming hash, upload planning, the bounded upload pool, and
+ * the 409 `missing_blobs` re-upload-and-retry-once — is shared.
  */
-export async function runPush(input: PushInput, hooks: PushHooks = {}): Promise<PushResult> {
-  const { slug, game, message, parentNumber, files } = input;
+interface PipelineSteps<R> {
+  check: (manifest: RevisionFile[]) => Promise<string[]>;
+  commit: (manifest: RevisionFile[]) => Promise<R>;
+}
 
+/**
+ * Shared push orchestrator: hash → check → upload missing → commit, reporting
+ * progress through `hooks`. `check`/`commit` are injected so math revisions and
+ * front bundles reuse the identical hashing + upload internals against their own
+ * endpoints. On a 409 `missing_blobs` race at commit it re-uploads exactly the
+ * hashes the server names and retries the commit once. Throws ApiError (map it
+ * with `pushErrorMessage`) on any unrecoverable failure.
+ */
+async function runPipeline<R>(
+  slug: string,
+  game: string,
+  files: IntakeFile[],
+  steps: PipelineSteps<R>,
+  hooks: PushHooks
+): Promise<{ result: R; totals: PipelineTotals }> {
   let uploadedFiles = 0;
   let uploadedBytes = 0;
 
@@ -314,7 +332,7 @@ export async function runPush(input: PushInput, hooks: PushHooks = {}): Promise<
 
   // 2) Ask the server which blobs it still needs.
   hooks.onPhase?.('checking');
-  const missing = await api.games.check(slug, game, manifest);
+  const missing = await steps.check(manifest);
 
   // 3) Upload the missing blobs (unique by hash), a few at a time.
   const plan = planUploads(hashed, missing);
@@ -326,9 +344,9 @@ export async function runPush(input: PushInput, hooks: PushHooks = {}): Promise<
 
   // 4) Commit. On a missing_blobs race, re-upload just those and retry once.
   hooks.onPhase?.('committing');
-  let number: number;
+  let result: R;
   try {
-    number = (await api.games.commit(slug, game, { message, files: manifest, parent_number: parentNumber })).number;
+    result = await steps.commit(manifest);
   } catch (e) {
     if (e instanceof ApiError && e.code === 'missing_blobs') {
       const retryHashes = missingFromError(e);
@@ -339,7 +357,7 @@ export async function runPush(input: PushInput, hooks: PushHooks = {}): Promise<
         await mapPool(retryPlan.uploads, UPLOAD_CONCURRENCY, upload);
       }
       hooks.onPhase?.('committing');
-      number = (await api.games.commit(slug, game, { message, files: manifest, parent_number: parentNumber })).number;
+      result = await steps.commit(manifest);
     } else {
       throw e;
     }
@@ -347,10 +365,80 @@ export async function runPush(input: PushInput, hooks: PushHooks = {}): Promise<
 
   hooks.onPhase?.('done');
   return {
-    number,
-    totalFiles: files.length,
-    uploadedFiles,
-    uploadedBytes,
-    deduplicatedFiles: plan.dedupedIndices.length
+    result,
+    totals: {
+      totalFiles: files.length,
+      uploadedFiles,
+      uploadedBytes,
+      deduplicatedFiles: plan.dedupedIndices.length
+    }
   };
+}
+
+export interface PushInput {
+  slug: string;
+  /** Target game slug. For a new game this is the (implicitly created) slug. */
+  game: string;
+  message: string;
+  /** The game's current head number, or null for a brand-new game. */
+  parentNumber: number | null;
+  files: IntakeFile[];
+}
+
+/**
+ * Run the full math push: hash → check → upload missing → commit. Reports
+ * progress through `hooks`. Throws ApiError (map it with `pushErrorMessage`).
+ */
+export async function runPush(input: PushInput, hooks: PushHooks = {}): Promise<PushResult> {
+  const { slug, game, message, parentNumber, files } = input;
+  const { result, totals } = await runPipeline<{ number: number }>(
+    slug,
+    game,
+    files,
+    {
+      check: (manifest) => api.games.check(slug, game, manifest),
+      commit: (manifest) =>
+        api.games.commit(slug, game, { message, files: manifest, parent_number: parentNumber })
+    },
+    hooks
+  );
+  return { number: result.number, ...totals };
+}
+
+export interface FrontPushInput {
+  slug: string;
+  /** Target game slug (must already exist — a bundle attaches to a game). */
+  game: string;
+  files: IntakeFile[];
+}
+
+export interface FrontPushResult extends PipelineTotals {
+  /** The created front bundle's id. */
+  bundleId: string;
+  createdAt: string;
+}
+
+/**
+ * Run a front-bundle push: hash → front-check → upload missing → front-commit.
+ * Reuses the same hashing/upload internals as `runPush` (via `runPipeline`),
+ * only swapping in the front-bundle endpoints. The manifest must carry a root
+ * `index.html` and ≤ 2000 files — the picker enforces that before this runs.
+ * Throws ApiError (map it with `pushErrorMessage`).
+ */
+export async function runFrontPush(
+  input: FrontPushInput,
+  hooks: PushHooks = {}
+): Promise<FrontPushResult> {
+  const { slug, game, files } = input;
+  const { result, totals } = await runPipeline(
+    slug,
+    game,
+    files,
+    {
+      check: (manifest) => api.games.frontCheck(slug, game, manifest),
+      commit: (manifest) => api.games.frontCommit(slug, game, manifest)
+    },
+    hooks
+  );
+  return { bundleId: result.id, createdAt: result.created_at, ...totals };
 }

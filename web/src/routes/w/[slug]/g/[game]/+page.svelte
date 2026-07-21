@@ -10,6 +10,7 @@
   import MathPushPanel from '$lib/components/MathPushPanel.svelte';
   import FrontUrlDialog from '$lib/components/FrontUrlDialog.svelte';
   import PlanBanner from '$lib/components/PlanBanner.svelte';
+  import SharePanel from '$lib/components/SharePanel.svelte';
 
   let slug = $derived(page.params.slug ?? '');
   let game = $derived(page.params.game ?? '');
@@ -265,5 +266,7 @@
         </div>
       </Card>
     {/if}
+
+    <SharePanel {slug} {game} {revisions} {headNumber} />
   {/if}
 </main>
