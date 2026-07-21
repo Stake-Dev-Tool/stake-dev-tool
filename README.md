@@ -1,10 +1,10 @@
 <h1 align="center">Stake Dev Tool</h1>
 
 <p align="center">
-  Desktop workbench for slot games on the
+  The open-source workbench and cloud platform for slot games on the
   <a href="https://stake-engine.com/">Stake Engine</a> RGS contract.<br />
-  Run, debug, and visually QA your slot locally — multi-resolution test view,
-  fast Rust LGS, team sync, one-click shareable preview links.
+  Run, debug and QA your slot locally, sync math and rounds with your team,
+  and share real playable links backed by a server-side RGS.
 </p>
 
 <p align="center">
@@ -23,16 +23,41 @@
 </p>
 
 <p align="center">
-  <img alt="Rust" src="https://img.shields.io/badge/Rust-1.90%2B-CE412B?style=flat-square&logo=rust&logoColor=white" />
-  <img alt="Tauri 2" src="https://img.shields.io/badge/Tauri-2-24C8DB?style=flat-square&logo=tauri&logoColor=white" />
-  <img alt="SvelteKit" src="https://img.shields.io/badge/SvelteKit-5-FF3E00?style=flat-square&logo=svelte&logoColor=white" />
+  <a href="https://stakedevtool.com"><b>Website</b></a> ·
+  <a href="https://app.stakedevtool.com"><b>Cloud dashboard</b></a> ·
+  <a href="https://github.com/simnJS/stake-dev-tool/releases/latest"><b>Download</b></a> ·
+  <a href="deploy/README.md"><b>Self-host</b></a> ·
+  <a href="V2.md"><b>V2 plan</b></a>
 </p>
 
 ---
 
-## Download
+## One engine, three surfaces
 
-Grab the latest build from the [Releases page](https://github.com/simnJS/stake-dev-tool/releases/latest):
+The same Rust engine (`crates/lgs`) powers everything:
+
+1. **Desktop app** — the local dev loop: front hot-reload, local math,
+   instant restarts. Free and MIT forever.
+2. **Web workbench** — the workbench served from the cloud. Math devs, QA
+   and PMs get it in a browser with zero install.
+3. **Share links** — every link is a real hosted game instance on its own
+   `<slug>.play.` subdomain, playing against a real server-side RGS. Your
+   math files never leave the server.
+
+The entire platform is open source and fully self-hostable with every
+feature included. The optional subscription at
+[stakedevtool.com](https://stakedevtool.com/pricing) sells hosting on our
+infrastructure, nothing else. See [V2.md](V2.md) for the architecture and
+roadmap.
+
+## Get started
+
+**Use the hosted cloud (zero install).** Create an account at
+[app.stakedevtool.com](https://app.stakedevtool.com) — every plan starts
+with a 14-day free trial ([pricing](https://stakedevtool.com/pricing)).
+
+**Install the desktop app.** Grab the latest build from the
+[Releases page](https://github.com/simnJS/stake-dev-tool/releases/latest):
 
 | Platform                   | File                                            | Notes                                       |
 | -------------------------- | ----------------------------------------------- | ------------------------------------------- |
@@ -42,6 +67,18 @@ Grab the latest build from the [Releases page](https://github.com/simnJS/stake-d
 | Other Linux (x64)          | `Stake-Dev-Tool-vX.Y.Z-linux-x64.AppImage`      | `chmod +x` then run                         |
 
 > Intel Macs aren't supported — open an issue if that's a blocker.
+
+**Self-host the cloud platform.** One Linux box, Docker, Postgres and
+Caddy — the same stack we run in production:
+
+```bash
+git clone https://github.com/simnJS/stake-dev-tool.git && cd stake-dev-tool/deploy
+cp .env.prod.example .env.prod && $EDITOR .env.prod
+docker compose -f docker-compose.prod.yml --env-file .env.prod up -d --build
+```
+
+Full walkthrough (DNS, TLS, backups, updates) in
+[`deploy/README.md`](deploy/README.md).
 
 ### macOS first launch
 
@@ -58,15 +95,12 @@ it, run this once in Terminal after moving the app to `/Applications`:
 xattr -dr com.apple.quarantine "/Applications/Stake Dev Tool.app"
 ```
 
-Then double-click the app as usual. If your copy is named differently
-(e.g. `Stake Dev Tool 2.app`), use that exact name in the path. Auto-updates
-applied later don't re-trigger the warning.
-
 Alternative one-time bypass: right-click the app → **Open** → confirm
-**Open** in the dialog. This only works on the very first launch;
-afterwards macOS remembers your decision.
+**Open** in the dialog.
 
 ## Features
+
+### The local loop (desktop)
 
 - **Fast Rust LGS** — drop-in `/api/rgs/<game>/wallet/…` server. Reads
   `index.json` + `lookuptable_*.csv` + `books_*.jsonl.zst` from disk, indexes
@@ -79,17 +113,37 @@ afterwards macOS remembers your decision.
   outcome, bookmark notable rounds (auto-picked min / avg / max per mode).
 - **Local HTTPS** — bundled CA installs into your user trust store. Zero browser
   warnings, no game-code hacks.
-- **Teams** — collaborative workspaces backed by a private GitHub repo. Sync
-  profiles + saved rounds + math files (chunked Release assets).
-- **Share preview link** — one click ships your game as a static page on
-  GitHub Pages. Math + game run in the browser via a WASM RGS — no server,
-  anyone with the URL can play. Three privacy modes (Sampled / Partial / Full).
 - **Profiles** — math folder + front URL + resolution snapshot saved per game,
   one-click reload.
 - **Auto-updater** — Minisign-signed releases, silent install on Windows,
   replace-in-place on macOS/Linux.
 
-## Quick start
+### The cloud platform (new in V2)
+
+- **Workspaces** — accounts, roles (owner / admin / member) and email
+  invites. Games, quotas and sync all hang off the workspace.
+- **Math revisions** — immutable snapshots with content-addressed dedup: a
+  books file unchanged between rev 41 and 42 is never re-uploaded. Every
+  push gets an automatic changelog against the previous revision (RTP per
+  mode, max win, modes added/removed).
+- **`sdt` CLI for CI** — math is generated by simulations, so the real
+  workflow is CI pushing a revision: `sdt push ./math/my-game`. Device-flow
+  login, scoped API tokens, only changed blobs upload. See
+  [`crates/cli`](crates/cli/).
+- **Team sync v2** — profiles, saved rounds and bookmarks sync through the
+  workspace, live over SSE. Replays reference `(revision, mode, eventId)`,
+  so a math push never breaks a bookmark.
+- **Share links v2** — real hosted game instances on `<slug>.play.`
+  subdomains: same-origin front + RGS, pinned or tracking revisions, expiry
+  and password options, per-link analytics (sessions, spins, observed RTP).
+- **Web workbench** — the multi-resolution test view served from the cloud,
+  no install.
+
+> Upgrading from V1: the GitHub-repo Teams and the WASM/GitHub Pages share
+> are replaced by cloud workspaces and share links v2, with a migration
+> path for existing teams. V1 keeps working in the meantime.
+
+## Quick start (desktop)
 
 1. **Launch the app** and click **Install Local CA** in the amber banner. One
    prompt on macOS, silent on Windows; on Linux the `.deb` pulls
@@ -97,9 +151,8 @@ afterwards macOS remembers your decision.
    libnss3-tools`). Firefox uses its own store — trust manually if needed.
 2. **Browse…** to your game's math folder.
 3. Enter the **Front URL** of your game's frontend (e.g. `http://localhost:5174`).
-4. **Launch test view** — a Chromium window opens on
-   `https://localhost:<port>/test/…` (default port 3001, configurable from the
-   topbar Settings) with your game at every enabled resolution.
+4. **Launch test view** — a Chromium window opens with your game at every
+   enabled resolution.
 5. **Save** the profile to reload it in one click next time.
 
 The test view sidebar covers balance, currency, language, device, social mode,
@@ -120,28 +173,32 @@ Modes are auto-detected from `index.json`.
 ## Architecture
 
 ```
-┌─ Tauri desktop app ───────────────────────────────────┐
-│  WebView2 UI (SvelteKit)  ←IPC→  Rust commands        │
-│                                    │                   │
-│                          Embedded LGS (axum + rustls)  │
-└──────────────────────────────────┬────────────────────┘
-                                   │ HTTPS (local CA)
-                                   ▼
-                       External Chromium (--max-active-webgl-contexts=64)
-                       → iframe × N (one per resolution)
+Local                                     Cloud (hosted or self-hosted)
+┌─ Tauri desktop app ─────────────┐       ┌─ Caddy (TLS, *.play wildcard) ──┐
+│  SvelteKit UI ←IPC→ Rust        │       │  crates/server (axum)           │
+│  Embedded LGS (axum + rustls)   │       │  API + auth · dashboard         │
+└───────────────┬─────────────────┘       │  multi-tenant LGS · share router│
+                │ HTTPS (local CA)        └───┬──────────┬─────────┬────────┘
+                ▼                             │          │         │
+     External Chromium                   Postgres   blob cache  object store
+     → iframe × N (one per resolution)   (sqlx)     (mmap LRU)  (fs / S3-R2)
 ```
 
-The test view is **served by the LGS** (not Tauri's custom protocol) so iframes
-load from a real browser context with full WebGL support.
+One `pnpm` workspace, one Cargo workspace:
 
-### Crates
-
-- [`crates/lgs`](crates/lgs/) — LGS library + standalone binary. Run without
-  the desktop via `cargo run -p lgs --release`.
+- [`crates/lgs`](crates/lgs/) — the engine: LGS library + standalone binary,
+  embeddable and multi-tenant.
 - [`crates/desktop`](crates/desktop/) — Tauri shell + commands.
-- [`crates/lgs-wasm`](crates/lgs-wasm/) — math engine compiled to wasm32 for
-  browser-hosted preview links.
-- [`ui/`](ui/) — SvelteKit frontend, builds to static HTML/JS.
+- [`crates/server`](crates/server/) — the cloud server: API, auth,
+  workspaces, revisions, embedded dashboard.
+- [`crates/protocol`](crates/protocol/) — shared request/response types,
+  TypeScript generated via `ts-rs`.
+- [`crates/cli`](crates/cli/) — the `sdt` CLI (`login`, `push`, `revisions`).
+- [`ui/`](ui/) — the workbench frontend (SvelteKit), served by desktop or cloud.
+- [`web/`](web/) — the cloud dashboard (SvelteKit SPA), embedded in the server.
+- [`site/`](site/) — the marketing site at
+  [stakedevtool.com](https://stakedevtool.com) (TanStack Start).
+- [`deploy/`](deploy/) — production compose file, Caddyfile, self-host docs.
 
 ## HTTP endpoints
 
@@ -196,15 +253,20 @@ git clone https://github.com/simnJS/stake-dev-tool.git
 cd stake-dev-tool
 pnpm install
 
-pnpm tauri:dev      # hot-reload dev build
-pnpm tauri:build    # release build → target/release/bundle/
+pnpm tauri:dev      # desktop app, hot reload
+pnpm tauri:build    # desktop release build → target/release/bundle/
+
+cargo run -p server            # cloud server (needs Postgres, see deploy/)
+pnpm web:dev                   # cloud dashboard
+pnpm site:dev                  # marketing site
+cargo build -p cli --release   # sdt CLI → target/release/sdt
 ```
 
 ## Auto-updater
 
-The app checks GitHub Releases on startup and shows a banner when a newer
-version is published. Updates are Minisign-verified and installed silently
-(passive NSIS on Windows, replace-in-place elsewhere).
+The desktop app checks GitHub Releases on startup and shows a banner when a
+newer version is published. Updates are Minisign-verified and installed
+silently (passive NSIS on Windows, replace-in-place elsewhere).
 
 Releases are signed via the GitHub Actions workflow on every `v*` tag — see
 [`CONTRIBUTING.md`](CONTRIBUTING.md) for the maintainer setup.
@@ -216,13 +278,18 @@ Issues, PRs, and discussions are welcome — see
 
 ## License
 
-MIT — see [LICENSE](LICENSE).
+- Desktop app and the `lgs` engine: **MIT** — see [LICENSE](LICENSE).
+- Cloud server, protocol and CLI (`crates/server`, `crates/protocol`,
+  `crates/cli`): **AGPL-3.0** with V2. Self-hosting is untouched; the
+  licence only prevents reselling the server as a closed hosted service
+  (see [V2.md](V2.md#licensing)).
 
 ---
 
 <p align="center">
   <sub>
     Built by <a href="https://github.com/simnJS">@simnJS</a> ·
+    <a href="https://stakedevtool.com">stakedevtool.com</a> ·
     <a href="CHANGELOG.md">Changelog</a> ·
     <a href="https://github.com/simnJS/stake-dev-tool/issues/new">Report a bug</a>
   </sub>
