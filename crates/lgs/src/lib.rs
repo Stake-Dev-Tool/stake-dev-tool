@@ -44,6 +44,18 @@ pub struct ServerHandle {
 static EMBEDDED_UI: include_dir::Dir<'_> =
     include_dir::include_dir!("$CARGO_MANIFEST_DIR/../../ui/build");
 
+/// Default on-disk location of the test-view build, for debug builds that
+/// serve the UI from disk: `LGS_UI_DIR` when set, else the in-repo
+/// `ui/build` (present when running from the workspace). Release builds embed
+/// the UI and ignore this entirely.
+pub fn default_ui_dir() -> Option<std::path::PathBuf> {
+    if let Some(dir) = std::env::var_os("LGS_UI_DIR") {
+        return Some(dir.into());
+    }
+    let repo = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../ui/build");
+    repo.join("index.html").exists().then_some(repo)
+}
+
 pub fn build_router(state: Arc<AppState>, ui_dir: Option<std::path::PathBuf>) -> axum::Router {
     let cors = CorsLayer::new()
         .allow_origin(AllowOrigin::mirror_request())

@@ -187,18 +187,15 @@ impl TenantRegistry {
     }
 
     /// Build an axum router scoped to one registered tenant — the exact same
-    /// routes and behavior as the single-tenant standalone server, bound to
-    /// that tenant's state. Returns `None` if the tenant is not registered.
+    /// assembly as the single-tenant standalone server (API routes AND the
+    /// embedded test-view UI fallback), bound to that tenant's state. Returns
+    /// `None` if the tenant is not registered.
     ///
     /// Host/path → tenant dispatch (e.g. `*.play.<domain>`) lives above this in
     /// the server and is intentionally out of scope here.
     pub fn router_for(&self, tenant: &TenantId) -> Option<axum::Router> {
         let state = self.get(tenant)?;
-        Some(
-            crate::routes::router(Arc::clone(&state))
-                .merge(crate::devtool::router(Arc::clone(&state)))
-                .merge(crate::replay::router(state)),
-        )
+        Some(crate::build_router(state, crate::default_ui_dir()))
     }
 }
 
