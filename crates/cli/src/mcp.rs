@@ -22,10 +22,10 @@ use std::path::Path;
 use serde_json::{Value, json};
 use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWriteExt, BufReader};
 
-use crate::api::{ApiClient, ClientError, PlatformApi, resolve_head};
+use crate::api::{ApiClient, ClientError, CreateShareRequest, PlatformApi, resolve_head};
 use crate::error::CliError;
 use crate::output::Reporter;
-use crate::{pull, push};
+use crate::{front, pull, push};
 
 /// The protocol revision we advertise. We also accept the two prior revisions
 /// on `initialize` and echo the client's when it is one we know.
@@ -123,8 +123,10 @@ fn initialize_result(msg: &Value) -> Value {
         "capabilities": { "tools": {} },
         "serverInfo": { "name": SERVER_NAME, "version": env!("CARGO_PKG_VERSION") },
         "instructions": "Stake Dev Tool platform access. Read tools cover workspaces, \
-             games, revisions, and diffs; push_math commits a revision from a local math \
-             folder (requires a push:math token); pull_revision downloads a revision to disk."
+             games, revisions, diffs, and share links; push_math commits a revision from a \
+             local math folder and push_front commits a front bundle (both require a \
+             push:math token); pull_revision downloads a revision to disk; create_share \
+             mints a share link (needs the workspace owner/admin role)."
     })
 }
 
@@ -215,6 +217,40 @@ fn tools_list() -> Value {
                         "dest": string,
                     }),
                     &["workspace", "game", "dest"],
+                ),
+            ),
+            tool(
+                "push_front",
+                "Push a local front bundle (a web build with index.html at its root) as a \
+                 new bundle (needs a push:math token).",
+                object_schema(
+                    json!({ "workspace": string, "game": string, "path": string }),
+                    &["workspace", "game", "path"],
+                ),
+            ),
+            tool(
+                "create_share",
+                "Create a share link for a game and return its full view including the URL \
+                 (needs the workspace owner/admin role).",
+                object_schema(
+                    json!({
+                        "workspace": string,
+                        "game": string,
+                        "slug": string,
+                        "revision_number": integer,
+                        "password": string,
+                        "expires_in_days": integer,
+                        "max_concurrent_sessions": integer,
+                    }),
+                    &["workspace", "game"],
+                ),
+            ),
+            tool(
+                "list_shares",
+                "List a game's share links with counters and observed RTP.",
+                object_schema(
+                    json!({ "workspace": string, "game": string }),
+                    &["workspace", "game"],
                 ),
             ),
         ]
@@ -342,6 +378,47 @@ async fn dispatch_tool<A: PlatformApi>(
                     .map_err(ToolError::from_cli)?;
             Ok(json!({ "number": number, "dest": dest, "files": files }).to_string())
         }
+        "push_front" => {
+            let ws = arg_str(args, "workspace")?;
+            let game = arg_str(args, "game")?;
+            let path = arg_str(args, "path")?;
+            let reporter = Reporter::quiet();
+            let outcome = front::push_front_folder(api, Path::new(&path), &ws, &game, &reporter)
+                .await
+                .map_err(ToolError::from_cli)?;
+            Ok(json!({
+                "id": outcome.id,
+                "uploaded": outcome.uploaded_count,
+                "deduplicated_bytes": outcome.total_bytes.saturating_sub(outcome.uploaded_bytes),
+            })
+            .to_string())
+        }
+        "create_share" => {
+            let ws = arg_str(args, "workspace")?;
+            let game = arg_str(args, "game")?;
+            let req = CreateShareRequest {
+                slug: arg_opt_str(args, "slug"),
+                revision_number: arg_opt_i64(args, "revision_number")?,
+                front_bundle_id: None,
+                password: arg_opt_str(args, "password"),
+                expires_in_days: arg_opt_i64(args, "expires_in_days")?,
+                max_concurrent_sessions: arg_opt_i64(args, "max_concurrent_sessions")?,
+            };
+            let view = api
+                .create_share(&ws, &game, &req)
+                .await
+                .map_err(ToolError::from_client)?;
+            serde_json::to_string(&view).map_err(ToolError::encode)
+        }
+        "list_shares" => {
+            let ws = arg_str(args, "workspace")?;
+            let game = arg_str(args, "game")?;
+            Ok(api
+                .list_shares(&ws, &game)
+                .await
+                .map_err(ToolError::from_client)?
+                .to_string())
+        }
         other => Err(ToolError {
             code: "unknown_tool".to_string(),
             message: format!("no such tool: {other}"),
@@ -373,6 +450,11 @@ fn arg_str(args: &Value, key: &str) -> Result<String, ToolError> {
         .and_then(|v| v.as_str())
         .map(str::to_string)
         .ok_or_else(|| ToolError::params(format!("missing or non-string argument: {key}")))
+}
+
+/// An optional string argument: absent or null → `None`, else the string.
+fn arg_opt_str(args: &Value, key: &str) -> Option<String> {
+    args.get(key).and_then(|v| v.as_str()).map(str::to_string)
 }
 
 fn arg_i64(args: &Value, key: &str) -> Result<i64, ToolError> {
@@ -458,8 +540,9 @@ impl ToolError {
 mod tests {
     use super::*;
     use crate::api::{
-        BlobUpload, ClientResult, CreateRevisionRequest, FileDownload, FileEntry, RevisionApi,
-        RevisionDetail,
+        BlobUpload, ClientResult, CreateRevisionRequest, FileDownload, FileEntry, FrontBundleApi,
+        FrontBundleCreated, RevisionApi, RevisionDetail, ShareApi, ShareLinkView,
+        UpdateShareRequest,
     };
     use crate::output::FileProgress;
 
@@ -546,6 +629,75 @@ mod tests {
         }
     }
 
+    impl FrontBundleApi for FakePlatform {
+        async fn check_front_bundle(
+            &self,
+            _ws: &str,
+            _game: &str,
+            _files: &[FileEntry],
+        ) -> ClientResult<Vec<String>> {
+            Ok(vec![])
+        }
+        async fn create_front_bundle(
+            &self,
+            _ws: &str,
+            _game: &str,
+            _files: &[FileEntry],
+        ) -> ClientResult<FrontBundleCreated> {
+            Ok(FrontBundleCreated {
+                id: "bundle-1".into(),
+                created_at: None,
+                extra: Default::default(),
+            })
+        }
+    }
+
+    fn fake_share(slug: &str) -> ShareLinkView {
+        ShareLinkView {
+            id: "11111111-1111-1111-1111-111111111111".into(),
+            slug: slug.into(),
+            url: Some(format!("https://{slug}.play.example.com/")),
+            game: Some("g".into()),
+            revision_number: None,
+            front_bundle_id: None,
+            password_protected: false,
+            expires_at: None,
+            max_concurrent_sessions: Some(25),
+            revoked_at: None,
+            created_at: None,
+            sessions_count: 0,
+            spins_count: 0,
+            total_bet: 0.0,
+            total_win: 0.0,
+            observed_rtp: None,
+            active_sessions: 0,
+            extra: Default::default(),
+        }
+    }
+
+    impl ShareApi for FakePlatform {
+        async fn create_share(
+            &self,
+            _ws: &str,
+            _game: &str,
+            _req: &CreateShareRequest,
+        ) -> ClientResult<ShareLinkView> {
+            Ok(fake_share("demo-otter-1"))
+        }
+        async fn list_shares(&self, _ws: &str, _game: &str) -> ClientResult<Value> {
+            Ok(json!({ "shares": [fake_share("demo-otter-1")] }))
+        }
+        async fn update_share(
+            &self,
+            _ws: &str,
+            _game: &str,
+            _id: &str,
+            _req: &UpdateShareRequest,
+        ) -> ClientResult<ShareLinkView> {
+            Ok(fake_share("demo-otter-1"))
+        }
+    }
+
     /// Runs `input` (already newline-delimited) through the loop, returning the
     /// parsed response lines.
     async fn drive(input: &str) -> Vec<Value> {
@@ -584,7 +736,7 @@ mod tests {
 
         // tools/list
         let tools = responses[1]["result"]["tools"].as_array().unwrap();
-        assert_eq!(tools.len(), 7);
+        assert_eq!(tools.len(), 10);
         let names: Vec<&str> = tools.iter().filter_map(|t| t["name"].as_str()).collect();
         for expected in [
             "list_workspaces",
@@ -594,6 +746,9 @@ mod tests {
             "diff_revisions",
             "push_math",
             "pull_revision",
+            "push_front",
+            "create_share",
+            "list_shares",
         ] {
             assert!(names.contains(&expected), "missing tool {expected}");
         }
@@ -622,6 +777,38 @@ mod tests {
             .unwrap();
         let parsed: Value = serde_json::from_str(text).unwrap();
         assert_eq!(parsed["number"], json!(7));
+    }
+
+    #[tokio::test]
+    async fn create_share_returns_the_link_view() {
+        let input = concat!(
+            r#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"create_share","arguments":{"workspace":"acme","game":"g"}}}"#,
+            "\n",
+        );
+        let responses = drive(input).await;
+        assert_eq!(responses.len(), 1);
+        assert_eq!(responses[0]["result"]["isError"], json!(false));
+        let text = responses[0]["result"]["content"][0]["text"]
+            .as_str()
+            .unwrap();
+        let parsed: Value = serde_json::from_str(text).unwrap();
+        assert_eq!(parsed["slug"], "demo-otter-1");
+        assert_eq!(parsed["url"], "https://demo-otter-1.play.example.com/");
+    }
+
+    #[tokio::test]
+    async fn list_shares_returns_the_shares_array() {
+        let input = concat!(
+            r#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"list_shares","arguments":{"workspace":"acme","game":"g"}}}"#,
+            "\n",
+        );
+        let responses = drive(input).await;
+        assert_eq!(responses[0]["result"]["isError"], json!(false));
+        let text = responses[0]["result"]["content"][0]["text"]
+            .as_str()
+            .unwrap();
+        let parsed: Value = serde_json::from_str(text).unwrap();
+        assert_eq!(parsed["shares"][0]["slug"], "demo-otter-1");
     }
 
     #[tokio::test]

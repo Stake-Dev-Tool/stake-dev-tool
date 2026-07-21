@@ -10,6 +10,7 @@ mod api;
 mod config;
 mod diff;
 mod error;
+mod front;
 mod games;
 mod hash;
 mod login;
@@ -18,6 +19,7 @@ mod output;
 mod pull;
 mod push;
 mod revisions;
+mod share;
 mod stats;
 mod whoami;
 mod workspaces;
@@ -59,6 +61,10 @@ enum Command {
     Games(GamesArgs),
     /// Push a math folder as a new revision, uploading only changed blobs.
     Push(PushArgs),
+    /// Push a front-bundle folder (a web build) as a new bundle.
+    PushFront(PushFrontArgs),
+    /// Manage share links: create, list, and revoke.
+    Share(ShareArgs),
     /// List a game's revisions.
     Revisions(RevisionsArgs),
     /// Show a revision's per-mode bet-stats (defaults to the head revision).
@@ -123,6 +129,113 @@ pub struct PushArgs {
     /// Print the raw revision JSON to stdout (for CI scripting).
     #[arg(long)]
     pub json: bool,
+}
+
+#[derive(Args)]
+pub struct PushFrontArgs {
+    /// Path to the front-bundle folder (must contain index.html at its root).
+    pub path: PathBuf,
+
+    /// Workspace slug.
+    #[arg(long)]
+    pub workspace: String,
+
+    /// Game slug.
+    #[arg(long)]
+    pub game: String,
+
+    /// Disable progress bars (auto-disabled when stderr is not a TTY).
+    #[arg(long)]
+    pub no_progress: bool,
+
+    /// Print a machine-readable recap JSON to stdout (for CI scripting).
+    #[arg(long)]
+    pub json: bool,
+}
+
+#[derive(Args)]
+pub struct ShareArgs {
+    #[command(subcommand)]
+    pub command: ShareCommand,
+}
+
+#[derive(Subcommand)]
+pub enum ShareCommand {
+    /// Create a share link and print its URL.
+    Create(ShareCreateArgs),
+    /// List a game's share links with counters and observed RTP.
+    List(ShareListArgs),
+    /// Revoke a share link by id or slug.
+    Revoke(ShareRevokeArgs),
+}
+
+#[derive(Args)]
+pub struct ShareCreateArgs {
+    /// Workspace slug.
+    #[arg(long)]
+    pub workspace: String,
+
+    /// Game slug.
+    #[arg(long)]
+    pub game: String,
+
+    /// Custom subdomain label (generated `word-word-nnn` when omitted).
+    #[arg(long)]
+    pub slug: Option<String>,
+
+    /// Pin a revision number (omit to track the game's latest revision).
+    #[arg(long)]
+    pub rev: Option<i64>,
+
+    /// Pin a front bundle by id (omit to serve the game's latest bundle).
+    #[arg(long)]
+    pub bundle: Option<String>,
+
+    /// Password-protect the link (visitors must enter it).
+    #[arg(long)]
+    pub password: Option<String>,
+
+    /// Expire the link this many days from now (omit for no expiry).
+    #[arg(long = "expires-days")]
+    pub expires_days: Option<i64>,
+
+    /// Concurrent visitor-session cap (omit for the server default of 25).
+    #[arg(long = "max-sessions")]
+    pub max_sessions: Option<i64>,
+
+    /// Print the raw share JSON to stdout (for CI scripting).
+    #[arg(long)]
+    pub json: bool,
+}
+
+#[derive(Args)]
+pub struct ShareListArgs {
+    /// Workspace slug.
+    #[arg(long)]
+    pub workspace: String,
+
+    /// Game slug.
+    #[arg(long)]
+    pub game: String,
+
+    /// Print the raw JSON to stdout (for CI scripting).
+    #[arg(long)]
+    pub json: bool,
+}
+
+#[derive(Args)]
+pub struct ShareRevokeArgs {
+    /// Workspace slug.
+    #[arg(long)]
+    pub workspace: String,
+
+    /// Game slug.
+    #[arg(long)]
+    pub game: String,
+
+    /// The share link to revoke, by id or slug.
+    #[arg(value_name = "SHARE")]
+    pub target: String,
 }
 
 #[derive(Args)]
@@ -282,6 +395,18 @@ async fn dispatch(cli: Cli) -> Result<(), CliError> {
         Command::Push(args) => {
             let client = authed_client(&server, token)?;
             push::run(&client, args).await
+        }
+        Command::PushFront(args) => {
+            let client = authed_client(&server, token)?;
+            front::run(&client, args).await
+        }
+        Command::Share(args) => {
+            let client = authed_client(&server, token)?;
+            match args.command {
+                ShareCommand::Create(args) => share::create(&client, args).await,
+                ShareCommand::List(args) => share::list(&client, args).await,
+                ShareCommand::Revoke(args) => share::revoke(&client, args).await,
+            }
         }
         Command::Revisions(args) => {
             let client = authed_client(&server, token)?;

@@ -6,8 +6,9 @@ pushes a revision" — `sdt push` hashes the folder, uploads only the blobs the
 server doesn't already have (content-addressed dedup), and commits the revision.
 
 Beyond `push`, the CLI reads the platform (`whoami`, `workspaces`, `games`,
-`revisions`, `stats`, `diff`), downloads a revision (`pull`), and exposes the
-whole surface to AI tools over the Model Context Protocol (`sdt mcp`).
+`revisions`, `stats`, `diff`), downloads a revision (`pull`), pushes front
+bundles and manages share links (`push-front`, `share`), and exposes the whole
+surface to AI tools over the Model Context Protocol (`sdt mcp`).
 
 ## Commands
 
@@ -18,6 +19,8 @@ whole surface to AI tools over the Model Context Protocol (`sdt mcp`).
 | `workspaces` | List the workspaces the token can access.                       |
 | `games`      | List a workspace's games (head revision + revision count).      |
 | `push`       | Push a math folder as a new revision (dedup upload).            |
+| `push-front` | Push a front-bundle folder (a web build) as a new bundle.       |
+| `share`      | Manage share links: `create`, `list`, `revoke`.                 |
 | `revisions`  | List a game's revisions.                                         |
 | `stats`      | Show a revision's per-mode bet-stats (defaults to head).        |
 | `diff`       | Diff two revisions: file summary + per-mode RTP deltas.         |
@@ -176,6 +179,118 @@ sdt pull --workspace acme --game my-game --force         # overwrite a non-empty
 `pull` refuses to write into a non-empty directory unless `--force`. The written
 directory path is printed to **stdout**.
 
+## Front bundles & share links
+
+A **share link** is a real hosted game instance on its own
+`<slug>.play.<domain>` subdomain: same-origin front bundle + server-side RGS,
+pinned or tracking a revision, with optional password and expiry. The full
+terminal/CI flow is **push math → push front → create share → send the URL**:
+
+```bash
+# 1. Push the math (the server-side RGS reads this).
+sdt push ./math/my-game --workspace acme --game my-game -m "math: v1"
+
+# 2. Push the front build (must contain index.html at its root).
+sdt push-front ./dist --workspace acme --game my-game
+
+# 3. Create a share link and grab its URL.
+sdt share create --workspace acme --game my-game --expires-days 7
+# → prints https://<slug>.play.<domain>/ to stdout; send that to the tester.
+```
+
+### `push-front`
+
+```bash
+sdt push-front <DIST_DIR> --workspace <slug> --game <slug> [--no-progress] [--json]
+```
+
+`<DIST_DIR>` must contain an `index.html` at its root and at most 2000 files.
+It reuses the exact `push` machinery — content-addressed dedup, streamed
+uploads with retries, a `missing_blobs` retry on commit — so only blobs the
+server doesn't already have are uploaded. The new **bundle id** is printed to
+**stdout**; a recap (uploaded X of Y files, bytes sent/deduplicated) goes to
+**stderr**. `--json` prints `{id, created_at, uploaded, total_files,
+uploaded_bytes, deduplicated_bytes}` to stdout instead.
+
+A `push:math`-scoped token is sufficient for `push-front` (same scope as `push`).
+
+### `share create`
+
+```bash
+sdt share create --workspace <slug> --game <slug> [options]
+```
+
+| Flag                | Purpose                                                       |
+| ------------------- | ------------------------------------------------------------- |
+| `--slug <label>`    | Custom subdomain label (generated `word-word-nnn` otherwise). |
+| `--rev <n>`         | Pin a revision number (omit to track the latest).             |
+| `--bundle <uuid>`   | Pin a front bundle by id (omit to serve the latest).          |
+| `--password <pw>`   | Password-protect the link.                                    |
+| `--expires-days <n>`| Expire the link N days from now (omit for no expiry).         |
+| `--max-sessions <n>`| Concurrent visitor-session cap (server default 25).           |
+| `--json`            | Print the raw share JSON to stdout.                           |
+
+The link **URL** is printed to **stdout** (the whole point — send it to a
+tester); the settings recap goes to stderr. When the instance has no play
+domain configured (`SERVER_PLAY_DOMAIN` unset) there is no public URL: the
+command says so and prints the slug to stdout as the handle instead.
+
+### `share list`
+
+```bash
+sdt share list --workspace <slug> --game <slug> [--json]
+```
+
+A table (stderr) of slug, URL, revision (`n` or `latest`), sessions, spins,
+observed RTP (`total_win / total_bet`, "-" until a bet lands), live sessions,
+and status (`ok` / `revoked` / `expired`). `--json` echoes the raw server JSON.
+
+### `share revoke`
+
+```bash
+sdt share revoke --workspace <slug> --game <slug> <share-id-or-slug>
+```
+
+Resolves the link by id first, then by slug, and revokes it (a revoked link
+serves a branded "unavailable" page). The revoked link's id is printed to
+stdout.
+
+> Share management (`share create` / `revoke`) requires the workspace **owner or
+> admin** role — unlike `push-front`, a `push:math`-scoped token is not enough. A
+> browser session (`sdt login`) or a full-scope token held by an owner/admin
+> works.
+
+### CI snippet (deploy a preview link on every push)
+
+```yaml
+name: Deploy share preview
+on:
+  push:
+    branches: [main]
+
+jobs:
+  preview:
+    runs-on: ubuntu-latest
+    env:
+      SDT_SERVER: https://cloud.example.com
+      SDT_TOKEN: ${{ secrets.SDT_TOKEN }}   # owner/admin token for `share create`
+    steps:
+      - uses: actions/checkout@v4
+
+      # …generate ./math/my-game (simulations) and build the front into ./dist…
+
+      - name: Install sdt
+        run: cargo install --path crates/cli
+
+      - name: Push math + front, then mint a 7-day share link
+        run: |
+          sdt push ./math/my-game --workspace acme --game my-game \
+            --message "math: ${{ github.sha }}" --no-progress
+          sdt push-front ./dist --workspace acme --game my-game --no-progress
+          URL=$(sdt share create --workspace acme --game my-game --expires-days 7)
+          echo "Preview: $URL" >> "$GITHUB_STEP_SUMMARY"
+```
+
 ## MCP server (`sdt mcp`)
 
 `sdt mcp` speaks the [Model Context Protocol](https://modelcontextprotocol.io)
@@ -202,11 +317,17 @@ Tools exposed (each returns compact JSON text content; a failure comes back as
 | `diff_revisions` | `{workspace, game, after, before}`                |
 | `push_math`      | `{workspace, game, path, message, parent_number?}`|
 | `pull_revision`  | `{workspace, game, number?, dest}`                |
+| `push_front`     | `{workspace, game, path}`                          |
+| `create_share`   | `{workspace, game, slug?, revision_number?, password?, expires_in_days?, max_concurrent_sessions?}` |
+| `list_shares`    | `{workspace, game}`                                |
 
 `push_math` runs the same push orchestration as `sdt push` (dedup upload,
 `missing_blobs` retry, `stale_parent` abort) and returns
 `{number, uploaded, deduplicated_bytes}`; `pull_revision` downloads like
-`sdt pull` and returns the file list.
+`sdt pull` and returns the file list. `push_front` pushes a front bundle
+(needs a `push:math` token) and returns `{id, uploaded, deduplicated_bytes}`;
+`create_share` returns the full share-link view (needs owner/admin); and
+`list_shares` returns the links with counters.
 
 ## CI usage (GitHub Actions)
 

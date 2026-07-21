@@ -309,6 +309,106 @@ pub struct BlobUpload {
 }
 
 // ---------------------------------------------------------------------------
+// Front bundles & share links (M5)
+// ---------------------------------------------------------------------------
+
+/// Commit body for `POST …/front-bundles` (and its `…/check` sibling): the full
+/// manifest of the web build. Same `{files}` shape as a math `check`.
+#[derive(Serialize)]
+struct BundleManifest<'a> {
+    files: &'a [FileEntry],
+}
+
+/// `201` response after a front bundle commits. Lenient: unknown fields land in
+/// `extra` so `--json` stays faithful.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FrontBundleCreated {
+    pub id: String,
+    #[serde(default)]
+    pub created_at: Option<String>,
+    #[serde(flatten)]
+    pub extra: BTreeMap<String, serde_json::Value>,
+}
+
+/// Body of `POST …/shares`. Every field is optional; omitted fields are dropped
+/// from the JSON so the server applies its documented defaults (generated slug,
+/// latest revision, latest bundle, public, never expires, 25 sessions).
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct CreateShareRequest {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub slug: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub revision_number: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub front_bundle_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub password: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub expires_in_days: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_concurrent_sessions: Option<i64>,
+}
+
+/// Body of `PATCH …/shares/:id`. The CLI only drives `revoked` (the `revoke`
+/// command); other fields are omitted so the server leaves them unchanged.
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct UpdateShareRequest {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub revoked: Option<bool>,
+}
+
+/// A share link as returned by create/list. Lenient mirror of the server's
+/// `protocol::shares::ShareLinkView`; unknown fields land in `extra`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ShareLinkView {
+    pub id: String,
+    pub slug: String,
+    /// Full `https://<slug>.<play_domain>/` URL, or `null` on an instance with
+    /// no `SERVER_PLAY_DOMAIN` configured.
+    #[serde(default)]
+    pub url: Option<String>,
+    #[serde(default)]
+    pub game: Option<String>,
+    /// `null` = tracks the latest revision.
+    #[serde(default)]
+    pub revision_number: Option<i64>,
+    /// `null` = serves the latest bundle.
+    #[serde(default)]
+    pub front_bundle_id: Option<String>,
+    #[serde(default)]
+    pub password_protected: bool,
+    #[serde(default)]
+    pub expires_at: Option<String>,
+    #[serde(default)]
+    pub max_concurrent_sessions: Option<i64>,
+    #[serde(default)]
+    pub revoked_at: Option<String>,
+    #[serde(default)]
+    pub created_at: Option<String>,
+    #[serde(default)]
+    pub sessions_count: i64,
+    #[serde(default)]
+    pub spins_count: i64,
+    #[serde(default)]
+    pub total_bet: f64,
+    #[serde(default)]
+    pub total_win: f64,
+    /// `total_win / total_bet` when any bet has landed, else `null`.
+    #[serde(default)]
+    pub observed_rtp: Option<f64>,
+    #[serde(default)]
+    pub active_sessions: i64,
+    #[serde(flatten)]
+    pub extra: BTreeMap<String, serde_json::Value>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct ShareLinksResponse {
+    #[serde(default)]
+    pub shares: Vec<ShareLinkView>,
+}
+
+// ---------------------------------------------------------------------------
 // The trait push orchestration is written against
 // ---------------------------------------------------------------------------
 
@@ -346,11 +446,58 @@ pub trait RevisionApi {
     ) -> impl std::future::Future<Output = ClientResult<RevisionDetail>>;
 }
 
+/// The front-bundle operations `push-front` needs. A supertrait of
+/// [`RevisionApi`] so the shared blob-upload pipeline (`upload_blob` + retries)
+/// is reused verbatim, while `check`/`commit` target the front-bundle routes.
+/// Kept a trait so front-push orchestration is testable offline like `push`.
+pub trait FrontBundleApi: RevisionApi {
+    fn check_front_bundle(
+        &self,
+        ws: &str,
+        game: &str,
+        files: &[FileEntry],
+    ) -> impl std::future::Future<Output = ClientResult<Vec<String>>>;
+
+    fn create_front_bundle(
+        &self,
+        ws: &str,
+        game: &str,
+        files: &[FileEntry],
+    ) -> impl std::future::Future<Output = ClientResult<FrontBundleCreated>>;
+}
+
+/// The share-link CRUD the `share` commands and MCP tools drive. Separate from
+/// [`RevisionApi`] (no blob machinery) so it can be faked on its own.
+pub trait ShareApi {
+    fn create_share(
+        &self,
+        ws: &str,
+        game: &str,
+        req: &CreateShareRequest,
+    ) -> impl std::future::Future<Output = ClientResult<ShareLinkView>>;
+
+    /// `GET …/shares` — raw JSON, echoed faithfully by `--json`.
+    fn list_shares(
+        &self,
+        ws: &str,
+        game: &str,
+    ) -> impl std::future::Future<Output = ClientResult<serde_json::Value>>;
+
+    fn update_share(
+        &self,
+        ws: &str,
+        game: &str,
+        id: &str,
+        req: &UpdateShareRequest,
+    ) -> impl std::future::Future<Output = ClientResult<ShareLinkView>>;
+}
+
 /// The full platform surface the `mcp` server and the read commands drive.
-/// A supertrait of [`RevisionApi`] so `push` orchestration keeps working
-/// through it, while the extra read/download operations let the whole MCP tool
-/// dispatch be exercised offline against a single fake implementation.
-pub trait PlatformApi: RevisionApi {
+/// A supertrait of [`RevisionApi`] (via [`FrontBundleApi`]) so `push`
+/// orchestration keeps working through it, while the extra read/download and
+/// front-bundle/share operations let the whole MCP tool dispatch be exercised
+/// offline against a single fake implementation.
+pub trait PlatformApi: FrontBundleApi + ShareApi {
     /// `GET /api/workspaces` — raw JSON, echoed faithfully.
     fn list_workspaces(&self)
     -> impl std::future::Future<Output = ClientResult<serde_json::Value>>;
@@ -670,6 +817,98 @@ impl PlatformApi for ApiClient {
             )));
         }
         Ok(())
+    }
+}
+
+impl FrontBundleApi for ApiClient {
+    async fn check_front_bundle(
+        &self,
+        ws: &str,
+        game: &str,
+        files: &[FileEntry],
+    ) -> ClientResult<Vec<String>> {
+        let resp = self
+            .authed(self.http.post(self.url(&format!(
+                "/api/workspaces/{ws}/games/{game}/front-bundles/check"
+            ))))
+            .json(&CheckRequest { files })
+            .send()
+            .await
+            .map_err(map_transport)?;
+        let out: CheckResponse = read_body_typed(resp).await?;
+        Ok(out.missing)
+    }
+
+    async fn create_front_bundle(
+        &self,
+        ws: &str,
+        game: &str,
+        files: &[FileEntry],
+    ) -> ClientResult<FrontBundleCreated> {
+        let resp = self
+            .authed(
+                self.http
+                    .post(self.url(&format!("/api/workspaces/{ws}/games/{game}/front-bundles"))),
+            )
+            .json(&BundleManifest { files })
+            .send()
+            .await
+            .map_err(map_transport)?;
+        // A 409 comes back as ClientError::Api with code == "missing_blobs" and
+        // its `missing` list populated — the front-push orchestrator branches on
+        // that exactly as the math push does.
+        read_body_typed(resp).await
+    }
+}
+
+impl ShareApi for ApiClient {
+    async fn create_share(
+        &self,
+        ws: &str,
+        game: &str,
+        req: &CreateShareRequest,
+    ) -> ClientResult<ShareLinkView> {
+        let resp = self
+            .authed(
+                self.http
+                    .post(self.url(&format!("/api/workspaces/{ws}/games/{game}/shares"))),
+            )
+            .json(req)
+            .send()
+            .await
+            .map_err(map_transport)?;
+        read_body_typed(resp).await
+    }
+
+    async fn list_shares(&self, ws: &str, game: &str) -> ClientResult<serde_json::Value> {
+        let resp = self
+            .authed(
+                self.http
+                    .get(self.url(&format!("/api/workspaces/{ws}/games/{game}/shares"))),
+            )
+            .send()
+            .await
+            .map_err(map_transport)?;
+        read_body_typed(resp).await
+    }
+
+    async fn update_share(
+        &self,
+        ws: &str,
+        game: &str,
+        id: &str,
+        req: &UpdateShareRequest,
+    ) -> ClientResult<ShareLinkView> {
+        let resp = self
+            .authed(
+                self.http
+                    .patch(self.url(&format!("/api/workspaces/{ws}/games/{game}/shares/{id}"))),
+            )
+            .json(req)
+            .send()
+            .await
+            .map_err(map_transport)?;
+        read_body_typed(resp).await
     }
 }
 

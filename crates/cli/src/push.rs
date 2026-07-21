@@ -233,8 +233,9 @@ async fn execute_push<C: RevisionApi>(
     })
 }
 
-/// Picks the hashed files whose hash appears in `hashes`.
-fn select_uploads(hashed: &[HashedFile], hashes: &[String]) -> Vec<BlobUpload> {
+/// Picks the hashed files whose hash appears in `hashes`. Shared with the
+/// front-bundle push (`front`), which selects blobs to upload the same way.
+pub(crate) fn select_uploads(hashed: &[HashedFile], hashes: &[String]) -> Vec<BlobUpload> {
     let wanted: HashSet<&str> = hashes.iter().map(String::as_str).collect();
     hashed
         .iter()
@@ -249,8 +250,9 @@ fn select_uploads(hashed: &[HashedFile], hashes: &[String]) -> Vec<BlobUpload> {
 }
 
 /// Uploads blobs with bounded concurrency, returning the total bytes sent.
-/// The first failure (after per-blob retries) aborts the whole push.
-async fn upload_missing<C: RevisionApi>(
+/// The first failure (after per-blob retries) aborts the whole push. Shared by
+/// the math push and the front-bundle push (both hit the same blob route).
+pub(crate) async fn upload_missing<C: RevisionApi>(
     client: &C,
     ws: &str,
     game: &str,
@@ -336,8 +338,12 @@ pub(crate) async fn wait_for_stats(
     }
 }
 
-/// Hashes every manifest entry, showing a spinner while it runs.
-fn hash_all(entries: Vec<ManifestEntry>, reporter: &Reporter) -> Result<Vec<HashedFile>, CliError> {
+/// Hashes every manifest entry, showing a spinner while it runs. Shared with
+/// the front-bundle push (`front`), which hashes its files identically.
+pub(crate) fn hash_all(
+    entries: Vec<ManifestEntry>,
+    reporter: &Reporter,
+) -> Result<Vec<HashedFile>, CliError> {
     let spinner = reporter.spinner(&format!("hashing {} file(s)", entries.len()));
     let mut hashed = Vec::with_capacity(entries.len());
     for entry in entries {
