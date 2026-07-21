@@ -153,6 +153,105 @@ export interface RevisionStats {
   status: StatsStatus;
   error: string | null;
   modes: StatsMode[];
+  /**
+   * Stake-Engine-style compliance analysis (M8). `null` on older revisions that
+   * predate the analyzer — the Math report shows a "push a new revision" hint.
+   */
+  analysis: RevisionAnalysis | null;
+}
+
+// ---- Compliance analysis (M8: Math report) ---------------------------------
+// Every numeric field is modelled as `number | null` and normalized through
+// `numOrNull`: a partial payload from the analyzer never throws and any missing
+// figure renders as an em-dash rather than a misleading zero.
+
+export type Volatility = 'low' | 'medium' | 'high';
+
+/**
+ * One bet-level compliance constraint, evaluated against both the 2★ and 3★
+ * reference bets. Single-value metrics carry `value` (compared to limit2/limit3
+ * for each column); per-reference-bet metrics (max_exposure, max_bet_cost) carry
+ * `value2`/`value3`. Range metrics (volatility) carry a `limitX_low` low bound.
+ */
+export interface ConstraintRow {
+  key: string;
+  label: string;
+  value: number | null;
+  value2: number | null;
+  value3: number | null;
+  limit2_low: number | null;
+  limit2: number | null;
+  limit3_low: number | null;
+  limit3: number | null;
+  pass2: boolean;
+  pass3: boolean;
+}
+
+/** One bucket of a mode's hit-rate distribution. `to` null = open-ended (∞). */
+export interface DistBucket {
+  from: number | null;
+  to: number | null;
+  count: number | null;
+  probability: number | null;
+  effective_hit_rate: number | null;
+  rtp_contribution: number | null;
+}
+
+/** One pass/fail compliance check for a mode (label · expected → result). */
+export interface ComplianceCheck {
+  check: string;
+  label: string;
+  expected: string;
+  result: string;
+  pass: boolean;
+}
+
+/**
+ * Full per-mode analysis. rtp / etl / *_prob fields are fractions (render ×100);
+ * max_win is a bet multiplier; streaks are spin counts; max_win_odds is the
+ * "1 in N" denominator.
+ */
+export interface ModeAnalysis {
+  mode: string;
+  cost: number | null;
+  rtp: number | null;
+  std_dev: number | null;
+  volatility: Volatility | null;
+  max_win: number | null;
+  min_win: number | null;
+  zero_prob: number | null;
+  sub_bet_prob: number | null;
+  win_prob: number | null;
+  break_even_miss_prob: number | null;
+  hit_rate: number | null;
+  unique_payouts: number | null;
+  entries: number | null;
+  max_win_odds: number | null;
+  avg_spins_any_win: number | null;
+  worst_zero_streak: number | null;
+  avg_spins_profit: number | null;
+  worst_loss_streak: number | null;
+  tail_prob_5000: number | null;
+  tail_prob_10000: number | null;
+  cvar: number | null;
+  etl_40: number | null;
+  etl_10000: number | null;
+  etl_sum: number | null;
+  distribution: DistBucket[];
+  compliance: ComplianceCheck[];
+}
+
+/** Per-revision compliance verdict, constraints table and per-mode analyses. */
+export interface RevisionAnalysis {
+  two_star_compliant: boolean;
+  three_star_compliant: boolean;
+  stars: 0 | 2 | 3;
+  cross_mode_rtp_variance: number | null;
+  cross_mode_rtp_pass: boolean;
+  reference_max_bet_2: number | null;
+  reference_max_bet_3: number | null;
+  constraints: ConstraintRow[];
+  modes: ModeAnalysis[];
 }
 
 export interface RevisionDetail {
@@ -542,7 +641,109 @@ function normalizeRevisionStats(raw: unknown): RevisionStats | null {
   return {
     status: asStatsStatus(s.status) ?? 'pending',
     error: strOrNull(s.error),
-    modes
+    modes,
+    analysis: normalizeRevisionAnalysis(s.analysis)
+  };
+}
+
+// ---- Compliance analysis (M8) ----------------------------------------------
+
+function asVolatility(v: unknown): Volatility | null {
+  return v === 'low' || v === 'medium' || v === 'high' ? v : null;
+}
+
+/** Coerce to the star tier the analyzer emits; anything else is 0 (non-compliant). */
+function asStars(v: unknown): 0 | 2 | 3 {
+  const n = num(v);
+  return n === 2 ? 2 : n === 3 ? 3 : 0;
+}
+
+function normalizeConstraintRow(raw: unknown): ConstraintRow {
+  const c = (raw ?? {}) as Record<string, unknown>;
+  return {
+    key: String(c.key ?? ''),
+    label: String(c.label ?? c.key ?? ''),
+    value: numOrNull(c.value),
+    value2: numOrNull(c.value2),
+    value3: numOrNull(c.value3),
+    limit2_low: numOrNull(c.limit2_low),
+    limit2: numOrNull(c.limit2),
+    limit3_low: numOrNull(c.limit3_low),
+    limit3: numOrNull(c.limit3),
+    pass2: Boolean(c.pass2),
+    pass3: Boolean(c.pass3)
+  };
+}
+
+function normalizeDistBucket(raw: unknown): DistBucket {
+  const b = (raw ?? {}) as Record<string, unknown>;
+  return {
+    from: numOrNull(b.from),
+    to: numOrNull(b.to),
+    count: numOrNull(b.count),
+    probability: numOrNull(b.probability),
+    effective_hit_rate: numOrNull(b.effective_hit_rate),
+    rtp_contribution: numOrNull(b.rtp_contribution)
+  };
+}
+
+function normalizeComplianceCheck(raw: unknown): ComplianceCheck {
+  const c = (raw ?? {}) as Record<string, unknown>;
+  return {
+    check: String(c.check ?? ''),
+    label: String(c.label ?? c.check ?? ''),
+    expected: String(c.expected ?? ''),
+    result: String(c.result ?? ''),
+    pass: Boolean(c.pass)
+  };
+}
+
+function normalizeModeAnalysis(raw: unknown): ModeAnalysis {
+  const m = (raw ?? {}) as Record<string, unknown>;
+  return {
+    mode: String(m.mode ?? ''),
+    cost: numOrNull(m.cost),
+    rtp: numOrNull(m.rtp),
+    std_dev: numOrNull(m.std_dev),
+    volatility: asVolatility(m.volatility),
+    max_win: numOrNull(m.max_win),
+    min_win: numOrNull(m.min_win),
+    zero_prob: numOrNull(m.zero_prob),
+    sub_bet_prob: numOrNull(m.sub_bet_prob),
+    win_prob: numOrNull(m.win_prob),
+    break_even_miss_prob: numOrNull(m.break_even_miss_prob),
+    hit_rate: numOrNull(m.hit_rate),
+    unique_payouts: numOrNull(m.unique_payouts),
+    entries: numOrNull(m.entries),
+    max_win_odds: numOrNull(m.max_win_odds),
+    avg_spins_any_win: numOrNull(m.avg_spins_any_win),
+    worst_zero_streak: numOrNull(m.worst_zero_streak),
+    avg_spins_profit: numOrNull(m.avg_spins_profit),
+    worst_loss_streak: numOrNull(m.worst_loss_streak),
+    tail_prob_5000: numOrNull(m.tail_prob_5000),
+    tail_prob_10000: numOrNull(m.tail_prob_10000),
+    cvar: numOrNull(m.cvar),
+    etl_40: numOrNull(m.etl_40),
+    etl_10000: numOrNull(m.etl_10000),
+    etl_sum: numOrNull(m.etl_sum),
+    distribution: Array.isArray(m.distribution) ? m.distribution.map(normalizeDistBucket) : [],
+    compliance: Array.isArray(m.compliance) ? m.compliance.map(normalizeComplianceCheck) : []
+  };
+}
+
+function normalizeRevisionAnalysis(raw: unknown): RevisionAnalysis | null {
+  if (raw == null) return null;
+  const a = raw as Record<string, unknown>;
+  return {
+    two_star_compliant: Boolean(a.two_star_compliant),
+    three_star_compliant: Boolean(a.three_star_compliant),
+    stars: asStars(a.stars),
+    cross_mode_rtp_variance: numOrNull(a.cross_mode_rtp_variance),
+    cross_mode_rtp_pass: Boolean(a.cross_mode_rtp_pass),
+    reference_max_bet_2: numOrNull(a.reference_max_bet_2),
+    reference_max_bet_3: numOrNull(a.reference_max_bet_3),
+    constraints: Array.isArray(a.constraints) ? a.constraints.map(normalizeConstraintRow) : [],
+    modes: Array.isArray(a.modes) ? a.modes.map(normalizeModeAnalysis) : []
   };
 }
 

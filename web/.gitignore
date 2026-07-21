@@ -7,3 +7,8 @@ node_modules
 !.env.example
 vite.config.js.timestamp-*
 vite.config.ts.timestamp-*
+
+# The repo-root `.gitignore` has an un-anchored `math/` rule (for user-provided
+# math data). It also swallows the SvelteKit "Math report" route directory, so
+# re-include any math/ folder under the routes tree as tracked source.
+!src/routes/**/math/

@@ -230,3 +230,48 @@ against the generated `crates/protocol` bindings (`ShareLinkView`,
 `CreateShareRequest`, `UpdateShareRequest`, `CreateFrontBundleRequest`,
 `FrontBundleCreated`, `ShareLinksResponse`). `isValidShareSlug` mirrors the
 server's subdomain-label rule.
+
+## Math report (M8)
+
+A **Stake-Engine-style compliance report** per revision — the 2★/3★ bet-level
+verdicts, per-mode metrics, and the hit-rate distribution — at
+`/w/[slug]/g/[game]/r/[number]/math`. It is reached from a **Math report** button
+in the revision page header (next to _Open test view_) and is auth-guarded by the
+root layout like every sibling route.
+
+The page re-uses the revision detail endpoint (`api.games.revision`) and reads the
+new **`stats.analysis`** object (`RevisionAnalysis`). While stats are `pending` it
+**polls every 3s** (an `$effect` teardown stops on `ok`/`error` and on unmount), so
+the report materialises the moment the analyzer finishes. Its sections:
+
+1. **Header** — game · rev · **2★ / 3★ Compliant/Non-compliant** verdict badges
+   (emerald/red), the awarded-tier chip, and the cross-mode RTP consistency line.
+2. **Overall bet level compliance** — one row per `ConstraintRow`: label + a
+   concise "what it is" helper line (`CONSTRAINT_HELP` keyed by `key`), and a
+   **2 Star** / **3 Star** column each showing `value / limit` (or `low – high`
+   for range metrics; `value2`/`value3` for per-reference-bet metrics) over a
+   subtle progress bar (amber ≥ 80%, red over the cap or on a fail) with a
+   pass/fail tint. The reference max bets are noted under the table.
+3. **Game modes** grid — a card per mode (name, `cost`× badge, volatility badge
+   low=sky/medium=amber/high=red, Compliant/Issues, and the RTP / Hit / Max / B-E
+   quartet). Clicking a card selects it for the detail sections below.
+4. **Detailed metrics** for the selected mode (tab row + clickable cards, default
+   the cost-1 mode): std dev, entries, zero/sub-bet rate, mean (`rtp` as a
+   `0.96x` multiplier), min/max win, max-win odds, unique payouts; a **stacked
+   outcome bar** (Dead / Sub-bet / Win with % legend); and four **streak** tiles
+   with one-line explanations.
+5. **Compliance checklist** — each `ComplianceCheck` as _label · Expected → Result_
+   with a ✓/✗.
+6. **Hit-rate distribution** — Range (`( from, to )` / `( 5000, ∞ )`) · Count ·
+   Effective hit-rate · RTP contribution %, right-aligned mono numbers with a
+   subtle emerald row tint weighted by RTP contribution.
+
+**Defensive by construction.** Every numeric analysis field is typed
+`number | null` and normalized through `numOrNull` (`normalizeRevisionAnalysis`
+and friends in `api.ts`), so a partial payload from the analyzer never throws and
+any missing figure renders as an em-dash rather than a misleading zero. When
+`stats.analysis` is `null` (older revisions predating the analyzer) the page shows
+a calm "push a new revision to recompute" hint; `pending` shows the polling
+spinner and `error` surfaces the server message. New presentation helpers live in
+`format.ts`: `pct(frac, dp)`, `formatOdds` ("1 in 6.80M" / "1 in 1,470"),
+`formatSpins`, `formatMetric`, and `formatCount`.

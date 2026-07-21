@@ -93,6 +93,48 @@ export function formatCost(cost: number | null | undefined): string {
   return cost.toLocaleString(undefined, { maximumFractionDigits: 2 });
 }
 
+// --- Compliance / math-report helpers (M8) ---------------------------------
+
+/** Fraction → percent with `dp` decimals (default 2): 0.0123 → "1.23%". Null-safe. */
+export function pct(frac: number | null | undefined, dp = 2): string {
+  if (frac == null || !Number.isFinite(frac)) return '—';
+  return `${(frac * 100).toFixed(dp)}%`;
+}
+
+/**
+ * Odds denominator N → "1 in N". Values ≥ 1e6 collapse to millions with 2dp
+ * ("1 in 6.80M"); smaller values are rounded and grouped ("1 in 1,470").
+ * Null / non-positive input is an em-dash.
+ */
+export function formatOdds(n: number | null | undefined): string {
+  if (n == null || !Number.isFinite(n) || n <= 0) return '—';
+  if (n >= 1e6) {
+    return `1 in ${(n / 1e6).toLocaleString(undefined, {
+      minimumFractionDigits: 2,
+      maximumFractionDigits: 2
+    })}M`;
+  }
+  return `1 in ${Math.round(n).toLocaleString()}`;
+}
+
+/** Spin count (avg between events, or a worst-case streak) → grouped, up to 1dp. */
+export function formatSpins(n: number | null | undefined): string {
+  if (n == null || !Number.isFinite(n)) return '—';
+  return n.toLocaleString(undefined, { maximumFractionDigits: 1 });
+}
+
+/** Grouped number, up to `dp` decimals with trailing zeros trimmed: 6750 → "6,750". */
+export function formatMetric(n: number | null | undefined, dp = 2): string {
+  if (n == null || !Number.isFinite(n)) return '—';
+  return n.toLocaleString(undefined, { maximumFractionDigits: dp });
+}
+
+/** Grouped integer for counts (entries, unique payouts, bucket counts). Null-safe. */
+export function formatCount(n: number | null | undefined): string {
+  if (n == null || !Number.isFinite(n)) return '—';
+  return Math.round(n).toLocaleString();
+}
+
 /** Sanitize a `?next=` redirect target: only allow internal absolute paths. */
 export function safeNext(next: string | null | undefined, fallback = '/'): string {
   if (!next) return fallback;

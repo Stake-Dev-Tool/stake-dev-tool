@@ -132,6 +132,9 @@
           </div>
         </div>
         <div class="flex flex-shrink-0 items-center gap-2">
+          <Button href={`/w/${slug}/g/${game}/r/${revNum}/math`} variant="outline" size="sm">
+            Math report
+          </Button>
           <Button variant="outline" size="sm" onclick={() => (testOpen = true)}>
             Open test view
           </Button>
