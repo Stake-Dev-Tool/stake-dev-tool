@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { flagUrl } from '$lib/api';
+  import { flagUrl } from '$lib/api.http';
 
   type Item = {
     code: string;
