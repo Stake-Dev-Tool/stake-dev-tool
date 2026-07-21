@@ -257,15 +257,16 @@
       {#if analysis}
         <div class="mt-4 flex flex-wrap items-center gap-2">
           <Badge tone={analysis.two_star_compliant ? 'accent' : 'danger'}>
-            2★ {analysis.two_star_compliant ? 'Compliant' : 'Non-compliant'}
+            2★ {analysis.two_star_compliant ? 'Within limits' : 'Over limits'}
           </Badge>
           <Badge tone={analysis.three_star_compliant ? 'accent' : 'danger'}>
-            3★ {analysis.three_star_compliant ? 'Compliant' : 'Non-compliant'}
-          </Badge>
-          <Badge tone={analysis.stars === 0 ? 'neutral' : 'accent'}>
-            {analysis.stars === 0 ? 'Not rated' : `${analysis.stars}★ awarded`}
+            3★ {analysis.three_star_compliant ? 'Within limits' : 'Over limits'}
           </Badge>
         </div>
+        <p class="mt-2 text-xs text-faint">
+          Preflight estimate against the published bet-level limits — the actual star rating is
+          decided by Stake Engine, not by this tool.
+        </p>
         <p class="mt-3 text-sm text-muted">
           Cross-mode RTP consistency:
           <span class={analysis.cross_mode_rtp_pass ? 'font-medium text-accent' : 'font-medium text-danger'}>
