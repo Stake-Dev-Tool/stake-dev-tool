@@ -17,10 +17,6 @@ export const Route = createFileRoute('/features')({
 
 const FEATURES = [
   {
-    title: 'Fast Rust LGS',
-    desc: 'A drop-in /api/rgs/<game>/wallet server. Reads index.json, lookup tables and books_*.jsonl.zst straight from disk. Books are indexed once per mode, with weighted RNG via binary search.',
-  },
-  {
     title: 'Multi-resolution test view',
     desc: 'Run your game side by side at seven built-in resolutions plus any custom size. Every frame is its own session, so QA sees exactly what players will.',
   },
@@ -67,9 +63,37 @@ function FeaturesPage() {
         spinning.
       </p>
 
-      <div className="mt-14 grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
+      {/* Lead: the LGS is the product's core, shown as the exchange it actually is */}
+      <div className="card mt-14 grid gap-8 p-7 lg:grid-cols-[1fr_1.25fr] lg:items-center lg:p-9">
+        <div>
+          <h2 className="m-0 text-xl font-semibold">Fast Rust LGS</h2>
+          <p className="mt-3 mb-0 text-sm leading-relaxed text-moss">
+            A drop-in /api/rgs/&lt;game&gt;/wallet server. It reads index.json,
+            lookup tables and books_*.jsonl.zst straight from disk. Books are
+            indexed once per mode, with weighted RNG via binary search, so a
+            wallet call costs microseconds, not a round-trip.
+          </p>
+        </div>
+        <div className="overflow-x-auto rounded-lg border border-line bg-pit/70 p-5">
+          <p className="m-0 font-mono text-[0.72rem] leading-loose whitespace-pre text-dim">
+            <span className="text-mint">lgs</span>
+            <span className="text-faint"> · serving my-game · https://localhost</span>
+            {'\n'}
+            POST /wallet/authenticate  <span className="text-mint">200</span>
+            {'\n'}
+            POST /wallet/play          <span className="text-mint">200</span>
+            <span className="text-faint"> · 90µs</span>
+            {'\n'}
+            {'     { mode: "base", eventId: 2041, win: '}
+            <span className="text-amber">25.00</span>
+            {' }'}
+          </p>
+        </div>
+      </div>
+
+      <div className="mt-4 grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
         {FEATURES.map((feature) => (
-          <article key={feature.title} className="card card-hover p-6">
+          <article key={feature.title} className="card p-6">
             <h2 className="m-0 text-[1.02rem] font-semibold">{feature.title}</h2>
             <p className="mt-2.5 mb-0 text-sm leading-relaxed text-moss">{feature.desc}</p>
           </article>

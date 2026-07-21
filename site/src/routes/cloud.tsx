@@ -17,14 +17,17 @@ export const Route = createFileRoute('/cloud')({
 
 const SURFACES = [
   {
+    tag: 'your machine',
     title: 'Desktop app',
     desc: 'The local dev loop stays king: front hot-reload, local math, instant restarts. Free and MIT forever.',
   },
   {
+    tag: 'app.yourdomain.com',
     title: 'Web workbench',
     desc: 'The same test view, served from the cloud. Math devs, QA and PMs get the full workbench with zero install.',
   },
   {
+    tag: '*.play.yourdomain.com',
     title: 'Share links',
     desc: 'Each link is a real hosted game instance on its own subdomain, not a static export. Testers open the URL and play against a real server-side RGS.',
   },
@@ -70,14 +73,31 @@ function CloudPage() {
         behind every share link.
       </p>
 
-      <div className="mt-14 grid gap-4 sm:grid-cols-3">
-        {SURFACES.map((surface, i) => (
-          <article key={surface.title} className="card p-6">
-            <span className="font-mono text-xs text-mint">{`0${i + 1}`}</span>
-            <h2 className="mt-2 mb-0 text-[1.02rem] font-semibold">{surface.title}</h2>
-            <p className="mt-2.5 mb-0 text-sm leading-relaxed text-moss">{surface.desc}</p>
-          </article>
-        ))}
+      {/* One engine feeding three surfaces — drawn as the tree it is */}
+      <div className="mt-14">
+        <div className="mx-auto w-fit rounded-full border border-line2 bg-panel px-4 py-2 font-mono text-[0.7rem] tracking-[0.1em] text-mint">
+          crates/lgs · one Rust engine
+        </div>
+        <div className="hidden sm:block" aria-hidden="true">
+          <div className="diagram-stub" />
+          <div className="diagram-split" />
+          <div className="grid grid-cols-3">
+            <div className="diagram-stub" />
+            <div className="diagram-stub" />
+            <div className="diagram-stub" />
+          </div>
+        </div>
+        <div className="mt-6 grid gap-4 sm:mt-0 sm:grid-cols-3">
+          {SURFACES.map((surface) => (
+            <article key={surface.title} className="card p-6">
+              <span className="font-mono text-[0.65rem] tracking-[0.08em] text-faint">
+                {surface.tag}
+              </span>
+              <h2 className="mt-2 mb-0 text-[1.02rem] font-semibold">{surface.title}</h2>
+              <p className="mt-2.5 mb-0 text-sm leading-relaxed text-moss">{surface.desc}</p>
+            </article>
+          ))}
+        </div>
       </div>
 
       <div className="card mt-10 overflow-x-auto p-6">
@@ -94,7 +114,7 @@ function CloudPage() {
 
       <div className="mt-10 grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
         {POINTS.map((point) => (
-          <article key={point.title} className="card card-hover p-6">
+          <article key={point.title} className="card p-6">
             <h2 className="m-0 text-[0.95rem] font-semibold">{point.title}</h2>
             <p className="mt-2 mb-0 text-sm leading-relaxed text-moss">{point.desc}</p>
           </article>

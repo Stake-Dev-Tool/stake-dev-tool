@@ -157,7 +157,7 @@ function PricingPage() {
 
       <div className="mt-8 grid gap-4 lg:grid-cols-3">
         {/* Self-host */}
-        <article className="card flex flex-col p-7">
+        <article className="card flex flex-col border-dashed p-7">
           <h2 className="m-0 text-base font-semibold">Self-host</h2>
           <p className="display mt-4 mb-0 text-4xl font-bold">
             €0

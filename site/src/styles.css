@@ -150,14 +150,20 @@ a {
   border: 1px solid var(--color-line);
   border-radius: 0.9rem;
   background: linear-gradient(170deg, var(--color-panel2), var(--color-panel));
-  transition:
-    border-color 180ms ease,
-    transform 180ms ease;
 }
 
-.card-hover:hover {
-  border-color: var(--color-line2);
-  transform: translateY(-2px);
+/* Engine → surfaces connector on /cloud (pure CSS, decorative) */
+.diagram-stub {
+  width: 1px;
+  height: 1.5rem;
+  margin-inline: auto;
+  background: var(--color-line2);
+}
+
+.diagram-split {
+  width: 66.666%;
+  margin-inline: auto;
+  border-top: 1px solid var(--color-line2);
 }
 
 /* Viewport frames (hero signature) */

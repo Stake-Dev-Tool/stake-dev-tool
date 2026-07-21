@@ -76,7 +76,7 @@ function Home() {
         </h2>
         <div className="mt-12 grid gap-4 sm:grid-cols-3">
           {HIGHLIGHTS.map((item) => (
-            <article key={item.title} className="card card-hover p-6">
+            <article key={item.title} className="card p-6">
               <h3 className="m-0 text-[1.02rem] font-semibold">{item.title}</h3>
               <p className="mt-2.5 mb-0 text-sm leading-relaxed text-moss">{item.desc}</p>
             </article>
