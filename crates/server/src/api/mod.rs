@@ -12,6 +12,7 @@ pub mod workspaces;
 pub mod ws;
 
 use axum::Router;
+use axum::extract::DefaultBodyLimit;
 use axum::routing::{delete, get, patch, post, put};
 
 use crate::AppState;
@@ -27,7 +28,12 @@ async fn not_found() -> ApiError {
 /// the path rather than the body — matchit 0.7 (axum 0.7) can't route a static
 /// `accept` segment alongside the `:token` param, so a nested accept keeps both
 /// the public preview and the accept action under one clean resource path.
-pub fn router() -> Router<AppState> {
+///
+/// `max_blob_bytes` lifts axum's 2 MiB default body limit on the raw blob
+/// upload route only — every JSON route keeps the small default (a giant JSON
+/// body would be buffered by the extractor, so the tight default is the
+/// protection there).
+pub fn router(max_blob_bytes: usize) -> Router<AppState> {
     Router::new()
         // --- auth ---
         .route("/auth/register", post(auth::register))
@@ -69,7 +75,9 @@ pub fn router() -> Router<AppState> {
         )
         .route(
             "/workspaces/:slug/games/:game/blobs/:hash",
-            put(math::put_blob).get(math::get_blob),
+            put(math::put_blob)
+                .get(math::get_blob)
+                .layer(DefaultBodyLimit::max(max_blob_bytes)),
         )
         .route(
             "/workspaces/:slug/games/:game/revisions",

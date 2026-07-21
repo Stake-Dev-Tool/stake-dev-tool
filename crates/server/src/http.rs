@@ -20,9 +20,10 @@ use crate::storage;
 const DB_CHECK_TIMEOUT: Duration = Duration::from_secs(2);
 
 pub fn build_router(state: AppState) -> Router {
-    let mut router = Router::new()
-        .route("/healthz", get(healthz))
-        .nest("/api", api::router());
+    let mut router = Router::new().route("/healthz", get(healthz)).nest(
+        "/api",
+        api::router(state.config.storage_max_blob_bytes as usize),
+    );
 
     // The dashboard is a static SPA (web/build). Serving it from the same
     // binary keeps cookies same-origin and makes self-hosting a single
