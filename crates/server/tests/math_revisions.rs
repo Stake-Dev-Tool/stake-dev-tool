@@ -513,9 +513,66 @@ async fn stats_computed_and_surfaced_in_detail_and_diff() {
     assert!((mode["hit_rate"].as_f64().unwrap() - 0.10).abs() < 1e-9);
     assert_eq!(mode["cost"].as_f64().unwrap(), 1.0);
 
-    // rev2 stats: rtp 0.91
+    // rev1 analysis (LOOKUP_V1 is the M8 micro-fixture): a single cost-1 mode
+    // whose etl_40 (0.87) fails the 2-star cap but clears the 3-star cap, so the
+    // revision grades 3-star without being 2-star.
+    let analysis = &detail1["stats"]["analysis"];
+    assert!(
+        analysis.is_object(),
+        "analysis should be present: {analysis}"
+    );
+    assert_eq!(analysis["stars"], json!(3));
+    assert_eq!(analysis["two_star_compliant"], json!(false));
+    assert_eq!(analysis["three_star_compliant"], json!(true));
+    assert_eq!(analysis["cross_mode_rtp_pass"], json!(true));
+    assert_eq!(analysis["reference_max_bet_2"], json!(200));
+    assert_eq!(analysis["reference_max_bet_3"], json!(1000));
+
+    let ma = &analysis["modes"][0];
+    assert_eq!(s(&ma["mode"]), "base");
+    assert_eq!(s(&ma["volatility"]), "medium");
+    assert!((ma["rtp"].as_f64().unwrap() - 0.96).abs() < 1e-9);
+    assert!((ma["std_dev"].as_f64().unwrap() - 198.0684_f64.sqrt()).abs() < 1e-9);
+    assert!((ma["cvar"].as_f64().unwrap() - 420.0).abs() < 1e-9);
+    assert!((ma["etl_40"].as_f64().unwrap() - 0.87).abs() < 1e-9);
+    assert!((ma["max_win_odds"].as_f64().unwrap() - 1000.0).abs() < 1e-9);
+    assert_eq!(ma["worst_zero_streak"], json!(66));
+    assert_eq!(ma["worst_loss_streak"], json!(688));
+    assert_eq!(ma["unique_payouts"], json!(4));
+
+    // The cheapest mode carries the base_cost check (4 checks total).
+    let checks = ma["compliance"].as_array().unwrap();
+    assert_eq!(checks.len(), 4);
+    let base_cost = checks
+        .iter()
+        .find(|c| s(&c["check"]) == "base_cost")
+        .unwrap();
+    assert_eq!(base_cost["pass"], json!(true));
+
+    // etl_40 constraint: fails 2-star, passes 3-star.
+    let constraints = analysis["constraints"].as_array().unwrap();
+    let etl40 = constraints
+        .iter()
+        .find(|c| s(&c["key"]) == "etl_40")
+        .unwrap();
+    assert_eq!(etl40["pass2"], json!(false));
+    assert_eq!(etl40["pass3"], json!(true));
+
+    // rev2 stats: rtp 0.91 (still inside the RTP band, so its analysis is present).
     let detail2 = compute_and_wait(&mut owner, &ctx.state, &ws, game, 2, &token, "ok").await;
     assert!((detail2["stats"]["modes"][0]["rtp"].as_f64().unwrap() - 0.91).abs() < 1e-9);
+    assert!(
+        detail2["stats"]["analysis"].is_object(),
+        "rev2 analysis should be present"
+    );
+    assert!(
+        (detail2["stats"]["analysis"]["modes"][0]["rtp"]
+            .as_f64()
+            .unwrap()
+            - 0.91)
+            .abs()
+            < 1e-9
+    );
 
     // diff surfaces before (rev1) / after (rev2) mode stats.
     let (status, diff) = owner

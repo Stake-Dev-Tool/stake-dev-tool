@@ -10,6 +10,7 @@ pub mod http;
 pub mod lgs_host;
 pub mod share;
 pub mod stats;
+pub mod stats_analysis;
 pub mod storage;
 
 use std::sync::Arc;

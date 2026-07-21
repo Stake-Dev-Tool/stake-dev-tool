@@ -133,13 +133,145 @@ pub struct ModeStats {
 
 /// A revision's stats as attached to `RevisionDetail`. `modes` is populated only
 /// when `status` is `ok`; `error` carries the reason when `status` is `error`.
+///
+/// `analysis` is the full Stake-Engine-style compliance view (2★/3★). It is a
+/// sibling of the untouched `modes` array and is present only when `status` is
+/// `ok` and the revision has at least one mode. Old stats rows persisted before
+/// this field existed deserialize with `analysis == None` (serde default).
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
 #[ts(export, export_to = "protocol/")]
 pub struct RevisionStats {
     pub status: StatsStatus,
     pub error: Option<String>,
     pub modes: Vec<ModeStats>,
+    #[serde(default)]
+    pub analysis: Option<RevisionAnalysis>,
     pub updated_at: DateTime<Utc>,
+}
+
+/// Stake-Engine-style compliance analysis for a whole revision: the global
+/// constraint table (checked across modes at two reference bet levels), the
+/// star grade derived from it, the cross-mode RTP spread, and the per-mode
+/// deep-dive ([`ModeAnalysis`]).
+///
+/// Star grade: `stars = 3` when every constraint passes its 3★ limit, else `2`
+/// when every constraint passes its (stricter) 2★ limit, else `0`. The 3★
+/// limits are looser than the 2★ limits (higher-volatility games get more
+/// headroom), so a game can be 3★ without being 2★.
+///
+/// `reference_max_bet_2`/`reference_max_bet_3` (200 / 1000) are documented
+/// stand-ins for Stake's per-game bet-level templates: bet-scaled limits
+/// (`max_exposure`, `max_bet_cost`) are evaluated at these bets.
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "protocol/")]
+pub struct RevisionAnalysis {
+    pub two_star_compliant: bool,
+    pub three_star_compliant: bool,
+    pub stars: u8,
+    /// `max(RTP) − min(RTP)` across modes; Stake expects modes to share an RTP.
+    pub cross_mode_rtp_variance: f64,
+    /// `cross_mode_rtp_variance <= 0.01`.
+    pub cross_mode_rtp_pass: bool,
+    pub reference_max_bet_2: u64,
+    pub reference_max_bet_3: u64,
+    pub constraints: Vec<ConstraintRow>,
+    pub modes: Vec<ModeAnalysis>,
+}
+
+/// One row of the global constraint table. Metrics come in three shapes:
+/// * single-value metrics fill `value` (e.g. `max_payout_multiplier`);
+/// * bet-scaled metrics fill `value2`/`value3` — the value computed at the 2★
+///   and 3★ reference bets (e.g. `max_exposure`, `max_bet_cost`);
+/// * range metrics fill `value` and both `limitX_low` bounds (e.g.
+///   `base_volatility`, which must sit inside `[low, high]`).
+///
+/// `limit2`/`limit3` are the upper limits (or range highs). `pass2`/`pass3` are
+/// the per-star verdicts.
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "protocol/")]
+pub struct ConstraintRow {
+    pub key: String,
+    pub label: String,
+    pub value: Option<f64>,
+    pub value2: Option<f64>,
+    pub value3: Option<f64>,
+    pub limit2_low: Option<f64>,
+    pub limit2: f64,
+    pub limit3_low: Option<f64>,
+    pub limit3: f64,
+    pub pass2: bool,
+    pub pass3: bool,
+}
+
+/// Per-mode deep-dive. All multipliers are "VS BET" decimal multiples
+/// (`m = payout / 100`); cost-normalized quantities use `x = m / cost` so that
+/// RTP, `std_dev`, CVaR and the ETLs are all expressed "at cost 1×".
+///
+/// `volatility` is a heuristic label off `std_dev`: `< 8` low, `8..=25` medium,
+/// `> 25` high. Streak/among-spins fields are `null` in the degenerate cases
+/// their closed forms are undefined (e.g. `worst_zero_streak` when a mode never
+/// pays zero).
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "protocol/")]
+pub struct ModeAnalysis {
+    pub mode: String,
+    pub cost: f64,
+    pub rtp: f64,
+    pub std_dev: f64,
+    pub volatility: String,
+    pub max_win: f64,
+    pub min_win: f64,
+    pub zero_prob: f64,
+    pub sub_bet_prob: f64,
+    pub win_prob: f64,
+    pub break_even_miss_prob: f64,
+    pub hit_rate: f64,
+    /// Distinct payout values, including the zero (losing) payout.
+    pub unique_payouts: u64,
+    pub entries: u64,
+    /// `1 / P(m == max m)`, i.e. "1 in N" odds of hitting the top multiplier.
+    pub max_win_odds: f64,
+    pub avg_spins_any_win: Option<f64>,
+    pub worst_zero_streak: Option<u64>,
+    pub avg_spins_profit: Option<f64>,
+    pub worst_loss_streak: Option<u64>,
+    pub tail_prob_5000: f64,
+    pub tail_prob_10000: f64,
+    pub cvar: f64,
+    pub etl_40: f64,
+    pub etl_10000: f64,
+    pub etl_sum: f64,
+    pub distribution: Vec<DistBucket>,
+    pub compliance: Vec<ComplianceCheck>,
+}
+
+/// One bucket of a mode's win-multiplier distribution. Membership is
+/// `from < m <= to` (the first bucket is `0 < m <= 0.1`; the last, open bucket
+/// has `to == null`). The zero payout is excluded entirely (it is `zero_prob`).
+/// `count` is the number of distinct payout values in the range.
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "protocol/")]
+pub struct DistBucket {
+    pub from: f64,
+    pub to: Option<f64>,
+    pub count: u64,
+    pub probability: f64,
+    /// `1 / probability` ("1 in N"), or `null` when the bucket is empty.
+    pub effective_hit_rate: Option<f64>,
+    /// `Σ p·x` over the bucket — the bucket's absolute share of RTP.
+    pub rtp_contribution: f64,
+}
+
+/// One per-mode compliance check. `expected`/`result` are human-formatted
+/// strings for direct display; `pass` is the machine verdict.
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "protocol/")]
+pub struct ComplianceCheck {
+    pub check: String,
+    pub label: String,
+    pub expected: String,
+    pub result: String,
+    pub pass: bool,
 }
 
 /// Full revision view: metadata, its file manifest, and its stats (if any).

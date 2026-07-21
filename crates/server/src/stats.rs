@@ -25,11 +25,12 @@
 use std::sync::Arc;
 
 use object_store::ObjectStore;
-use protocol::ModeStats;
+use protocol::{ModeStats, RevisionAnalysis};
 use sqlx::PgPool;
 use uuid::Uuid;
 
 use crate::blobs;
+use crate::stats_analysis;
 
 /// Compute and persist a revision's per-mode bet stats. Always leaves a terminal
 /// `revision_stats` row: `ok` with `{modes:[...]}`, or `error` with a message.
@@ -45,8 +46,10 @@ pub async fn compute_stats_for_revision(
         return;
     }
     match compute(&pool, store.as_ref(), revision_id).await {
-        Ok(modes) => {
-            let data = serde_json::json!({ "modes": modes });
+        Ok((modes, analysis)) => {
+            // `analysis` is a sibling of the untouched `modes` array (null when the
+            // revision has no modes). The read path deserializes both from here.
+            let data = serde_json::json!({ "modes": modes, "analysis": analysis });
             if let Err(e) = finalize(&pool, revision_id, "ok", None, Some(data)).await {
                 tracing::error!(error = %e, %revision_id, "stats: could not store ok result");
             }
@@ -100,7 +103,7 @@ async fn compute(
     pool: &PgPool,
     store: &dyn ObjectStore,
     revision_id: Uuid,
-) -> anyhow::Result<Vec<ModeStats>> {
+) -> anyhow::Result<(Vec<ModeStats>, Option<RevisionAnalysis>)> {
     let (workspace_id, game_slug): (Uuid, String) = sqlx::query_as(
         "SELECT g.workspace_id, g.slug FROM revisions r \
          JOIN games g ON g.id = r.game_id WHERE r.id = $1",
@@ -139,6 +142,7 @@ async fn compute(
     let cfg = state.engine.load_config(&game_slug).await?;
 
     let mut modes = Vec::with_capacity(cfg.modes.len());
+    let mut analyses = Vec::with_capacity(cfg.modes.len());
     for mode in &cfg.modes {
         // Only the weights CSV is fetched; the `events` (books) file is not.
         let weights_hex = hex_for(&mode.weights).ok_or_else(|| {
@@ -160,27 +164,36 @@ async fn compute(
 
         let text = String::from_utf8(weights_bytes)
             .map_err(|e| anyhow::anyhow!("weights \"{}\" is not utf-8: {e}", mode.weights))?;
-        modes.push(compute_mode_stats(&mode.name, mode.cost, &text)?);
+        // Parse the lookup rows once, then feed both the basic ModeStats and the
+        // richer per-mode analysis from the same parsed rows.
+        let rows = parse_weights_rows(&text)?;
+        modes.push(mode_stats_from_rows(&mode.name, mode.cost, &rows)?);
+        analyses.push(stats_analysis::mode_analysis(&mode.name, mode.cost, &rows));
     }
-    Ok(modes)
+    // The analysis needs at least one mode to have a base mode / constraint table.
+    let analysis = if analyses.is_empty() {
+        None
+    } else {
+        Some(stats_analysis::revision_analysis(analyses))
+    };
+    Ok((modes, analysis))
 }
 
-/// Compute one mode's stats from its lookup-table CSV. Mirrors lgs's
-/// `parse_weights` format: one `event_id,weight,payout_multiplier` row per line
-/// (blank lines skipped). The payout column is in hundredths (100 == 1.00×),
-/// matching lgs's `build_result`, so the decimal win multiple is `payout / 100`.
-///
-/// * `rtp`     = `sum(weight * payout/100) / sum(weight) / cost`
-/// * `max_win` = `max(payout) / 100`
-/// * `entries` = number of rows
-/// * `hit_rate`= share of total weight with a non-zero payout
-fn compute_mode_stats(mode: &str, cost: u64, weights_csv: &str) -> anyhow::Result<ModeStats> {
-    let mut total_weight: u128 = 0;
-    let mut weighted_payout: u128 = 0; // sum(weight * payout_multiplier)
-    let mut win_weight: u128 = 0; // sum(weight) over rows with payout > 0
-    let mut max_payout: u32 = 0;
-    let mut entries: u64 = 0;
+/// One parsed lookup-table row: a `weight` and its `payout` (in hundredths, so
+/// the decimal win multiple is `payout / 100`). Shared with [`stats_analysis`]
+/// so a mode's CSV is parsed exactly once per compute pass.
+pub(crate) struct Weighted {
+    pub weight: u64,
+    pub payout: u32,
+}
 
+/// Parse a mode's lookup-table CSV into rows. Mirrors lgs's `parse_weights`
+/// format: one `event_id,weight,payout_multiplier` row per line (blank lines
+/// skipped); the payout column is in hundredths (100 == 1.00×), matching lgs's
+/// `build_result`. Malformed lines are a hard error. Aggregate validity (no
+/// rows / zero total weight) is checked by the consumers.
+pub(crate) fn parse_weights_rows(weights_csv: &str) -> anyhow::Result<Vec<Weighted>> {
+    let mut rows = Vec::new();
     for (i, line) in weights_csv.lines().enumerate() {
         let line = line.trim();
         if line.is_empty() {
@@ -207,26 +220,42 @@ fn compute_mode_stats(mode: &str, cost: u64, weights_csv: &str) -> anyhow::Resul
             .trim()
             .parse()
             .map_err(|e| anyhow::anyhow!("weights line {lineno}: bad payout: {e}"))?;
-
-        total_weight += weight as u128;
-        weighted_payout += weight as u128 * payout as u128;
-        if payout > 0 {
-            win_weight += weight as u128;
-        }
-        max_payout = max_payout.max(payout);
-        entries += 1;
+        rows.push(Weighted { weight, payout });
     }
+    Ok(rows)
+}
 
-    if entries == 0 {
+/// Aggregate one mode's basic stats from its parsed rows.
+///
+/// * `rtp`     = `sum(weight * payout/100) / sum(weight) / cost`
+/// * `max_win` = `max(payout) / 100`
+/// * `entries` = number of rows
+/// * `hit_rate`= share of total weight with a non-zero payout
+fn mode_stats_from_rows(mode: &str, cost: u64, rows: &[Weighted]) -> anyhow::Result<ModeStats> {
+    if rows.is_empty() {
         anyhow::bail!("lookup table has no rows");
     }
+
+    let mut total_weight: u128 = 0;
+    let mut weighted_payout: u128 = 0; // sum(weight * payout_multiplier)
+    let mut win_weight: u128 = 0; // sum(weight) over rows with payout > 0
+    let mut max_payout: u32 = 0;
+    for r in rows {
+        total_weight += u128::from(r.weight);
+        weighted_payout += u128::from(r.weight) * u128::from(r.payout);
+        if r.payout > 0 {
+            win_weight += u128::from(r.weight);
+        }
+        max_payout = max_payout.max(r.payout);
+    }
+
     if total_weight == 0 {
         anyhow::bail!("lookup table has zero total weight");
     }
 
     let cost_f = cost.max(1) as f64;
     let rtp = (weighted_payout as f64) / 100.0 / (total_weight as f64) / cost_f;
-    let max_win = (max_payout as f64) / 100.0;
+    let max_win = f64::from(max_payout) / 100.0;
     let hit_rate = (win_weight as f64) / (total_weight as f64);
 
     Ok(ModeStats {
@@ -234,9 +263,17 @@ fn compute_mode_stats(mode: &str, cost: u64, weights_csv: &str) -> anyhow::Resul
         cost: cost as f64,
         rtp,
         max_win,
-        entries,
+        entries: rows.len() as u64,
         hit_rate,
     })
+}
+
+/// Compute one mode's basic stats from its lookup-table CSV (parse then
+/// aggregate). Retained for the module's unit tests.
+#[cfg(test)]
+fn compute_mode_stats(mode: &str, cost: u64, weights_csv: &str) -> anyhow::Result<ModeStats> {
+    let rows = parse_weights_rows(weights_csv)?;
+    mode_stats_from_rows(mode, cost, &rows)
 }
 
 #[cfg(test)]

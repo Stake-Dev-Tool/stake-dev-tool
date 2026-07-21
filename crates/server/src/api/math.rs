@@ -21,8 +21,8 @@ use object_store::{ObjectStoreExt, WriteMultipart};
 use protocol::{
     BlobUploaded, ChangedFile, CheckRequest, CheckResponse, CreateRevisionRequest, ErrorBody,
     FileDiff, FileEntry, GameSummary, GamesResponse, MissingBlobsResponse, ModeStats,
-    ModeStatsDiff, RevisionDetail, RevisionDiff, RevisionStats, RevisionSummary, RevisionsResponse,
-    StatsDiff, StatsStatus,
+    ModeStatsDiff, RevisionAnalysis, RevisionDetail, RevisionDiff, RevisionStats, RevisionSummary,
+    RevisionsResponse, StatsDiff, StatsStatus,
 };
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
@@ -704,9 +704,14 @@ struct StatsRow {
     updated_at: DateTime<Utc>,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Default)]
 struct StatsData {
+    #[serde(default)]
     modes: Vec<ModeStats>,
+    /// The Stake-Engine-style analysis; absent on stats rows persisted before
+    /// the analyzer existed (or on the `error` path).
+    #[serde(default)]
+    analysis: Option<RevisionAnalysis>,
 }
 
 fn parse_stats_status(value: &str) -> ApiResult<StatsStatus> {
@@ -747,18 +752,27 @@ async fn load_revision_stats(pool: &PgPool, revision_id: Uuid) -> ApiResult<Opti
     let Some(row) = row else {
         return Ok(None);
     };
+    // Deserialize `modes` and `analysis` from the stored JSON in one pass; the
+    // `modes` shape is untouched and `analysis` is its optional sibling.
+    let data = stats_data_from(row.data);
     Ok(Some(RevisionStats {
         status: parse_stats_status(&row.status)?,
         error: row.error,
-        modes: modes_from_data(row.data),
+        modes: data.modes,
+        analysis: data.analysis,
         updated_at: row.updated_at,
     }))
 }
 
-fn modes_from_data(data: Option<serde_json::Value>) -> Vec<ModeStats> {
+/// Parse the persisted `revision_stats.data` JSON, tolerating older/partial rows
+/// (missing keys default to empty `modes` / `None` analysis).
+fn stats_data_from(data: Option<serde_json::Value>) -> StatsData {
     data.and_then(|d| serde_json::from_value::<StatsData>(d).ok())
-        .map(|d| d.modes)
         .unwrap_or_default()
+}
+
+fn modes_from_data(data: Option<serde_json::Value>) -> Vec<ModeStats> {
+    stats_data_from(data).modes
 }
 
 async fn load_revision_detail(pool: &PgPool, revision_id: Uuid) -> ApiResult<RevisionDetail> {
