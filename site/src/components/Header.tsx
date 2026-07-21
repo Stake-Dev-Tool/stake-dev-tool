@@ -44,6 +44,12 @@ export default function Header() {
             </svg>
           </a>
           <a
+            href="https://app.stakedevtool.com"
+            className="btn btn-ghost hidden !px-4 !py-2.5 text-sm sm:inline-flex"
+          >
+            Dashboard
+          </a>
+          <a
             href="https://github.com/simnJS/stake-dev-tool/releases/latest"
             target="_blank"
             rel="noopener noreferrer"
