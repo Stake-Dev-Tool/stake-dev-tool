@@ -7,6 +7,7 @@
   import Card from '$lib/components/Card.svelte';
   import Badge from '$lib/components/Badge.svelte';
   import CopyField from '$lib/components/CopyField.svelte';
+  import FrontPushPanel from '$lib/components/FrontPushPanel.svelte';
   import MathPushPanel from '$lib/components/MathPushPanel.svelte';
   import FrontUrlDialog from '$lib/components/FrontUrlDialog.svelte';
   import PlanBanner from '$lib/components/PlanBanner.svelte';
@@ -16,6 +17,7 @@
   let game = $derived(page.params.game ?? '');
 
   let showPush = $state(false);
+  let showFrontPush = $state(false);
   let testOpen = $state(false);
 
   let gameMeta = $state<Game | null>(null);
@@ -130,6 +132,9 @@
         {#if !showPush}
           <Button onclick={() => (showPush = true)}>Push a revision</Button>
         {/if}
+        {#if !showFrontPush}
+          <Button variant="secondary" onclick={() => (showFrontPush = true)}>Push front</Button>
+        {/if}
       </div>
     </header>
 
@@ -148,6 +153,12 @@
           ondone={(n) => onPushed(n)}
           oncancel={() => (showPush = false)}
         />
+      </div>
+    {/if}
+
+    {#if showFrontPush}
+      <div class="mb-8">
+        <FrontPushPanel {slug} {game} oncancel={() => (showFrontPush = false)} />
       </div>
     {/if}
 

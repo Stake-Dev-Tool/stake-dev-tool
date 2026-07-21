@@ -212,91 +212,6 @@
     }
   }
 
-  // --- Front bundle upload ----------------------------------------------------
-  let frontFiles = $state<IntakeFile[]>([]);
-  let pickerKey = $state(0); // bump to remount the picker (clears its selection)
-  let frontPushing = $state(false);
-  let frontError = $state('');
-  let frontErrorUpgrade = $state(false);
-  let frontPhase = $state<PushPhase | null>(null);
-  let frontProgress = $state<FileProgress[]>([]);
-  let frontBundleId = $state<string | null>(null);
-
-  let canPushFront = $derived(frontFiles.length > 0 && !frontPushing);
-
-  // Compact progress recap (no per-file table — a front build is many small files).
-  let fTotal = $derived(frontProgress.length);
-  let fHashed = $derived(
-    frontProgress.filter((p) => p.status !== 'pending' && p.status !== 'hashing').length
-  );
-  let fProcessed = $derived(
-    frontProgress.filter((p) => p.status === 'uploaded' || p.status === 'deduplicated').length
-  );
-  let fSent = $derived(
-    frontProgress.filter((p) => p.status === 'uploaded').reduce((a, p) => a + p.size, 0)
-  );
-  let fDedup = $derived(frontProgress.filter((p) => p.status === 'deduplicated').length);
-  let frontPhaseLabel = $derived.by(() => {
-    switch (frontPhase) {
-      case 'hashing':
-        return `Hashing files… ${fHashed} / ${fTotal}`;
-      case 'checking':
-        return 'Checking which files the server already has…';
-      case 'uploading':
-        return `Uploading… ${fProcessed} / ${fTotal} files · ${humanSize(fSent)} sent · ${fDedup} deduplicated`;
-      case 'committing':
-        return 'Committing front bundle…';
-      case 'done':
-        return 'Done.';
-      default:
-        return '';
-    }
-  });
-
-  function onFrontPicked(files: IntakeFile[]) {
-    frontFiles = files;
-    frontError = '';
-  }
-  function onFrontCleared() {
-    frontFiles = [];
-  }
-
-  async function doFrontPush() {
-    if (!canPushFront) return;
-    frontPushing = true;
-    frontError = '';
-    frontErrorUpgrade = false;
-    frontBundleId = null;
-    frontPhase = 'hashing';
-    frontProgress = frontFiles.map((f) => ({
-      path: f.path,
-      size: f.file.size,
-      status: 'pending' as const,
-      hashedBytes: 0
-    }));
-    try {
-      const res = await runFrontPush(
-        { slug, game, files: frontFiles },
-        {
-          onPhase: (p) => (frontPhase = p),
-          onFileUpdate: (i, patch) => {
-            const cur = frontProgress[i];
-            if (cur) frontProgress[i] = { ...cur, ...patch };
-          }
-        }
-      );
-      frontBundleId = res.bundleId;
-      frontFiles = [];
-      pickerKey += 1; // remount the picker so its summary clears
-    } catch (e) {
-      frontError = pushErrorMessage(e);
-      frontErrorUpgrade = isUpgradeError(e);
-      frontPhase = null;
-    } finally {
-      frontPushing = false;
-    }
-  }
-
   // --- Per-share view helpers -------------------------------------------------
   function shortId(id: string): string {
     return id.length > 8 ? id.slice(0, 8) : id;
@@ -317,73 +232,11 @@
     <div>
       <h2 class="text-lg font-semibold tracking-tight">Share</h2>
       <p class="mt-0.5 text-sm text-muted">
-        Host a playable instance of this game and share the link. Analytics land back here.
+        Host a playable instance of this game and share the link. Analytics land back here. Upload the game front with the Push front button above; shares use the latest bundle.
       </p>
     </div>
     <Button variant="outline" size="sm" onclick={refresh} loading={loadingShares}>Refresh</Button>
   </div>
-
-  <!-- 1) Game front build ---------------------------------------------------->
-  <Card class="mb-4 p-6">
-    <div class="mb-3 flex flex-wrap items-center justify-between gap-3">
-      <h3 class="text-base font-semibold">Game front</h3>
-      <span class="text-xs text-faint">index.html at root · up to 2000 files</span>
-    </div>
-    <p class="mb-4 text-sm text-muted">
-      A share serves this game's front build (the web bundle players load in the browser). Upload it
-      once here — new share links use the latest bundle automatically.
-    </p>
-
-    {#key pickerKey}
-      <MathFolderPicker
-        disabled={frontPushing}
-        requiredRootFile="index.html"
-        maxFiles={2000}
-        label="Drop your game-front build here"
-        onpicked={(files) => onFrontPicked(files)}
-        oncleared={onFrontCleared}
-      />
-    {/key}
-
-    {#if frontError}
-      {#if frontErrorUpgrade}
-        <UpgradeNotice {slug} message={frontError} class="mt-4" />
-      {:else}
-        <p class="mt-4 rounded-md border border-danger/30 bg-danger/10 px-3 py-2 text-sm text-danger">
-          {frontError}
-        </p>
-      {/if}
-    {/if}
-
-    {#if frontPhase}
-      <div class="mt-4 flex flex-col gap-3 rounded-md border border-border bg-surface-2/40 p-4">
-        <div class="flex items-center gap-2.5 text-sm">
-          {#if frontPhase !== 'done'}<span class="spinner text-accent"></span>{/if}
-          <span class="text-text">{frontPhaseLabel}</span>
-        </div>
-        <div class="h-1.5 w-full overflow-hidden rounded-full bg-surface-2">
-          <div
-            class="h-full rounded-full bg-accent transition-all"
-            style="width: {fTotal > 0 ? Math.round((fProcessed / fTotal) * 100) : 0}%"
-          ></div>
-        </div>
-      </div>
-    {/if}
-
-    {#if frontBundleId}
-      <div class="mt-4 flex flex-wrap items-center gap-x-3 gap-y-1 rounded-md border border-accent/30 bg-accent/10 px-3 py-2.5 text-sm text-accent">
-        <span class="font-medium">Front bundle uploaded.</span>
-        <span class="text-muted">New shares use the latest bundle automatically.</span>
-        <span class="font-mono-tab text-xs text-faint">id {shortId(frontBundleId)}</span>
-      </div>
-    {/if}
-
-    <div class="mt-4">
-      <Button onclick={doFrontPush} loading={frontPushing} disabled={!canPushFront}>
-        Upload front build
-      </Button>
-    </div>
-  </Card>
 
   <!-- 2) Create share (owner/admin) ----------------------------------------->
   {#if canManage}
