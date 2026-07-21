@@ -34,6 +34,9 @@ RUN apt-get update \
 WORKDIR /app
 COPY --from=backend /repo/target/release/server /usr/local/bin/server
 COPY --from=frontend /repo/web/build /app/web
+# Pre-owned by the runtime user so the blobdata volume (fs storage backend)
+# initializes writable — named volumes copy ownership from the image path.
+RUN mkdir -p /app/data && chown -R nobody /app/data
 ENV SERVER_WEB_DIR=/app/web \
     SERVER_BIND_ADDR=0.0.0.0:8080
 EXPOSE 8080
