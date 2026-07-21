@@ -58,6 +58,11 @@ pub struct Config {
     /// `None` (the default) leaves tenants uncapped, sharing the process-global
     /// books budget. A billing plan can override this per workspace later.
     pub server_tenant_books_cap_bytes: Option<u64>,
+    /// Registrable base of the wildcard share domains (`SERVER_PLAY_DOMAIN`,
+    /// e.g. `play.stakedevtool.com`). Requests whose Host is
+    /// `<slug>.<play_domain>` are dispatched to the share router (M5); unset
+    /// disables host-based share serving entirely.
+    pub play_domain: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -182,6 +187,9 @@ impl Config {
             storage_max_blob_bytes,
             server_math_cache_bytes,
             server_tenant_books_cap_bytes,
+            play_domain: get("SERVER_PLAY_DOMAIN")
+                .map(|s| s.trim_matches(['.', ' ']).to_ascii_lowercase())
+                .filter(|s| !s.is_empty()),
         })
     }
 }

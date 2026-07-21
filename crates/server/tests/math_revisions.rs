@@ -54,6 +54,7 @@ async fn setup_with_cap(max_blob_bytes: u64) -> Option<Ctx> {
         storage_max_blob_bytes: max_blob_bytes,
         server_math_cache_bytes: 21_474_836_480,
         server_tenant_books_cap_bytes: None,
+        play_domain: None,
     };
     let pool = db::connect_lazy(&database_url).expect("lazy pool");
     let store = storage::build_object_store(&config).expect("fs store");

@@ -2,9 +2,11 @@
 //! the sub-router `http::build_router` nests under `/api`.
 
 pub mod auth;
+pub mod billing;
 pub mod documents;
 pub mod invites;
 pub mod math;
+pub mod shares;
 pub mod tokens;
 pub mod workspaces;
 pub mod ws;
@@ -87,6 +89,8 @@ pub fn router() -> Router<AppState> {
         )
         // --- reserved mount points (stub routers until their milestones land) ---
         .merge(documents::router()) // M3 — document sync + workspace SSE
+        .merge(shares::router()) // M5 — share links CRUD
+        .merge(billing::router()) // M7 — plans + Polar webhook
         .merge(ws::router()) // M4 — cloud LGS under /ws/…
         .fallback(not_found)
 }

@@ -9,7 +9,9 @@ use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 
 pub mod auth;
+pub mod billing;
 pub mod documents;
+pub mod shares;
 pub mod error;
 pub mod math;
 pub mod workspace;
