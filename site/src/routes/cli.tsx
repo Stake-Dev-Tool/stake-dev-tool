@@ -122,8 +122,16 @@ function CliPage() {
       <section className="mt-16">
         <h2 className="display text-2xl font-bold">Install</h2>
         <p className="mt-3 max-w-xl text-moss">
-          One command with a Rust toolchain (1.90+). Prebuilt binaries land
-          with the 2.0 release.
+          Grab a{' '}
+          <a
+            href="https://github.com/simnJS/stake-dev-tool/releases?q=sdt-v&expanded=true"
+            target="_blank"
+            rel="noopener noreferrer"
+          >
+            prebuilt binary
+          </a>{' '}
+          (Linux x64, Windows x64, macOS arm64) and put it on your PATH — or
+          build it with a Rust toolchain (1.90+):
         </p>
         <CopyBlock text={INSTALL} />
       </section>
