@@ -1,0 +1,19 @@
+{
+  "projectName": "site",
+  "mode": "file-router",
+  "typescript": true,
+  "tailwind": true,
+  "packageManager": "pnpm",
+  "git": false,
+  "install": true,
+  "intent": true,
+  "addOnOptions": {},
+  "includeExamples": true,
+  "envVarValues": {},
+  "routerOnly": false,
+  "version": 1,
+  "framework": "react",
+  "chosenAddOns": [
+    "nitro"
+  ]
+}
