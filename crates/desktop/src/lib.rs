@@ -83,6 +83,10 @@ pub fn run() {
             commands::cloud_current_user,
             commands::cloud_sign_out,
             commands::cloud_list_workspaces,
+            commands::cloud_list_games,
+            commands::cloud_list_revisions,
+            commands::cloud_revision_detail,
+            commands::cloud_pull_revision_to_profile,
             commands::cloud_subscribe,
             commands::cloud_unsubscribe,
         ])

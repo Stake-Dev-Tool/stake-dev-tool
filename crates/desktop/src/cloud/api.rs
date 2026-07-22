@@ -15,7 +15,7 @@ use protocol::{
     AcceptInviteRequest, AcceptInviteResponse, CreateInviteRequest, CreateWorkspaceRequest,
     CreatedInvite, ErrorResponse, Role, WorkspaceDetail, WorkspaceSummary, WorkspacesResponse,
 };
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use super::auth::load_token;
@@ -203,14 +203,48 @@ impl CloudClient {
         .await?;
         Ok(resp.games)
     }
+
+    /// `GET /api/workspaces/:slug/games/:game/revisions` — a game's revisions,
+    /// newest first (the M2 `{revisions:[…]}` shape).
+    pub async fn list_revisions(
+        &self,
+        slug: &str,
+        game: &str,
+    ) -> Result<Vec<RevisionSummary>, CloudError> {
+        let resp: RevisionsResponse = send(self.request(
+            reqwest::Method::GET,
+            &format!("/api/workspaces/{slug}/games/{game}/revisions"),
+        ))
+        .await?;
+        Ok(resp.revisions)
+    }
+
+    /// `GET /api/workspaces/:slug/games/:game/revisions/:number` — revision
+    /// detail: the file manifest plus the server-computed per-mode stats. The
+    /// heavy `analysis` payload is intentionally not mirrored here.
+    pub async fn revision_detail(
+        &self,
+        slug: &str,
+        game: &str,
+        number: i64,
+    ) -> Result<RevisionDetail, CloudError> {
+        send(self.request(
+            reqwest::Method::GET,
+            &format!("/api/workspaces/{slug}/games/{game}/revisions/{number}"),
+        ))
+        .await
+    }
 }
 
 /// One game row from `GET …/games`. Mirrors the M2 shape leniently (extra
 /// fields ignored); the desktop reads `slug` + `head_number` (has-math), and
-/// keeps `revisions_count` for parity with the wire response.
-#[derive(Debug, Clone, Deserialize)]
-#[allow(dead_code)]
+/// carries `id`/`name`/`revisions_count` through to the cloud browser UI.
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GameSummary {
+    #[serde(default)]
+    pub id: Option<String>,
+    #[serde(default)]
+    pub name: Option<String>,
     pub slug: String,
     #[serde(default)]
     pub head_number: Option<i64>,
@@ -222,6 +256,88 @@ pub struct GameSummary {
 struct GamesResponse {
     #[serde(default)]
     games: Vec<GameSummary>,
+}
+
+/// One revision row from `GET …/revisions` (newest first). Mirrors the M2
+/// `RevisionSummary` leniently and is re-serialized straight to the cloud
+/// browser UI, so the field names match the wire (snake_case).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RevisionSummary {
+    pub number: i64,
+    #[serde(default)]
+    pub message: String,
+    #[serde(default)]
+    pub author_display_name: Option<String>,
+    #[serde(default)]
+    pub created_at: String,
+    #[serde(default)]
+    pub files_count: i64,
+    #[serde(default)]
+    pub total_size: i64,
+    /// `null` until the async stats task has created its row.
+    #[serde(default)]
+    pub stats_status: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct RevisionsResponse {
+    #[serde(default)]
+    revisions: Vec<RevisionSummary>,
+}
+
+/// One file in a revision manifest (`RevisionDetail.files`).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RevisionFileView {
+    pub path: String,
+    #[serde(default)]
+    pub hash: String,
+    #[serde(default)]
+    pub size: i64,
+}
+
+/// One bet mode's computed stats — RTP is a fraction, `max_win` a multiplier.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RevisionModeStats {
+    pub mode: String,
+    #[serde(default)]
+    pub cost: f64,
+    #[serde(default)]
+    pub rtp: f64,
+    #[serde(default)]
+    pub max_win: f64,
+    #[serde(default)]
+    pub entries: Option<u64>,
+    #[serde(default)]
+    pub hit_rate: Option<f64>,
+}
+
+/// A revision's stats block. The compliance `analysis` sibling on the wire is
+/// deliberately dropped — the desktop browser only surfaces the per-mode strip.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RevisionStatsView {
+    #[serde(default)]
+    pub status: Option<String>,
+    #[serde(default)]
+    pub error: Option<String>,
+    #[serde(default)]
+    pub modes: Vec<RevisionModeStats>,
+}
+
+/// Revision detail: manifest + stats. Mirrors the M2 `RevisionDetail` leniently
+/// (extra fields, incl. `stats.analysis`, ignored).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RevisionDetail {
+    pub number: i64,
+    #[serde(default)]
+    pub message: String,
+    #[serde(default)]
+    pub author_display_name: Option<String>,
+    #[serde(default)]
+    pub created_at: String,
+    #[serde(default)]
+    pub files: Vec<RevisionFileView>,
+    #[serde(default)]
+    pub stats: Option<RevisionStatsView>,
 }
 
 /// Like [`send`] but for endpoints that return an empty (204) body on success.

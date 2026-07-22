@@ -484,3 +484,78 @@ pub async fn pull_math(
         .await
         .map_err(|e| anyhow!("{e}"))
 }
+
+// ---------------------------------------------------------------------------
+// Cloud browser: pull a specific revision → local profile
+// ---------------------------------------------------------------------------
+
+/// App-managed on-disk location for a *pinned* revision pulled via the desktop
+/// cloud browser: `<data_local>/stake-dev-tool/cloud-math/<slug>/<game>/rev<N>/`.
+///
+/// Deliberately separate from [`default_math_root`] (which mirrors a game's
+/// *latest* revision under the user's Documents for the launcher share/pull
+/// flow) so pinning revision N never collides with — or is overwritten by — a
+/// later "pull latest".
+pub fn cloud_math_root(slug: &str, game_slug: &str, number: i64) -> Result<PathBuf> {
+    let dir = dirs::data_local_dir()
+        .ok_or_else(|| anyhow!("could not resolve local data dir"))?
+        .join("stake-dev-tool")
+        .join("cloud-math")
+        .join(slug)
+        .join(game_slug)
+        .join(format!("rev{number}"));
+    Ok(dir)
+}
+
+/// The killer feature: pull one specific revision's math into the app-managed
+/// cloud-math dir and create-or-update a local [`Profile`](crate::profiles::Profile)
+/// pointing at it. The download reuses [`math::pull`], so it emits the usual
+/// `math-sync-progress` events (the overlay shows progress).
+///
+/// The profile is local-only (`team_id = None`, so it lands in the launcher's
+/// "Mine" group), its `game_slug` is the workspace game slug, its front URL is
+/// left blank for the user to fill, and its name defaults to
+/// `"<game> rev N (cloud)"` — the suffix the launcher reads to show a
+/// "cloud rev N" badge. Re-pulling the same revision de-dupes on the dest path,
+/// updating the existing profile instead of piling up copies.
+pub async fn pull_revision_to_profile(
+    app: &AppHandle,
+    workspace_id: &str,
+    game_slug: &str,
+    number: i64,
+    profile_name: Option<String>,
+) -> Result<crate::profiles::Profile> {
+    let entry = workspaces::resolve(workspace_id).await?;
+    let dest = cloud_math_root(&entry.slug, game_slug, number)?;
+    tokio::fs::create_dir_all(&dest).await.ok();
+    let dest_str = dest.to_string_lossy().into_owned();
+
+    math::pull(app, &entry.slug, game_slug, Some(number), dest_str.clone())
+        .await
+        .map_err(|e| anyhow!("pull math: {e}"))?;
+
+    let name = profile_name
+        .map(|n| n.trim().to_string())
+        .filter(|n| !n.is_empty())
+        .unwrap_or_else(|| format!("{game_slug} rev {number} (cloud)"));
+
+    // Create-or-update: dedupe on the dest path so re-pulling the same revision
+    // refreshes the existing profile rather than stacking duplicates.
+    let existing_id = crate::profiles::list()
+        .await
+        .unwrap_or_default()
+        .into_iter()
+        .find(|p| p.game_path == dest_str)
+        .map(|p| p.id);
+
+    let profile = crate::profiles::upsert(
+        existing_id,
+        name,
+        dest_str,
+        String::new(), // front URL: left for the user to fill in
+        game_slug.to_string(),
+        Vec::new(),
+    )
+    .await?;
+    Ok(profile)
+}

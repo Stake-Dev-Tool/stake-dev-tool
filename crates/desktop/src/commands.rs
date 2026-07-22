@@ -887,6 +887,71 @@ pub async fn cloud_list_workspaces() -> Result<protocol::WorkspacesResponse, Str
     client.list_workspaces().await.map_err(|e| e.to_string())
 }
 
+// ---- Cloud browser: games → revisions → pull-to-profile ----
+//
+// `workspace` is a workspace *id* (as the rest of the desktop passes it);
+// each command resolves it to the slug the slug-addressed M2 API expects.
+
+/// Games in a workspace (name, slug, head revision number, revisions count).
+#[tauri::command]
+pub async fn cloud_list_games(workspace: String) -> Result<Vec<cloud::api::GameSummary>, String> {
+    let slug = cloud::workspaces::resolve_slug(&workspace)
+        .await
+        .map_err(|e| format!("{e:#}"))?;
+    let client = cloud::api::CloudClient::from_stored_token().map_err(|e| e.to_string())?;
+    client.list_games(&slug).await.map_err(|e| e.to_string())
+}
+
+/// A game's revisions, newest first.
+#[tauri::command]
+pub async fn cloud_list_revisions(
+    workspace: String,
+    game: String,
+) -> Result<Vec<cloud::api::RevisionSummary>, String> {
+    let slug = cloud::workspaces::resolve_slug(&workspace)
+        .await
+        .map_err(|e| format!("{e:#}"))?;
+    let client = cloud::api::CloudClient::from_stored_token().map_err(|e| e.to_string())?;
+    client
+        .list_revisions(&slug, &game)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+/// One revision's detail (manifest + per-mode stats).
+#[tauri::command]
+pub async fn cloud_revision_detail(
+    workspace: String,
+    game: String,
+    number: i64,
+) -> Result<cloud::api::RevisionDetail, String> {
+    let slug = cloud::workspaces::resolve_slug(&workspace)
+        .await
+        .map_err(|e| format!("{e:#}"))?;
+    let client = cloud::api::CloudClient::from_stored_token().map_err(|e| e.to_string())?;
+    client
+        .revision_detail(&slug, &game, number)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+/// Pull a specific revision's math into the app-managed cloud-math dir and
+/// create-or-update a local profile pointing at it. Emits `math-sync-progress`
+/// (overlay). Returns the resulting profile id.
+#[tauri::command]
+pub async fn cloud_pull_revision_to_profile(
+    app: AppHandle,
+    workspace: String,
+    game: String,
+    number: i64,
+    profile_name: Option<String>,
+) -> Result<String, String> {
+    cloud::sync::pull_revision_to_profile(&app, &workspace, &game, number, profile_name)
+        .await
+        .map(|p| p.id)
+        .map_err(|e| format!("{e:#}"))
+}
+
 /// Start (or restart) the workspace SSE subscription for `workspace_id`. Live
 /// events arrive on the `cloud-workspace-event` Tauri event; any prior stream is
 /// aborted first so only the active workspace is subscribed.

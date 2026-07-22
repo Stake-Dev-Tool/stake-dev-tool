@@ -65,6 +65,7 @@
   import SettingsIcon from '@lucide/svelte/icons/settings-2';
 
   import DownloadCloudIcon from '@lucide/svelte/icons/download-cloud';
+  import CloudIcon from '@lucide/svelte/icons/cloud';
   import UsersRoundIcon from '@lucide/svelte/icons/users-round';
   import Share2Icon from '@lucide/svelte/icons/share-2';
   import GlobeIcon from '@lucide/svelte/icons/globe';
@@ -355,6 +356,14 @@
       if (changed) profiles = await profilesApi.list();
     }
     savedProfiles = profiles;
+  }
+
+  // Profiles created by the Cloud browser's "Pull to profile" are named
+  // "<game> rev N (cloud)". Read that suffix to show a "cloud rev N" badge on
+  // the launcher (the marker convention — see cloud::sync::pull_revision_to_profile).
+  function cloudRevOf(name: string): number | null {
+    const m = /\brev\s+(\d+)\s+\(cloud\)\s*$/i.exec(name);
+    return m ? Number.parseInt(m[1], 10) : null;
   }
 
   function formatRelative(ts: number | undefined): string {
@@ -1025,6 +1034,23 @@
                   {...props}
                   variant="ghost"
                   size="icon"
+                  onclick={() => goto('/cloud')}
+                  aria-label="Cloud"
+                >
+                  <CloudIcon class="h-4 w-4" />
+                </Button>
+              {/snippet}
+            </Tooltip.Trigger>
+            <Tooltip.Content>Cloud — browse games &amp; revisions</Tooltip.Content>
+          </Tooltip.Root>
+
+          <Tooltip.Root>
+            <Tooltip.Trigger>
+              {#snippet child({ props })}
+                <Button
+                  {...props}
+                  variant="ghost"
+                  size="icon"
                   onclick={() => goto('/teams')}
                   aria-label="Teams"
                 >
@@ -1228,6 +1254,12 @@
                       {p.name}
                     </button>
                     <Badge variant="secondary" class="font-mono-tab text-xs">{profileGameSlug(p)}</Badge>
+                    {#if cloudRevOf(p.name) !== null}
+                      <Badge variant="outline" class="gap-1 text-xs text-emerald-500 border-emerald-500/50">
+                        <CloudIcon class="h-3 w-3" />
+                        cloud rev {cloudRevOf(p.name)}
+                      </Badge>
+                    {/if}
                     {#if ready === false}
                       <Badge variant="outline" class="text-xs text-amber-500 border-amber-500/50">
                         math missing

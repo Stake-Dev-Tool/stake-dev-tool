@@ -354,6 +354,53 @@ export type WorkspaceEvent =
   | { type: 'document'; slug: string; docKind: 'profile' | 'saved_round'; docId: string; seq: number }
   | { type: 'revision_pushed'; slug: string; game: string; number: number };
 
+// ---- Cloud browser (games → revisions → pull-to-profile) ----
+// Wire shapes mirror the M2 server (snake_case), passed straight through.
+
+export type CloudStatsStatus = 'pending' | 'ok' | 'error';
+
+export type CloudGame = {
+  id?: string | null;
+  name?: string | null;
+  slug: string;
+  head_number?: number | null;
+  revisions_count?: number | null;
+};
+
+export type CloudRevisionSummary = {
+  number: number;
+  message: string;
+  author_display_name?: string | null;
+  created_at: string;
+  files_count: number;
+  total_size: number;
+  stats_status?: CloudStatsStatus | null;
+};
+
+export type CloudRevisionMode = {
+  mode: string;
+  cost: number;
+  rtp: number;
+  max_win: number;
+  entries?: number | null;
+  hit_rate?: number | null;
+};
+
+export type CloudRevisionStats = {
+  status?: CloudStatsStatus | null;
+  error?: string | null;
+  modes: CloudRevisionMode[];
+};
+
+export type CloudRevisionDetail = {
+  number: number;
+  message: string;
+  author_display_name?: string | null;
+  created_at: string;
+  files: { path: string; hash: string; size: number }[];
+  stats?: CloudRevisionStats | null;
+};
+
 export const cloudApi = {
   getBaseUrl: () => invoke<string>('cloud_get_base_url'),
   setBaseUrl: (url: string) => invoke<string>('cloud_set_base_url', { url }),
@@ -363,6 +410,32 @@ export const cloudApi = {
   currentUser: () => invoke<CloudUser | null>('cloud_current_user'),
   signOut: () => invoke<void>('cloud_sign_out'),
   listWorkspaces: () => invoke<{ workspaces: WorkspaceSummary[] }>('cloud_list_workspaces'),
+  // ---- Cloud browser (workspace id in; slug resolved server-side) ----
+  /** Games in a workspace (name, slug, head revision number, count). */
+  listGames: (workspace: string) => invoke<CloudGame[]>('cloud_list_games', { workspace }),
+  /** A game's revisions, newest first. */
+  listRevisions: (workspace: string, game: string) =>
+    invoke<CloudRevisionSummary[]>('cloud_list_revisions', { workspace, game }),
+  /** One revision's detail (manifest + per-mode stats). */
+  revisionDetail: (workspace: string, game: string, number: number) =>
+    invoke<CloudRevisionDetail>('cloud_revision_detail', { workspace, game, number }),
+  /**
+   * Pull a revision's math into the app-managed cloud-math dir and create/update
+   * a local profile pointing at it (progress via the math-sync overlay).
+   * Returns the profile id.
+   */
+  pullRevisionToProfile: (
+    workspace: string,
+    game: string,
+    number: number,
+    profileName?: string | null
+  ) =>
+    invoke<string>('cloud_pull_revision_to_profile', {
+      workspace,
+      game,
+      number,
+      profileName: profileName ?? null
+    }),
   /** Start (or restart) the live SSE stream for a workspace. */
   subscribe: (workspaceId: string) => invoke<void>('cloud_subscribe', { workspaceId }),
   unsubscribe: () => invoke<void>('cloud_unsubscribe')
