@@ -1,10 +1,20 @@
 name: CI
 
+# Workspace-wide checks (desktop + lgs + cli + everything). Site, web and
+# deploy have their own workflows; markdown-only changes trigger nothing.
 on:
   push:
-    branches: [main]
+    branches: [main, v2]
+    paths-ignore:
+      - 'site/**'
+      - 'deploy/**'
+      - '**.md'
   pull_request:
-    branches: [main]
+    branches: [main, v2]
+    paths-ignore:
+      - 'site/**'
+      - 'deploy/**'
+      - '**.md'
 
 concurrency:
   group: ci-${{ github.workflow }}-${{ github.ref }}

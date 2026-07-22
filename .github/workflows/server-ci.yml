@@ -1,38 +1,50 @@
 name: Server CI
 
+# Paths cover everything that ends up in the production server image
+# (deploy/Dockerfile): crates/{server,protocol,lgs} + the embedded ui/ build
+# (test view, include_dir'd into lgs) + web/ (dashboard, served at runtime).
 on:
   push:
     branches: [v2]
     paths:
       - 'crates/server/**'
       - 'crates/protocol/**'
+      - 'crates/lgs/**'
       - 'Cargo.toml'
       - 'Cargo.lock'
       - 'docker-compose.dev.yml'
-      - 'ui/src/lib/protocol/**'
+      - 'ui/**'
       - 'web/**'
       - 'pnpm-workspace.yaml'
       - 'pnpm-lock.yaml'
       - 'package.json'
+      - 'deploy/Dockerfile'
+      - 'deploy/docker-compose.prod.yml'
       - '.github/workflows/server-ci.yml'
   pull_request:
     branches: [v2, main]
     paths:
       - 'crates/server/**'
       - 'crates/protocol/**'
+      - 'crates/lgs/**'
       - 'Cargo.toml'
       - 'Cargo.lock'
       - 'docker-compose.dev.yml'
-      - 'ui/src/lib/protocol/**'
+      - 'ui/**'
       - 'web/**'
       - 'pnpm-workspace.yaml'
       - 'pnpm-lock.yaml'
       - 'package.json'
+      - 'deploy/Dockerfile'
+      - 'deploy/docker-compose.prod.yml'
       - '.github/workflows/server-ci.yml'
 
+# PR runs are superseded by newer pushes; production pushes must NOT cancel
+# each other (an in-flight deploy killed mid-build leaves nothing broken, but
+# queuing is strictly safer and GitHub keeps only the newest pending run).
 concurrency:
   group: server-ci-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
@@ -125,3 +137,43 @@ jobs:
       - run: pnpm --filter web check
 
       - run: pnpm --filter web build
+
+  # Continuous deployment: every green push to v2 rebuilds and restarts the
+  # production server. The SSH key is locked to a forced command on the box
+  # (/usr/local/bin/sdt-deploy) that only accepts a full commit sha already on
+  # origin/v2 — it cannot open a shell or run anything else. Caddy is left
+  # untouched (recreating it drops live connections); deploy/Caddyfile changes
+  # remain a rare manual step, see deploy/README.md.
+  deploy:
+    if: github.event_name == 'push' && github.ref == 'refs/heads/v2'
+    needs: [server, web]
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    environment:
+      name: production
+      url: https://app.stakedevtool.com
+    concurrency:
+      group: deploy-server-production
+      cancel-in-progress: false
+    steps:
+      - name: Set up SSH
+        run: |
+          mkdir -p ~/.ssh
+          printf '%s\n' "${{ secrets.DEPLOY_SSH_KEY }}" > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+          # Pinned host key (public info) — no TOFU at deploy time.
+          echo "${{ secrets.DEPLOY_HOST }} ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIC0krTebHIHj/s+RFaCCdLfgGXXPtSa/IVfBiWCftl+8" > ~/.ssh/known_hosts
+
+      - name: Deploy ${{ github.sha }}
+        run: |
+          ssh -i ~/.ssh/deploy_key \
+            -o IdentitiesOnly=yes \
+            -o ServerAliveInterval=30 -o ServerAliveCountMax=40 \
+            root@${{ secrets.DEPLOY_HOST }} "${{ github.sha }}"
+
+      - name: Verify prod is running this commit
+        run: |
+          short=$(echo "${{ github.sha }}" | cut -c1-7)
+          build=$(curl -fsS https://app.stakedevtool.com/healthz | jq -r .build)
+          echo "prod build: $build (expected: $short)"
+          [[ "$build" == "$short"* ]]

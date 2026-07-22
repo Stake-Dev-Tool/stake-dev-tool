@@ -1,0 +1,10 @@
+{
+  "$schema": "https://openapi.vercel.sh/vercel.json",
+  "installCommand": "pnpm install --filter site",
+  "ignoreCommand": "git diff --quiet HEAD^ HEAD -- . ../pnpm-lock.yaml",
+  "git": {
+    "deploymentEnabled": {
+      "main": false
+    }
+  }
+}

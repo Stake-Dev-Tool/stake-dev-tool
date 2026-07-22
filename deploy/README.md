@@ -27,6 +27,23 @@ up), so there is no separate migration step.
 
 ## Updates
 
+### Hosted instance: automatic (CI/CD)
+
+The hosted box deploys itself: every push to `v2` that touches the server
+image (crates, ui, web, Dockerfile — see the paths filter in
+`.github/workflows/server-ci.yml`) runs tests, then the `deploy` job
+SSHes into the box with a dedicated key. That key is pinned in
+`authorized_keys` to a forced command (`/usr/local/bin/sdt-deploy`) which
+only accepts a full commit sha already on `origin/v2` — it resets the
+checkout to that sha, rebuilds the `server` service, and waits until
+`/healthz` reports the new build. Secrets: `DEPLOY_SSH_KEY` +
+`DEPLOY_HOST` in the GitHub repo.
+
+The marketing site deploys the same way via the Vercel Git integration
+(see `site/README.md`). No manual deploy step exists for either.
+
+### Self-host / manual fallback
+
 Routine update (server code only — leaves Caddy untouched, so the only
 downtime is the ~2 s server swap):
 
