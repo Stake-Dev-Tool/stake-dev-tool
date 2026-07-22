@@ -151,7 +151,7 @@ pub async fn sync(workspace_id: &str) -> Result<SyncReport> {
         match put_lww(&docs, KIND_SAVED_ROUND, &r.id, &data, base).await {
             Ok(_) => report.pushed += 1,
             Err(DocError::Conflict { .. }) => report.conflicts += 1,
-            Err(e) => return Err(anyhow!("push round {}: {e}", &r.id)),
+            Err(e) => return Err(anyhow!("push round {}: {e}", r.id)),
         }
     }
 
