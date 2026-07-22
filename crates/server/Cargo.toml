@@ -3,7 +3,7 @@ name = "server"
 version.workspace = true
 edition.workspace = true
 authors.workspace = true
-license.workspace = true
+license = "AGPL-3.0-only"
 description = "Cloud platform server (axum) for the Stake Dev Tool"
 
 [lib]

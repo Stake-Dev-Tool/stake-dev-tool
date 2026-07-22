@@ -128,5 +128,7 @@ directly or use GitHub's private vulnerability reporting.
 
 ## License
 
-By contributing you agree that your contributions will be licensed under the
-[MIT License](LICENSE).
+By contributing you agree that your contributions are licensed under the
+license covering the directory they touch: [MIT](LICENSE) for most of the
+repository, [AGPL-3.0](crates/server/LICENSE) for `crates/server/` and
+`web/`. The `site/` directory is not open to external contributions.

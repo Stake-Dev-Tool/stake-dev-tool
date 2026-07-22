@@ -278,11 +278,17 @@ Issues, PRs, and discussions are welcome — see
 
 ## License
 
-- Desktop app and the `lgs` engine: **MIT** — see [LICENSE](LICENSE).
-- Cloud server, protocol and CLI (`crates/server`, `crates/protocol`,
-  `crates/cli`): **AGPL-3.0** with V2. Self-hosting is untouched; the
-  licence only prevents reselling the server as a closed hosted service
-  (see [V2.md](V2.md#licensing)).
+This is one repository with three licensing zones:
+
+| Path | License |
+|---|---|
+| Everything not listed below — desktop app, `lgs` engine, CLI, protocol, test-view UI, deploy configs | **MIT** — [LICENSE](LICENSE) |
+| `crates/server/`, `web/` (the cloud server + its dashboard) | **AGPL-3.0** — [crates/server/LICENSE](crates/server/LICENSE) |
+| `site/` (the stakedevtool.com marketing site) | Source-visible, **all rights reserved** — [site/LICENSE](site/LICENSE) |
+
+Self-hosting the server is free forever and untouched by the AGPL — the
+licence only requires anyone offering a modified server as a hosted
+service to publish their changes.
 
 ---
 
