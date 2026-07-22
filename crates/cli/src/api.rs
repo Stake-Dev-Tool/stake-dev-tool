@@ -962,8 +962,21 @@ struct ErrorDetail {
     missing: Vec<String>,
 }
 
+/// OAuth-style error body (`{"error":"authorization_pending"}`) returned by the
+/// RFC 8628 device endpoints, where `error` is a bare string instead of the
+/// API's `{code,message}` object. Without this shape the poll loop would see a
+/// synthetic `http_400` and treat a perfectly normal "not approved yet" as
+/// fatal.
+#[derive(Deserialize)]
+struct OAuthErrorEnvelope {
+    error: String,
+    #[serde(default)]
+    error_description: String,
+}
+
 /// Decodes the `{"error":{code,message},"missing":[…]}` envelope, falling back
-/// to a synthetic error when the body isn't the expected JSON.
+/// to the OAuth string form, then to a synthetic error when the body isn't the
+/// expected JSON.
 fn parse_api_error(status: u16, bytes: &[u8]) -> ApiError {
     if let Ok(env) = serde_json::from_slice::<ErrorEnvelope>(bytes) {
         let has_content = !env.error.code.is_empty()
@@ -991,6 +1004,20 @@ fn parse_api_error(status: u16, bytes: &[u8]) -> ApiError {
                 missing,
             };
         }
+    }
+    if let Ok(oauth) = serde_json::from_slice::<OAuthErrorEnvelope>(bytes)
+        && !oauth.error.is_empty()
+    {
+        return ApiError {
+            status,
+            code: oauth.error,
+            message: if oauth.error_description.is_empty() {
+                format!("HTTP {status}")
+            } else {
+                oauth.error_description
+            },
+            missing: Vec::new(),
+        };
     }
     let text = String::from_utf8_lossy(bytes);
     let snippet: String = text.trim().chars().take(300).collect();
@@ -1035,6 +1062,16 @@ mod tests {
         assert_eq!(err.code, "stale_parent");
         assert!(err.missing.is_empty());
         assert_eq!(err.message, "rev moved on");
+    }
+
+    #[test]
+    fn parses_oauth_device_error_string() {
+        // RFC 8628 device poll: `error` is a bare string, not the API object.
+        let err = parse_api_error(400, br#"{"error":"authorization_pending"}"#);
+        assert_eq!(err.code, "authorization_pending");
+        let err = parse_api_error(400, br#"{"error":"slow_down","error_description":"chill"}"#);
+        assert_eq!(err.code, "slow_down");
+        assert_eq!(err.message, "chill");
     }
 
     #[test]
