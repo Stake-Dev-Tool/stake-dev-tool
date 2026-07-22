@@ -31,11 +31,18 @@ pub struct AppState {
     pub config: Arc<Config>,
     pub pool: PgPool,
     pub store: Arc<dyn ObjectStore>,
-    /// Process-local failed-login limiter (see `auth::ratelimit`).
+    /// Process-local failed-login limiter, keyed per `(ip, email)` (see
+    /// `auth::ratelimit`).
     pub login_limiter: Arc<LoginRateLimiter>,
+    /// Per-account failed-login limiter keyed by email alone, so rotating source
+    /// IPs can't brute-force one account past its across-IP budget.
+    pub account_limiter: Arc<LoginRateLimiter>,
     /// Process-local limiter for the email-sending endpoints (forgot-password /
     /// resend-verification): 5 per hour per `(ip, email)`.
     pub email_limiter: Arc<LoginRateLimiter>,
+    /// Generous per-IP limiter for the unauthenticated abuse-prone endpoints
+    /// (registration, device-code start).
+    pub ip_limiter: Arc<LoginRateLimiter>,
     /// Reused HTTP client for GitHub/Discord OAuth calls and Resend email.
     pub http_client: reqwest::Client,
     /// Per-workspace realtime fan-out behind the SSE stream (M3).
@@ -53,10 +60,12 @@ impl AppState {
             pool,
             store,
             login_limiter: Arc::new(LoginRateLimiter::new()),
+            account_limiter: Arc::new(LoginRateLimiter::per_account()),
             email_limiter: Arc::new(LoginRateLimiter::with_limits(
                 5,
                 std::time::Duration::from_secs(3600),
             )),
+            ip_limiter: Arc::new(LoginRateLimiter::per_ip()),
             http_client: reqwest::Client::new(),
             events: Arc::new(crate::documents::WorkspaceEvents::new()),
             custom_domains: Arc::new(crate::share::custom::CustomDomainCache::new()),

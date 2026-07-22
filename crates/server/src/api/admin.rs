@@ -5,9 +5,14 @@
 //!
 //! ## Who is an admin
 //! A caller is an admin iff their `users.is_admin` flag is set OR their email is
-//! in the `SERVER_ADMIN_EMAILS` config allowlist. The allowlist is the bootstrap:
-//! it makes the first admin without any SQL, and an admin can then flip
-//! `is_admin` on other accounts through this surface.
+//! in the `SERVER_ADMIN_EMAILS` config allowlist AND that email is **verified**
+//! (`email_verified_at IS NOT NULL`). The allowlist is the bootstrap: it makes the
+//! first admin without any SQL, and an admin can then flip `is_admin` on other
+//! accounts through this surface. The verified-email requirement closes a
+//! bootstrap-window hijack: an attacker who registers the operator's email before
+//! the operator does never gets admin, because they can't verify an address they
+//! don't control (and a passwordless OAuth account is only ever created from a
+//! provider-verified email).
 //!
 //! ## Hiding the surface
 //! A non-admin (including a member with a valid session, or a PAT lacking the
@@ -62,6 +67,10 @@ pub struct AdminUser {
     pub user_id: Uuid,
     /// The account email (original case), kept for the self-demotion guard.
     pub email: String,
+    /// Whether the account's email is verified — the allowlist only admits a
+    /// verified email, so the self-demotion guard reuses this to decide whether
+    /// the caller stays admin via the allowlist after dropping their flag.
+    pub email_verified: bool,
 }
 
 /// The uniform "route does not exist" 404 — identical to the `/api` fallback, so
@@ -70,10 +79,16 @@ fn hidden() -> ApiError {
     ApiError::not_found("not_found", "no such API endpoint")
 }
 
-/// True when `email` (case-insensitively) is in the `SERVER_ADMIN_EMAILS` list.
-fn is_admin_email(state: &AppState, email: &str) -> bool {
-    let email = email.to_ascii_lowercase();
-    state.config.admin_emails.contains(&email)
+/// True when the `SERVER_ADMIN_EMAILS` allowlist admits this account: the email
+/// matches (case-insensitively) AND is verified. An unverified email never counts,
+/// so registering someone else's address can't grant admin during the bootstrap
+/// window.
+fn allowlisted_admin(state: &AppState, email: &str, email_verified: bool) -> bool {
+    email_verified
+        && state
+            .config
+            .admin_emails
+            .contains(&email.to_ascii_lowercase())
 }
 
 #[async_trait]
@@ -91,16 +106,18 @@ impl FromRequestParts<AppState> for AdminUser {
         if !user.has_scope("full") {
             return Err(hidden());
         }
-        let row: Option<(bool, String)> =
-            sqlx::query_as("SELECT is_admin, email FROM users WHERE id = $1")
-                .bind(user.user_id)
-                .fetch_optional(&state.pool)
-                .await?;
-        let (is_admin_flag, email) = row.ok_or_else(hidden)?;
-        if is_admin_flag || is_admin_email(state, &email) {
+        let row: Option<(bool, String, bool)> = sqlx::query_as(
+            "SELECT is_admin, email, (email_verified_at IS NOT NULL) FROM users WHERE id = $1",
+        )
+        .bind(user.user_id)
+        .fetch_optional(&state.pool)
+        .await?;
+        let (is_admin_flag, email, email_verified) = row.ok_or_else(hidden)?;
+        if is_admin_flag || allowlisted_admin(state, &email, email_verified) {
             Ok(AdminUser {
                 user_id: user.user_id,
                 email,
+                email_verified,
             })
         } else {
             Err(hidden())
@@ -457,7 +474,10 @@ async fn set_admin(
     Path(id): Path<Uuid>,
     Json(req): Json<SetAdminRequest>,
 ) -> ApiResult<Json<AdminMe>> {
-    if !req.is_admin && id == admin.user_id && !is_admin_email(&state, &admin.email) {
+    if !req.is_admin
+        && id == admin.user_id
+        && !allowlisted_admin(&state, &admin.email, admin.email_verified)
+    {
         let flagged: i64 = sqlx::query_scalar("SELECT count(*) FROM users WHERE is_admin = true")
             .fetch_one(&state.pool)
             .await?;

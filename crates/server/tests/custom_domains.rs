@@ -73,6 +73,7 @@ async fn setup() -> Option<Ctx> {
         server_tenant_books_cap_bytes: None,
         play_domain: Some(PLAY_DOMAIN.to_string()),
         admin_emails: Vec::new(),
+        trusted_proxies: Default::default(),
     };
     let pool = db::connect_lazy(&database_url).expect("lazy pool");
     let store = storage::build_object_store(&config).expect("fs store");

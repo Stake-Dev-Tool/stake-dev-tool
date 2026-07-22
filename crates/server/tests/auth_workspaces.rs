@@ -49,6 +49,7 @@ async fn setup_with(configure: impl FnOnce(&mut Config)) -> Option<Ctx> {
         server_tenant_books_cap_bytes: None,
         play_domain: None,
         admin_emails: Vec::new(),
+        trusted_proxies: Default::default(),
     };
     configure(&mut config);
     let pool = db::connect_lazy(&database_url).expect("lazy pool");

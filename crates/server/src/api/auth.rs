@@ -51,12 +51,22 @@ impl From<UserRow> for User {
     }
 }
 
-/// Registers a password account and starts a session.
+/// Registers a password account and starts a session. Rate-limited per client IP
+/// (generous) so registration can't be scripted into account spam.
 pub async fn register(
     State(state): State<AppState>,
+    ClientIp(ip): ClientIp,
     jar: CookieJar,
     Json(req): Json<RegisterRequest>,
 ) -> ApiResult<(CookieJar, Json<UserResponse>)> {
+    if state.ip_limiter.is_ip_blocked(&ip) {
+        return Err(ApiError::too_many_requests(
+            "rate_limited",
+            "too many registration attempts; try again later",
+        ));
+    }
+    state.ip_limiter.record_ip_attempt(&ip);
+
     let email = req.email.trim();
     validate_email(email)?;
     if req.password.len() < MIN_PASSWORD_LEN {
@@ -167,7 +177,12 @@ pub async fn login(
 ) -> ApiResult<(CookieJar, Json<UserResponse>)> {
     let email = req.email.trim();
 
-    if state.login_limiter.is_blocked(&ip, email) {
+    // Two limiters gate a login: per-`(ip, email)` (a single source hammering one
+    // account) AND per-account across every IP (a botnet rotating source IPs to
+    // guess one account). Either being exhausted throttles before any DB/argon2
+    // work — so IP rotation alone can't outrun the account limiter.
+    if state.login_limiter.is_blocked(&ip, email) || state.account_limiter.is_account_blocked(email)
+    {
         return Err(ApiError::too_many_requests(
             "rate_limited",
             "too many failed login attempts; try again later",
@@ -197,11 +212,13 @@ pub async fn login(
     };
     if !authenticated {
         state.login_limiter.record_failure(&ip, email);
+        state.account_limiter.record_account_failure(email);
         return Err(invalid());
     }
     let row = row.expect("authenticated implies a row");
 
     state.login_limiter.clear(&ip, email);
+    state.account_limiter.clear_account(email);
     let secret = sessions::create_session(&state.pool, row.id).await?;
     let user = User {
         id: row.id,
@@ -704,7 +721,20 @@ pub async fn resend_verification(
 }
 
 /// Starts a device pairing: returns the one-shot device code and human code.
-pub async fn device_code(State(state): State<AppState>) -> ApiResult<Json<DeviceCodeResponse>> {
+/// Rate-limited per client IP (generous) so the device-code table can't be
+/// flooded by an unauthenticated caller.
+pub async fn device_code(
+    State(state): State<AppState>,
+    ClientIp(ip): ClientIp,
+) -> ApiResult<Json<DeviceCodeResponse>> {
+    if state.ip_limiter.is_ip_blocked(&ip) {
+        return Err(ApiError::too_many_requests(
+            "rate_limited",
+            "too many device pairing requests; try again later",
+        ));
+    }
+    state.ip_limiter.record_ip_attempt(&ip);
+
     let (device_code, user_code) = device::create_device_code(&state.pool).await?;
     let verification_uri = format!("{}/device", state.config.public_base_url());
     Ok(Json(DeviceCodeResponse {

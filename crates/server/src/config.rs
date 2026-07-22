@@ -1,3 +1,4 @@
+use std::net::IpAddr;
 use std::path::PathBuf;
 
 use thiserror::Error;
@@ -26,6 +27,8 @@ pub enum ConfigError {
     InvalidBool { key: &'static str, value: String },
     #[error("{key} must be a non-negative integer, got \"{value}\"")]
     InvalidU64 { key: &'static str, value: String },
+    #[error("SERVER_TRUSTED_PROXIES entry is not a valid IP or CIDR: \"{0}\"")]
+    InvalidCidr(String),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -82,6 +85,134 @@ pub struct Config {
     /// admin is bootstrapped, before any admin exists to set the flag via SQL.
     /// Empty/unset means the allowlist grants no one.
     pub admin_emails: Vec<String>,
+    /// Reverse-proxy networks whose forwarding headers we trust
+    /// (`SERVER_TRUSTED_PROXIES`, comma-separated IPs or CIDRs, e.g.
+    /// `127.0.0.1/32,::1/128`). `X-Forwarded-For` / `X-Real-IP` are honored for
+    /// rate-limit keying ONLY when the direct socket peer falls inside one of
+    /// these networks; from any other peer the headers are ignored and the socket
+    /// address is used. Empty (the default) trusts no proxy — the safe default
+    /// for a directly-exposed server. Behind our Caddy reverse proxy on the same
+    /// host, production sets `127.0.0.1/32,::1/128`.
+    pub trusted_proxies: TrustedProxies,
+}
+
+/// A parsed set of trusted reverse-proxy networks (see [`Config::trusted_proxies`]).
+///
+/// Backs the `X-Forwarded-For` / `X-Real-IP` trust decision in
+/// [`crate::auth::extract`]: forwarding headers are honored only when the direct
+/// socket peer is [`TrustedProxies::contains`]. Empty by default, so a
+/// directly-exposed server never honors a spoofable header.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct TrustedProxies {
+    nets: Vec<Cidr>,
+}
+
+/// One CIDR network in the trusted-proxy allowlist. A bare IP parses as a host
+/// route (`/32` for IPv4, `/128` for IPv6).
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Cidr {
+    /// The network address exactly as parsed (host bits are masked at compare
+    /// time, so an un-normalized entry like `10.0.0.5/8` still matches correctly).
+    addr: IpAddr,
+    prefix: u8,
+}
+
+impl TrustedProxies {
+    /// Parse a comma-separated list of IPs / CIDRs. Whitespace is trimmed and
+    /// empty entries dropped; a malformed entry is a hard [`ConfigError`] so a
+    /// typo surfaces at startup rather than silently trusting nothing.
+    pub fn parse(raw: &str) -> Result<Self, ConfigError> {
+        let mut nets = Vec::new();
+        for entry in raw.split(',') {
+            let entry = entry.trim();
+            if entry.is_empty() {
+                continue;
+            }
+            nets.push(Cidr::parse(entry)?);
+        }
+        Ok(Self { nets })
+    }
+
+    /// True when no proxy is trusted (forwarding headers are never honored).
+    pub fn is_empty(&self) -> bool {
+        self.nets.is_empty()
+    }
+
+    /// True when `ip` falls inside any trusted network. An IPv4-mapped IPv6 peer
+    /// (`::ffff:a.b.c.d`) is compared as its IPv4 form.
+    pub fn contains(&self, ip: IpAddr) -> bool {
+        let ip = normalize_ip(ip);
+        self.nets.iter().any(|net| net.contains(ip))
+    }
+}
+
+impl Cidr {
+    fn parse(entry: &str) -> Result<Self, ConfigError> {
+        let invalid = || ConfigError::InvalidCidr(entry.to_string());
+        let (addr, prefix) = match entry.split_once('/') {
+            Some((ip, p)) => {
+                let addr: IpAddr = ip.trim().parse().map_err(|_| invalid())?;
+                let max = if addr.is_ipv4() { 32 } else { 128 };
+                let prefix: u8 = p.trim().parse().map_err(|_| invalid())?;
+                if prefix > max {
+                    return Err(invalid());
+                }
+                (addr, prefix)
+            }
+            None => {
+                let addr: IpAddr = entry.parse().map_err(|_| invalid())?;
+                let prefix = if addr.is_ipv4() { 32 } else { 128 };
+                (addr, prefix)
+            }
+        };
+        Ok(Self { addr, prefix })
+    }
+
+    /// True when `ip` (already normalized) shares this network's high `prefix`
+    /// bits. Mismatched address families never match.
+    fn contains(&self, ip: IpAddr) -> bool {
+        match (self.addr, ip) {
+            (IpAddr::V4(net), IpAddr::V4(addr)) => {
+                mask_v4(u32::from(net), self.prefix) == mask_v4(u32::from(addr), self.prefix)
+            }
+            (IpAddr::V6(net), IpAddr::V6(addr)) => {
+                mask_v6(u128::from(net), self.prefix) == mask_v6(u128::from(addr), self.prefix)
+            }
+            _ => false,
+        }
+    }
+}
+
+/// Fold an IPv4-mapped IPv6 address (`::ffff:a.b.c.d`) down to its IPv4 form so a
+/// dual-stack listener's mapped peer matches an IPv4 CIDR entry.
+fn normalize_ip(ip: IpAddr) -> IpAddr {
+    match ip {
+        IpAddr::V6(v6) => match v6.to_ipv4_mapped() {
+            Some(v4) => IpAddr::V4(v4),
+            None => IpAddr::V6(v6),
+        },
+        other => other,
+    }
+}
+
+/// Zero the low `32 - prefix` bits of an IPv4 address. `prefix == 0` masks
+/// everything (a shift by 32 would be undefined, so it is special-cased).
+fn mask_v4(bits: u32, prefix: u8) -> u32 {
+    if prefix == 0 {
+        0
+    } else {
+        bits & (u32::MAX << (32 - prefix))
+    }
+}
+
+/// Zero the low `128 - prefix` bits of an IPv6 address. `prefix == 0` masks
+/// everything (a shift by 128 would be undefined, so it is special-cased).
+fn mask_v6(bits: u128, prefix: u8) -> u128 {
+    if prefix == 0 {
+        0
+    } else {
+        bits & (u128::MAX << (128 - prefix))
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -130,6 +261,12 @@ pub struct StripeConfig {
     pub price_seat_yearly: String,
     /// Quantity-based price for the storage add-on (one unit = +10 GiB).
     pub price_storage: String,
+    /// Optional Stripe Customer Portal configuration id
+    /// (`STRIPE_PORTAL_CONFIGURATION`, `bpc_…`). When set, portal sessions are
+    /// created against this configuration; when `None`, Stripe falls back to the
+    /// account's default portal configuration. Purely optional — its absence does
+    /// not gate billing.
+    pub portal_configuration: Option<String>,
 }
 
 impl Config {
@@ -303,6 +440,8 @@ impl Config {
                 price_seat_monthly,
                 price_seat_yearly,
                 price_storage,
+                // Optional: absent/blank → account default portal configuration.
+                portal_configuration: non_empty(get("STRIPE_PORTAL_CONFIGURATION")),
             }),
             _ => None,
         };
@@ -325,6 +464,9 @@ impl Config {
                 .map(|s| s.trim_matches(['.', ' ']).to_ascii_lowercase())
                 .filter(|s| !s.is_empty()),
             admin_emails: parse_admin_emails(get("SERVER_ADMIN_EMAILS")),
+            trusted_proxies: TrustedProxies::parse(
+                &get("SERVER_TRUSTED_PROXIES").unwrap_or_default(),
+            )?,
         })
     }
 }
@@ -674,5 +816,60 @@ mod tests {
         // A whitespace-only value grants no one.
         let cfg = Config::from_source(source(&[("SERVER_ADMIN_EMAILS", "   ")])).unwrap();
         assert!(cfg.admin_emails.is_empty());
+    }
+
+    #[test]
+    fn trusted_proxies_default_empty_trusts_no_one() {
+        let cfg = Config::from_source(|_| None).unwrap();
+        assert!(cfg.trusted_proxies.is_empty());
+        assert!(!cfg.trusted_proxies.contains("127.0.0.1".parse().unwrap()));
+    }
+
+    #[test]
+    fn trusted_proxies_parses_ips_and_cidrs() {
+        let cfg = Config::from_source(source(&[(
+            "SERVER_TRUSTED_PROXIES",
+            " 127.0.0.1 , 10.0.0.0/8 , ::1 , 2001:db8::/32 ,, ",
+        )]))
+        .unwrap();
+        let tp = &cfg.trusted_proxies;
+        assert!(!tp.is_empty());
+        // Bare IPv4 host route.
+        assert!(tp.contains("127.0.0.1".parse().unwrap()));
+        assert!(!tp.contains("127.0.0.2".parse().unwrap()));
+        // IPv4 CIDR range.
+        assert!(tp.contains("10.1.2.3".parse().unwrap()));
+        assert!(tp.contains("10.255.255.255".parse().unwrap()));
+        assert!(!tp.contains("11.0.0.1".parse().unwrap()));
+        // Bare IPv6 host route.
+        assert!(tp.contains("::1".parse().unwrap()));
+        // IPv6 CIDR range.
+        assert!(tp.contains("2001:db8::dead:beef".parse().unwrap()));
+        assert!(!tp.contains("2001:dead::1".parse().unwrap()));
+        // Mismatched family never matches.
+        assert!(!tp.contains("192.168.0.1".parse().unwrap()));
+    }
+
+    #[test]
+    fn trusted_proxies_matches_ipv4_mapped_ipv6_peer() {
+        // A dual-stack listener may report an IPv4 peer as ::ffff:a.b.c.d; it must
+        // still match an IPv4 CIDR entry.
+        let cfg =
+            Config::from_source(source(&[("SERVER_TRUSTED_PROXIES", "127.0.0.1/32")])).unwrap();
+        assert!(
+            cfg.trusted_proxies
+                .contains("::ffff:127.0.0.1".parse().unwrap())
+        );
+    }
+
+    #[test]
+    fn trusted_proxies_rejects_garbage() {
+        let err =
+            Config::from_source(source(&[("SERVER_TRUSTED_PROXIES", "not-an-ip")])).unwrap_err();
+        assert_eq!(err, ConfigError::InvalidCidr("not-an-ip".to_string()));
+        // Out-of-range prefix is rejected too.
+        let err =
+            Config::from_source(source(&[("SERVER_TRUSTED_PROXIES", "10.0.0.0/33")])).unwrap_err();
+        assert_eq!(err, ConfigError::InvalidCidr("10.0.0.0/33".to_string()));
     }
 }

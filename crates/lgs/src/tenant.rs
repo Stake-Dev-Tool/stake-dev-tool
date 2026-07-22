@@ -186,16 +186,24 @@ impl TenantRegistry {
         self.books.set_tenant_cap(tenant, max_bytes);
     }
 
-    /// Build an axum router scoped to one registered tenant — the exact same
-    /// assembly as the single-tenant standalone server (API routes AND the
-    /// embedded test-view UI fallback), bound to that tenant's state. Returns
-    /// `None` if the tenant is not registered.
+    /// Build an axum router scoped to one registered tenant — the same route +
+    /// embedded test-view UI assembly as the single-tenant standalone server,
+    /// bound to that tenant's state, but with **no CORS layer**
+    /// ([`crate::CorsMode::SameOrigin`]). This registry backs only the cloud
+    /// multi-tenant mounts (the workbench `/ws/…` and public share hosts), where
+    /// the front-end is same-origin with the LGS, so the desktop's permissive
+    /// mirror-with-credentials CORS would be needless exposure. Returns `None` if
+    /// the tenant is not registered.
     ///
     /// Host/path → tenant dispatch (e.g. `*.play.<domain>`) lives above this in
     /// the server and is intentionally out of scope here.
     pub fn router_for(&self, tenant: &TenantId) -> Option<axum::Router> {
         let state = self.get(tenant)?;
-        Some(crate::build_router(state, crate::default_ui_dir()))
+        Some(crate::build_router_with_cors(
+            state,
+            crate::default_ui_dir(),
+            crate::CorsMode::SameOrigin,
+        ))
     }
 }
 

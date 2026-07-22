@@ -6,7 +6,7 @@
 //! resolves a best-effort client address for login rate-limiting.
 
 use std::convert::Infallible;
-use std::net::SocketAddr;
+use std::net::{IpAddr, SocketAddr};
 
 use axum::async_trait;
 use axum::extract::{ConnectInfo, FromRequestParts};
@@ -19,6 +19,7 @@ use uuid::Uuid;
 
 use crate::AppState;
 use crate::auth::{sessions, tokens};
+use crate::config::TrustedProxies;
 use crate::error::{ApiError, ApiResult};
 
 /// Which credential authenticated the request.
@@ -139,35 +140,174 @@ impl FromRequestParts<AppState> for ClientIp {
 
     async fn from_request_parts(
         parts: &mut Parts,
-        _state: &AppState,
+        state: &AppState,
     ) -> Result<Self, Self::Rejection> {
-        Ok(ClientIp(resolve_ip(parts)))
+        Ok(ClientIp(resolve_ip(parts, &state.config.trusted_proxies)))
     }
 }
 
-/// Trusts `X-Forwarded-For` / `X-Real-IP` (set by our reverse proxy) ahead of
-/// the socket address, falling back to a constant so keying still works in
-/// tests and direct-connection setups.
-fn resolve_ip(parts: &Parts) -> String {
+/// Resolve the client IP used to key rate limiters.
+///
+/// `X-Forwarded-For` / `X-Real-IP` are spoofable by anyone who can reach the
+/// server, so they are honored ONLY when the direct socket peer is a configured
+/// trusted proxy ([`TrustedProxies`]). From any other peer the forwarding headers
+/// are ignored and the socket address is used — otherwise a brute-forcer could
+/// rotate fake `X-Forwarded-For` values to dodge the per-IP login limiter.
+///
+/// The real server always attaches [`ConnectInfo`] (via
+/// `into_make_service_with_connect_info`), so the header is only consulted for a
+/// trusted peer. The no-peer branch is reached solely by in-process tests that
+/// drive the router with `oneshot`; there we fall back to the forwarding headers,
+/// then a constant, so keying still works.
+fn resolve_ip(parts: &Parts, trusted: &TrustedProxies) -> String {
+    let peer = parts
+        .extensions
+        .get::<ConnectInfo<SocketAddr>>()
+        .map(|ConnectInfo(addr)| addr.ip());
+
+    match peer {
+        Some(peer_ip) => {
+            if trusted.contains(peer_ip)
+                && let Some(forwarded) = forwarded_ip(parts, trusted)
+            {
+                return forwarded;
+            }
+            peer_ip.to_string()
+        }
+        None => forwarded_ip(parts, trusted).unwrap_or_else(|| "unknown".to_string()),
+    }
+}
+
+/// The real client from `X-Forwarded-For`, walking the list **right-to-left** and
+/// skipping our own trusted proxies. Our reverse proxy appends the address it
+/// accepted the connection from as the rightmost entry, so the rightmost
+/// non-trusted address is the true client; an attacker can only *prepend* fake
+/// entries on the left, which this never reaches. Garbage entries are skipped
+/// rather than trusted. Falls back to `X-Real-IP`, then `None`.
+fn forwarded_ip(parts: &Parts, trusted: &TrustedProxies) -> Option<String> {
     if let Some(xff) = parts
         .headers
         .get("x-forwarded-for")
         .and_then(|v| v.to_str().ok())
-        && let Some(first) = xff.split(',').next()
     {
-        let ip = first.trim();
-        if !ip.is_empty() {
-            return ip.to_string();
+        for entry in xff.rsplit(',') {
+            let entry = entry.trim();
+            if entry.is_empty() {
+                continue;
+            }
+            match entry.parse::<IpAddr>() {
+                // A hop through one of our own proxies — keep walking left.
+                Ok(ip) if trusted.contains(ip) => continue,
+                Ok(ip) => return Some(ip.to_string()),
+                // Unparseable entry: never trust it, keep walking.
+                Err(_) => continue,
+            }
         }
     }
     if let Some(xri) = parts.headers.get("x-real-ip").and_then(|v| v.to_str().ok()) {
         let ip = xri.trim();
         if !ip.is_empty() {
-            return ip.to_string();
+            return Some(ip.to_string());
         }
     }
-    if let Some(ConnectInfo(addr)) = parts.extensions.get::<ConnectInfo<SocketAddr>>() {
-        return addr.ip().to_string();
+    None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::http::Request;
+
+    /// Build request `Parts` with the given headers and (optional) socket peer.
+    fn parts(peer: Option<&str>, headers: &[(&str, &str)]) -> Parts {
+        let mut builder = Request::builder().uri("/");
+        for (k, v) in headers {
+            builder = builder.header(*k, *v);
+        }
+        let (mut parts, _) = builder
+            .body(axum::body::Body::empty())
+            .unwrap()
+            .into_parts();
+        if let Some(peer) = peer {
+            let addr: SocketAddr = peer.parse().unwrap();
+            parts.extensions.insert(ConnectInfo(addr));
+        }
+        parts
     }
-    "unknown".to_string()
+
+    fn trusted(list: &str) -> TrustedProxies {
+        TrustedProxies::parse(list).unwrap()
+    }
+
+    #[test]
+    fn no_peer_no_headers_is_unknown() {
+        assert_eq!(resolve_ip(&parts(None, &[]), &trusted("")), "unknown");
+    }
+
+    #[test]
+    fn no_peer_falls_back_to_forwarding_headers() {
+        // Only reachable via in-process `oneshot` tests — no socket peer exists.
+        let p = parts(None, &[("x-forwarded-for", "9.9.9.9")]);
+        assert_eq!(resolve_ip(&p, &trusted("")), "9.9.9.9");
+    }
+
+    #[test]
+    fn untrusted_peer_ignores_forwarded_header() {
+        // The spoofable header is dropped; keying stays on the real socket addr.
+        let p = parts(Some("203.0.113.9:44321"), &[("x-forwarded-for", "1.1.1.1")]);
+        assert_eq!(resolve_ip(&p, &trusted("127.0.0.1/32")), "203.0.113.9");
+    }
+
+    #[test]
+    fn trusted_peer_honors_forwarded_header() {
+        let p = parts(Some("127.0.0.1:8080"), &[("x-forwarded-for", "1.1.1.1")]);
+        assert_eq!(resolve_ip(&p, &trusted("127.0.0.1/32")), "1.1.1.1");
+    }
+
+    #[test]
+    fn trusted_peer_prefers_xff_then_real_ip_then_peer() {
+        // XFF with only a comma/empty value falls through to X-Real-IP.
+        let p = parts(
+            Some("127.0.0.1:8080"),
+            &[("x-forwarded-for", "   "), ("x-real-ip", "2.2.2.2")],
+        );
+        assert_eq!(resolve_ip(&p, &trusted("127.0.0.1/32")), "2.2.2.2");
+        // No forwarding headers at all → the trusted peer's own address.
+        let p = parts(Some("127.0.0.1:8080"), &[]);
+        assert_eq!(resolve_ip(&p, &trusted("127.0.0.1/32")), "127.0.0.1");
+    }
+
+    #[test]
+    fn trusted_peer_takes_rightmost_xff_ignoring_prepended_spoof() {
+        // The proxy appends the real client (2.2.2.2) as the rightmost entry; the
+        // attacker's prepended 1.1.1.1 is never reached.
+        let p = parts(
+            Some("127.0.0.1:8080"),
+            &[("x-forwarded-for", "1.1.1.1, 2.2.2.2")],
+        );
+        assert_eq!(resolve_ip(&p, &trusted("127.0.0.1/32")), "2.2.2.2");
+    }
+
+    #[test]
+    fn walk_skips_trusted_proxy_hops_from_the_right() {
+        // Two trusted hops appended after the real client: 9.9.9.9 is returned.
+        let p = parts(
+            Some("127.0.0.1:8080"),
+            &[("x-forwarded-for", "9.9.9.9, 10.0.0.1, 127.0.0.1")],
+        );
+        assert_eq!(
+            resolve_ip(&p, &trusted("127.0.0.1/32, 10.0.0.0/8")),
+            "9.9.9.9"
+        );
+    }
+
+    #[test]
+    fn garbage_xff_entries_are_skipped_not_trusted() {
+        // A junk rightmost entry is skipped in favor of the next valid address.
+        let p = parts(
+            Some("127.0.0.1:8080"),
+            &[("x-forwarded-for", "8.8.8.8, not-an-ip")],
+        );
+        assert_eq!(resolve_ip(&p, &trusted("127.0.0.1/32")), "8.8.8.8");
+    }
 }

@@ -56,19 +56,39 @@ pub fn default_ui_dir() -> Option<std::path::PathBuf> {
     repo.join("index.html").exists().then_some(repo)
 }
 
-pub fn build_router(state: Arc<AppState>, ui_dir: Option<std::path::PathBuf>) -> axum::Router {
-    let cors = CorsLayer::new()
-        .allow_origin(AllowOrigin::mirror_request())
-        .allow_methods([Method::GET, Method::POST, Method::DELETE, Method::OPTIONS])
-        .allow_headers([
-            HeaderName::from_static("content-type"),
-            HeaderName::from_static("authorization"),
-            HeaderName::from_static("x-requested-with"),
-        ])
-        .allow_credentials(true)
-        .allow_private_network(true)
-        .expose_headers([HeaderName::from_static("content-type")]);
+/// Which CORS layer the LGS router is wrapped in.
+///
+/// The choice is a security boundary, not a cosmetic one, so it is explicit at
+/// router construction.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CorsMode {
+    /// The permissive CORS the DESKTOP app requires: the game front-end runs on an
+    /// arbitrary `localhost:<port>` and calls the local LGS cross-origin *with
+    /// credentials*, so the layer mirrors the request origin, allows credentials,
+    /// and enables Private Network Access. This is the standalone binary / desktop
+    /// default — do not weaken it.
+    Permissive,
+    /// No CORS layer at all — correct for the CLOUD multi-tenant mounts (the M4
+    /// workbench under `/ws/…` and the M5 public share hosts), where the game
+    /// front-end is served from the SAME origin as the LGS it calls. Mirroring
+    /// arbitrary origins with credentials there would be needless exposure.
+    SameOrigin,
+}
 
+/// Build the LGS router with the DESKTOP-permissive CORS layer. Kept as the
+/// public entry point (and byte-for-byte behavior) the standalone binary and
+/// desktop app rely on; the cloud mounts use [`build_router_with_cors`] with
+/// [`CorsMode::SameOrigin`].
+pub fn build_router(state: Arc<AppState>, ui_dir: Option<std::path::PathBuf>) -> axum::Router {
+    build_router_with_cors(state, ui_dir, CorsMode::Permissive)
+}
+
+/// Build the LGS router, choosing the CORS layer via `cors`. See [`CorsMode`].
+pub fn build_router_with_cors(
+    state: Arc<AppState>,
+    ui_dir: Option<std::path::PathBuf>,
+    cors: CorsMode,
+) -> axum::Router {
     let mut router = routes::router(state.clone())
         .merge(devtool::router(state.clone()))
         .merge(replay::router(state));
@@ -87,7 +107,24 @@ pub fn build_router(state: Arc<AppState>, ui_dir: Option<std::path::PathBuf>) ->
         router = router.fallback_service(ServeDir::new(dir).fallback(fallback));
     }
 
-    router.layer(cors).layer(TraceLayer::new_for_http())
+    match cors {
+        CorsMode::Permissive => {
+            let cors = CorsLayer::new()
+                .allow_origin(AllowOrigin::mirror_request())
+                .allow_methods([Method::GET, Method::POST, Method::DELETE, Method::OPTIONS])
+                .allow_headers([
+                    HeaderName::from_static("content-type"),
+                    HeaderName::from_static("authorization"),
+                    HeaderName::from_static("x-requested-with"),
+                ])
+                .allow_credentials(true)
+                .allow_private_network(true)
+                .expose_headers([HeaderName::from_static("content-type")]);
+            router.layer(cors).layer(TraceLayer::new_for_http())
+        }
+        // Same-origin cloud mount: no CORS layer, just tracing.
+        CorsMode::SameOrigin => router.layer(TraceLayer::new_for_http()),
+    }
 }
 
 #[cfg(not(debug_assertions))]
