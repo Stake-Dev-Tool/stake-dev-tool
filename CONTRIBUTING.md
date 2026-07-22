@@ -151,7 +151,7 @@ The test suite is young — that's a great contribution area in itself.
   release. Add a [CHANGELOG.md](CHANGELOG.md) entry before tagging.
 - **CLI** — push an `sdt-vX.Y.Z` tag to attach prebuilt `sdt` binaries for
   the three platforms.
-- **Server & site** — deploy automatically from CI on push; no manual step.
+- **Server** — deploys automatically from CI on push; no manual step.
 
 ## Security issues
 

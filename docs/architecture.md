@@ -29,8 +29,10 @@ One `pnpm` workspace, one Cargo workspace:
 | [`crates/cli`](../crates/cli/) | The `sdt` CLI (`login`, `push`, `revisions`) for CI pipelines. |
 | [`ui/`](../ui/) | The workbench frontend (SvelteKit), served by desktop or cloud. |
 | [`web/`](../web/) | The cloud dashboard (SvelteKit SPA), embedded in the server. |
-| [`site/`](../site/) | The marketing site at [stakedevtool.com](https://stakedevtool.com) (TanStack Start). |
 | [`deploy/`](../deploy/) | Production compose file, Caddyfile, self-host docs. |
+
+The marketing site at [stakedevtool.com](https://stakedevtool.com) lives in
+its own repo: [Stake-Dev-Tool/site](https://github.com/Stake-Dev-Tool/site).
 
 ## The engine
 

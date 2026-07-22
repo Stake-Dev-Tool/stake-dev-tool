@@ -134,7 +134,8 @@ to publish their changes.
 
 <p align="center">
   <sub>
-    Built by <a href="https://github.com/simnJS">@simnJS</a> ·
+    Built by <a href="https://github.com/simnJS">@simnJS</a> and
+    <a href="https://github.com/Malasuerte94">@Malasuerte94</a> ·
     <a href="https://stakedevtool.com">stakedevtool.com</a> ·
     <a href="https://github.com/Stake-Dev-Tool/stake-dev-tool/issues/new/choose">Report a bug</a>
   </sub>

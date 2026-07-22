@@ -52,7 +52,8 @@ representing the community in public spaces.
 ## Enforcement
 
 Instances of abusive, harassing, or otherwise unacceptable behavior may be
-reported to the maintainer, [@simnJS](https://github.com/simnJS). All
+reported to the maintainers, [@simnJS](https://github.com/simnJS) or
+[@Malasuerte94](https://github.com/Malasuerte94). All
 complaints will be reviewed and investigated promptly and fairly, and the
 privacy of the reporter will be respected.
 
