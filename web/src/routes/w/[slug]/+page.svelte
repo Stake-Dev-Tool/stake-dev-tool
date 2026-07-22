@@ -81,7 +81,7 @@
     load();
   });
 
-  // Polar checkout success redirects here (the server's success_url is
+  // Stripe checkout success redirects here (the server's success_url is
   // /w/:slug?upgraded=1). Celebrate, drop any cached (pre-upgrade) billing status
   // so PlanBanner re-reads fresh, and strip the param. The redirect is a full page
   // load, so this one-shot onMount is the right hook.

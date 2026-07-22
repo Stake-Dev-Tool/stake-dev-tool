@@ -13,7 +13,7 @@ export type AdminWorkspace = { id: string, slug: string, name: string, created_a
  */
 plan: string, override: AdminOverride | null, 
 /**
- * The Polar subscription status verbatim (`"active"`, `"past_due"`, …), or
+ * The Stripe subscription status verbatim (`"active"`, `"past_due"`, …), or
  * `null` when there is no subscription row.
  */
 subscription_status: string | null, };

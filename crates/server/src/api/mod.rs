@@ -111,7 +111,7 @@ pub fn router(max_blob_bytes: usize) -> Router<AppState> {
         // --- reserved mount points (stub routers until their milestones land) ---
         .merge(documents::router()) // M3 — document sync + workspace SSE
         .merge(shares::router()) // M5 — share links CRUD
-        .merge(billing::router()) // M7 — plans + Polar webhook
+        .merge(billing::router()) // M7 — plans + Stripe webhook
         .merge(admin::router()) // instance-admin surface under /admin/…
         .merge(ws::router()) // M4 — cloud LGS under /ws/…
         .fallback(not_found)

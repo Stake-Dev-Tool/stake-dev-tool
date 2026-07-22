@@ -1,9 +1,10 @@
 #!/bin/sh
-# Enable Polar billing on this instance. Run ON the server:
+# Enable Stripe billing on this instance. Run ON the server:
 #   cd /opt/stake-dev-tool/deploy && sh enable-billing.sh
-# It prompts for the six Polar values, writes them into .env.prod, restarts
+# It prompts for the Stripe values, writes them into .env.prod, restarts
 # the server, and verifies that billing reports enabled.
-# Full walkthrough: docs/v2/polar-runbook.md
+# Self-hosters: skip this entirely — without STRIPE_* vars the instance
+# runs unlimited, forever.
 set -e
 
 ENVF=".env.prod"
@@ -23,22 +24,13 @@ prompt() {
     fi
 }
 
-echo "Polar environment (production or sandbox)?"
-printf "POLAR_SERVER [production]: "
-read -r server
-server="${server:-production}"
-if grep -q "^POLAR_SERVER=" "$ENVF"; then
-    sed -i "s|^POLAR_SERVER=.*|POLAR_SERVER=$server|" "$ENVF"
-else
-    echo "POLAR_SERVER=$server" >> "$ENVF"
-fi
-
-prompt POLAR_ACCESS_TOKEN        "Organization access token (polar_oat_…)"
-prompt POLAR_WEBHOOK_SECRET      "Webhook signing secret (whsec_… or raw)"
-prompt POLAR_PRODUCT_SOLO_MONTHLY "Product ID — Solo monthly"
-prompt POLAR_PRODUCT_SOLO_YEARLY  "Product ID — Solo yearly"
-prompt POLAR_PRODUCT_TEAM_MONTHLY "Product ID — Team monthly"
-prompt POLAR_PRODUCT_TEAM_YEARLY  "Product ID — Team yearly"
+prompt STRIPE_SECRET_KEY         "Secret key (sk_live_… or sk_test_…)"
+prompt STRIPE_WEBHOOK_SECRET     "Webhook signing secret (whsec_…)"
+prompt STRIPE_PRICE_SOLO_MONTHLY "Price ID — Solo monthly (price_…)"
+prompt STRIPE_PRICE_SOLO_YEARLY  "Price ID — Solo yearly"
+prompt STRIPE_PRICE_TEAM_MONTHLY "Price ID — Team monthly"
+prompt STRIPE_PRICE_TEAM_YEARLY  "Price ID — Team yearly"
+prompt STRIPE_PRICE_STORAGE      "Price ID — extra storage (per 10 GiB unit)"
 
 echo "Restarting the server with billing enabled…"
 docker compose -f docker-compose.prod.yml --env-file "$ENVF" up -d server >/dev/null
@@ -54,7 +46,8 @@ while [ $i -lt 30 ]; do
 done
 
 echo
-echo "Done. Verify from your machine (expects \"enabled\":true for members):"
+echo "Done. Verify from your machine:"
 echo "  1. log into the dashboard, open any workspace -> Billing"
 echo "  2. the page should show the No-plan state and the plan cards"
-echo "Then point the Polar webhook at: https://app.stakedevtool.com/api/billing/webhook"
+echo "Then point the Stripe webhook (dashboard -> Developers -> Webhooks) at:"
+echo "  https://app.stakedevtool.com/api/billing/webhook"

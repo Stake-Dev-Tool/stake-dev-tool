@@ -566,7 +566,7 @@
                               </p>
                             {/if}
                             <p class="mt-3 text-xs text-faint">
-                              A comp overrides Polar billing: the workspace runs on the chosen plan
+                              A comp overrides Stripe billing: the workspace runs on the chosen plan
                               (or Unlimited) until it expires or you clear it. "None" removes the comp
                               and returns the workspace to its normal billing state.
                             </p>

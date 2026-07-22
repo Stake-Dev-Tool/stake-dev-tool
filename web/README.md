@@ -148,7 +148,7 @@ dependency, **`hash-wasm`**.
 
 ## Billing & plans (M7)
 
-Polar-backed subscriptions. On a billing-enabled instance a workspace is
+Stripe-backed subscriptions. On a billing-enabled instance a workspace is
 read-only (the **Free** state) until it subscribes; self-hosting stays fully
 unlimited. The paywall moments are exactly two: the no-active-plan banner and
 quota-hit errors. The whole surface degrades to **nothing** on a self-hosted
@@ -156,7 +156,7 @@ instance (`GET /billing` → `enabled: false`, every limit unlimited).
 
 - **Client** (`src/lib/api.ts`, `api.billing.*`): `status(slug)` (member-visible,
   always reachable) and `checkout(slug, plan, interval)` (owner-only; returns the
-  hosted Polar URL to navigate to). Wire shapes go through `normalize*` helpers
+  hosted Stripe Checkout URL to navigate to). Wire shapes go through `normalize*` helpers
   like the rest of the surface — reconciled against the generated
   `crates/protocol` bindings (`BillingStatusResponse`, `BillingUsage`,
   `BillingLimits`, `CheckoutRequest/Response`, `PlanId`, `BillingInterval`).
@@ -173,13 +173,13 @@ instance (`GET /billing` → `enabled: false`, every limit unlimited).
   disabled — "Choose a plan →"); a warning banner on **past_due** (grace period);
   a tiny plan **chip** on a healthy Solo/Team plan. A failed fetch renders
   nothing — it never breaks the page.
-- **`/w/[slug]/billing`**: the current plan (label, Polar status, interval,
+- **`/w/[slug]/billing`**: the current plan (label, Stripe status, interval,
   renewal date), a usage section (members, storage via `humanSize`,
   active share links vs limits, `∞` when unlimited), and an upgrade section with
-  Solo/Team cards, a per-card Monthly/Yearly toggle, and indicative pricing
-  (from `V2.md` — "final price at checkout"; yearly = 2 months free). The Upgrade
+  Solo/Team cards, a per-card Monthly/Yearly toggle, and exact pricing
+  (yearly = 2 months free; tax collected at checkout by Stripe). The Subscribe
   button POSTs checkout and does a **full navigation** to `checkout_url`;
-  non-owners see the cards with the button disabled. Polar's success redirect
+  non-owners see the cards with the button disabled. Stripe's success redirect
   (`?upgraded=1`) shows a green toast, refetches fresh status, and strips the
   param. `enabled: false` collapses the page to a single calm "self-hosted runs
   unlimited" card. Reached from a **Billing** link in the workspace header and

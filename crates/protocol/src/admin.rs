@@ -97,7 +97,7 @@ pub struct AdminWorkspace {
     #[serde(rename = "override")]
     #[ts(rename = "override")]
     pub plan_override: Option<AdminOverride>,
-    /// The Polar subscription status verbatim (`"active"`, `"past_due"`, …), or
+    /// The Stripe subscription status verbatim (`"active"`, `"past_due"`, …), or
     /// `null` when there is no subscription row.
     pub subscription_status: Option<String>,
 }

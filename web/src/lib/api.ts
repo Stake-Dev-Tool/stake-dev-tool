@@ -523,7 +523,7 @@ export interface AdminWorkspace {
   plan: string;
   /** Present when an operator comp is active; null otherwise. */
   override: AdminOverrideInfo | null;
-  /** Polar's verbatim subscription status, or null when there's no subscription. */
+  /** Stripe's verbatim subscription status, or null when there's no subscription. */
   subscription_status: string | null;
 }
 
