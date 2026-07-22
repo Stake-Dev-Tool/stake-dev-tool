@@ -5,8 +5,6 @@
   "scripts": {
     "ui:dev": "pnpm --filter ui dev",
     "ui:build": "pnpm --filter ui build",
-    "site:dev": "pnpm --filter site dev",
-    "site:build": "pnpm --filter site build",
     "web:dev": "pnpm --filter web dev",
     "web:build": "pnpm --filter web build",
     "wasm:build": "wasm-pack build crates/lgs-wasm --target web --release --out-dir pkg",

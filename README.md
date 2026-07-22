@@ -196,9 +196,10 @@ One `pnpm` workspace, one Cargo workspace:
 - [`crates/cli`](crates/cli/) — the `sdt` CLI (`login`, `push`, `revisions`).
 - [`ui/`](ui/) — the workbench frontend (SvelteKit), served by desktop or cloud.
 - [`web/`](web/) — the cloud dashboard (SvelteKit SPA), embedded in the server.
-- [`site/`](site/) — the marketing site at
-  [stakedevtool.com](https://stakedevtool.com) (TanStack Start).
 - [`deploy/`](deploy/) — production compose file, Caddyfile, self-host docs.
+
+The marketing site at [stakedevtool.com](https://stakedevtool.com) lives in
+its own repo: [Stake-Dev-Tool/site](https://github.com/Stake-Dev-Tool/site).
 
 ## HTTP endpoints
 
@@ -284,7 +285,7 @@ This is one repository with three licensing zones:
 |---|---|
 | Everything not listed below — desktop app, `lgs` engine, CLI, protocol, test-view UI, deploy configs | **MIT** — [LICENSE](LICENSE) |
 | `crates/server/`, `web/` (the cloud server + its dashboard) | **AGPL-3.0** — [crates/server/LICENSE](crates/server/LICENSE) |
-| `site/` (the stakedevtool.com marketing site) | Source-visible, **all rights reserved** — [site/LICENSE](site/LICENSE) |
+| [Stake-Dev-Tool/site](https://github.com/Stake-Dev-Tool/site) (the stakedevtool.com marketing site, separate repo) | Source-visible, **all rights reserved** |
 
 Self-hosting the server is free forever and untouched by the AGPL — the
 licence only requires anyone offering a modified server as a hosted
