@@ -183,7 +183,7 @@
   }
 </script>
 
-<svelte:head><title>Math report · rev {numParam} · {game} · Stake Cloud</title></svelte:head>
+<svelte:head><title>Math report · rev {numParam} · {game} · Stake Dev Tool Cloud</title></svelte:head>
 
 {#snippet constraintCol(c: ColData)}
   <td class="px-4 py-3 align-top {c.pass ? 'bg-accent/5' : 'bg-danger/10'}">

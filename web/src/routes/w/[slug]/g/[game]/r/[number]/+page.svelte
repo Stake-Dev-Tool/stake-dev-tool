@@ -88,7 +88,7 @@
   $effect(() => () => clearTimeout(copyTimer));
 </script>
 
-<svelte:head><title>rev {numParam} · {game} · Stake Cloud</title></svelte:head>
+<svelte:head><title>rev {numParam} · {game} · Stake Dev Tool Cloud</title></svelte:head>
 
 <main class="mx-auto w-full max-w-5xl px-6 py-10">
   <Breadcrumbs

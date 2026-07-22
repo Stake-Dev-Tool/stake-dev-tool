@@ -58,7 +58,7 @@
   }
 </script>
 
-<svelte:head><title>Diff rev {b} → rev {a} · {game} · Stake Cloud</title></svelte:head>
+<svelte:head><title>Diff rev {b} → rev {a} · {game} · Stake Dev Tool Cloud</title></svelte:head>
 
 {#snippet beforeAfter(
   before: number | null | undefined,

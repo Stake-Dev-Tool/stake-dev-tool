@@ -55,7 +55,7 @@
   }
 </script>
 
-<svelte:head><title>Approve device · Stake Cloud</title></svelte:head>
+<svelte:head><title>Approve device · Stake Dev Tool Cloud</title></svelte:head>
 
 <main class="mx-auto w-full max-w-md px-6 py-16">
   <div class="mb-6 text-center">

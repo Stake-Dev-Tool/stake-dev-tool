@@ -83,7 +83,7 @@
   }
 </script>
 
-<svelte:head><title>Workspaces · Stake Cloud</title></svelte:head>
+<svelte:head><title>Workspaces · Stake Dev Tool Cloud</title></svelte:head>
 
 <main class="mx-auto w-full max-w-5xl px-6 py-10">
   <div class="mb-8 flex items-end justify-between gap-4">

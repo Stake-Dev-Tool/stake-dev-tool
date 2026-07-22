@@ -108,7 +108,7 @@
   }
 </script>
 
-<svelte:head><title>{gameName} · Stake Cloud</title></svelte:head>
+<svelte:head><title>{gameName} · Stake Dev Tool Cloud</title></svelte:head>
 
 <main class="mx-auto w-full max-w-5xl px-6 py-10">
   <Breadcrumbs items={[{ label: workspaceName(slug), href: `/w/${slug}` }, { label: gameName }]} />

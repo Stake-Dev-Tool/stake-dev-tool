@@ -73,7 +73,7 @@
 </script>
 
 <svelte:head>
-  <title>{mode === 'login' ? 'Sign in' : 'Create account'} · Stake Cloud</title>
+  <title>{mode === 'login' ? 'Sign in' : 'Create account'} · Stake Dev Tool Cloud</title>
 </svelte:head>
 
 <main class="flex min-h-screen items-center justify-center px-6 py-12">
@@ -85,7 +85,7 @@
       >
       <div>
         <h1 class="text-xl font-semibold tracking-tight">
-          {mode === 'login' ? 'Sign in to Stake Cloud' : 'Create your account'}
+          {mode === 'login' ? 'Sign in to Stake Dev Tool Cloud' : 'Create your account'}
         </h1>
         <p class="mt-1 text-sm text-muted">
           {mode === 'login'

@@ -74,7 +74,7 @@
   }
 </script>
 
-<svelte:head><title>Invite · Stake Cloud</title></svelte:head>
+<svelte:head><title>Invite · Stake Dev Tool Cloud</title></svelte:head>
 
 <main class="flex min-h-screen items-center justify-center px-6 py-12">
   <div class="fade-in w-full max-w-md">
@@ -84,7 +84,7 @@
           class="flex h-8 w-8 items-center justify-center rounded-lg bg-accent text-sm font-bold text-accent-ink"
           >S</span
         >
-        <span class="font-semibold tracking-tight">Stake Cloud</span>
+        <span class="font-semibold tracking-tight">Stake Dev Tool Cloud</span>
       </a>
     </div>
 
@@ -99,7 +99,7 @@
             It may have expired, been revoked, or already been used up. Ask a workspace admin for a
             fresh link.
           </p>
-          <Button href="/" variant="outline" class="mt-2">Go to Stake Cloud</Button>
+          <Button href="/" variant="outline" class="mt-2">Go to Stake Dev Tool Cloud</Button>
         </div>
       {:else}
         <h1 class="text-lg font-semibold">You've been invited</h1>

@@ -22,7 +22,7 @@
         class="flex h-7 w-7 items-center justify-center rounded-md bg-accent text-sm font-bold text-accent-ink"
         >S</span
       >
-      <span class="text-sm font-semibold tracking-tight">Stake Cloud</span>
+      <span class="text-sm font-semibold tracking-tight">Stake Dev Tool Cloud</span>
     </a>
 
     {#if session.user}

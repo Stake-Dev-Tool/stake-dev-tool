@@ -154,7 +154,7 @@
   }
 </script>
 
-<svelte:head><title>Billing · {wsName || workspaceName(slug)} · Stake Cloud</title></svelte:head>
+<svelte:head><title>Billing · {wsName || workspaceName(slug)} · Stake Dev Tool Cloud</title></svelte:head>
 
 <main class="mx-auto w-full max-w-4xl px-6 py-10">
   <Breadcrumbs
