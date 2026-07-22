@@ -140,6 +140,12 @@ export function formatMetric(n: number | null | undefined, dp = 2): string {
   return n.toLocaleString(undefined, { maximumFractionDigits: dp });
 }
 
+/** Bet multiplier with an "x" suffix ("6,750x", "0.96x"); em-dash when absent. */
+export function xmult(n: number | null | undefined): string {
+  if (n == null || !Number.isFinite(n)) return '—';
+  return `${formatMetric(n)}x`;
+}
+
 /** Grouped integer for counts (entries, unique payouts, bucket counts). Null-safe. */
 export function formatCount(n: number | null | undefined): string {
   if (n == null || !Number.isFinite(n)) return '—';
