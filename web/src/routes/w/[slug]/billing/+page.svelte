@@ -69,6 +69,10 @@
   let storageBusy = $state(false);
   let storageError = $state('');
 
+  // Stripe Customer Portal (manage payment method, invoices, cancel).
+  let portalBusy = $state(false);
+  let portalError = $state('');
+
   let isOwner = $derived(role === 'owner');
   let isFree = $derived(status?.plan === 'free');
   let isPaid = $derived(status?.plan === 'paid');
@@ -112,7 +116,8 @@
   let periodLine = $derived.by(() => {
     if (!status || !status.current_period_end) return '';
     const d = formatDate(status.current_period_end);
-    if (status.status === 'canceled') return `Access until ${d}`;
+    // A scheduled cancellation keeps the status "active" but stops the renewal.
+    if (status.status === 'canceled' || status.cancel_at_period_end) return `Access until ${d}`;
     return `Renews ${d}`;
   });
 
@@ -266,6 +271,24 @@
     }
     storageBusy = false;
   }
+
+  // Paid workspace: open the Stripe Customer Portal (full navigation to Stripe).
+  async function openPortal() {
+    if (!isOwner || portalBusy) return;
+    portalBusy = true;
+    portalError = '';
+    try {
+      const url = await api.billing.portal(slug);
+      if (url) {
+        window.location.href = url; // full navigation to the hosted portal
+        return; // leave the button busy; the page is unloading
+      }
+      portalError = 'Billing management is unavailable right now. Please try again.';
+    } catch (e) {
+      portalError = errorText(e);
+    }
+    portalBusy = false;
+  }
 </script>
 
 <svelte:head><title>Billing · {wsName || workspaceName(slug)} · Stake Dev Tool Cloud</title></svelte:head>
@@ -316,7 +339,7 @@
   <div>
     <div class="mb-2 text-sm font-medium text-text">What you get with {plural(n, 'seat')}</div>
     <div class="grid grid-cols-2 gap-2 sm:grid-cols-4">
-      {#each [{ v: e.members, u: n === 1 ? 'member' : 'members' }, { v: `${e.storageGib} GiB`, u: 'storage' }, { v: e.shareLinks, u: 'share links' }, { v: e.sessions, u: 'live sessions' }] as cell (cell.u)}
+      {#each [{ v: e.members, u: n === 1 ? 'member' : 'members' }, { v: `${e.storageGib} GiB`, u: 'storage' }, { v: e.shareLinks, u: 'share links' }] as cell (cell.u)}
         <div class="rounded-lg border border-border bg-surface-2/40 px-3 py-2.5">
           <div class="font-mono-tab text-lg font-semibold leading-tight text-text">{cell.v}</div>
           <div class="text-xs text-muted">{cell.u}</div>
@@ -324,8 +347,8 @@
       {/each}
     </div>
     <p class="mt-2 text-xs text-faint">
-      Each seat = {PER_SEAT.members} member + {PER_SEAT.storageGib} GiB + {PER_SEAT.shareLinks} share
-      links + {PER_SEAT.sessions} live sessions.
+      Each seat = {PER_SEAT.members} team member + {PER_SEAT.storageGib} GiB storage +
+      {PER_SEAT.shareLinks} share links.
     </p>
   </div>
 {/snippet}
@@ -423,6 +446,11 @@
         </div>
         {#if periodLine}
           <p class="mt-1.5 text-sm text-muted">{periodLine}</p>
+        {/if}
+        {#if isPaid && status.cancel_at_period_end && status.current_period_end}
+          <p class="mt-3 rounded-md border border-warn/30 bg-warn/10 px-3 py-2 text-sm text-warn">
+            Your plan ends on {formatDate(status.current_period_end)} — resubscribe anytime.
+          </p>
         {/if}
       </Card>
     </section>
@@ -599,6 +627,35 @@
 
           <!-- Combined summary of the projected subscription -->
           {@render priceBox(seats, paidStorageUnits, paidInterval)}
+
+          <hr class="border-border" />
+
+          <!-- Manage billing via Stripe's Customer Portal (invoices, payment
+               method, cancel) — a quiet secondary action, owner-only. -->
+          <div class="flex flex-col gap-3">
+            <div>
+              <div class="text-base font-semibold">Manage billing</div>
+              <p class="mt-1 max-w-prose text-sm text-muted">
+                Invoices, payment method, or cancel — handled securely by Stripe.
+              </p>
+            </div>
+
+            {#if portalError}
+              <p class="rounded-md border border-danger/30 bg-danger/10 px-3 py-2 text-sm text-danger">
+                {portalError}
+              </p>
+            {/if}
+
+            <Button
+              variant="outline"
+              class="w-fit"
+              loading={portalBusy}
+              disabled={!isOwner || portalBusy}
+              onclick={openPortal}
+            >
+              Manage billing
+            </Button>
+          </div>
         </Card>
 
         <p class="mt-4 text-xs text-faint">

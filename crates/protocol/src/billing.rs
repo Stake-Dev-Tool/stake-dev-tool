@@ -54,6 +54,16 @@ pub struct CheckoutResponse {
     pub checkout_url: String,
 }
 
+/// `POST /workspaces/:slug/billing/portal` response: the Stripe Customer Portal
+/// session URL the browser is redirected to. The portal is Stripe-hosted and
+/// short-lived (generated per request); it lets a subscriber update their payment
+/// method, view invoices, or cancel the subscription.
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "protocol/")]
+pub struct PortalResponse {
+    pub url: String,
+}
+
 /// `POST /workspaces/:slug/billing/storage` request body: how many storage
 /// add-on units to purchase, each granting +10 GiB for €1/mo. Bounded `1..=100`
 /// server-side (a single Stripe checkout with `quantity = units`).
@@ -109,6 +119,12 @@ pub struct BillingStatusResponse {
     pub interval: Option<BillingInterval>,
     /// The current billing period's end, or `null` when there is no subscription.
     pub current_period_end: Option<DateTime<Utc>>,
+    /// Whether the subscription is scheduled to cancel at the end of the current
+    /// period (Stripe's `cancel_at_period_end`) while its `status` stays `active`.
+    /// `false` when there is no subscription or it is not scheduled to cancel; the
+    /// UI surfaces a calm "your plan ends on `current_period_end`" notice when
+    /// `true`.
+    pub cancel_at_period_end: bool,
     /// Extra storage granted by the add-on, in GiB (`extra_storage_units × 10`).
     /// `0` when no storage add-on is active. Already folded into
     /// `limits.max_storage_bytes`; surfaced separately so the UI can show it.

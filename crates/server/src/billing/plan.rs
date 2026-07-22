@@ -40,9 +40,12 @@ pub enum Plan {
 
 impl Plan {
     /// The quota limits for this plan. `Free` is all-zero — reads still work, but
-    /// writes are refused by [`write_allowed`] and no quota is usable. `Paid`
-    /// scales linearly: `seats` members, `seats × 10 GiB` storage, `seats × 5`
-    /// active share links and `seats × 5` concurrent share sessions.
+    /// writes are refused by [`write_allowed`] and no quota is usable (the zero
+    /// session cap is also what stops a lapsed workspace's share links from
+    /// serving new play sessions). `Paid` scales linearly — `seats` members,
+    /// `seats × 10 GiB` storage, `seats × 5` active share links — except
+    /// concurrent share sessions, which are uncapped for any paying workspace:
+    /// a demo shown to a room must never die mid-pitch over a per-seat number.
     pub fn limits(self) -> PlanLimits {
         match self {
             Plan::Unlimited => PlanLimits::UNLIMITED,
@@ -56,7 +59,7 @@ impl Plan {
                 max_members: Some(seats),
                 max_storage_bytes: Some(u64::from(seats) * 10 * GIB),
                 max_active_share_links: Some(seats * 5),
-                max_concurrent_share_sessions: Some(seats * 5),
+                max_concurrent_share_sessions: None,
             },
         }
     }
@@ -105,6 +108,9 @@ pub struct SubscriptionRow {
     pub seats: i64,
     /// Storage add-on units (one unit = +10 GiB). `0` when no add-on is active.
     pub extra_storage_units: i64,
+    /// Whether the subscription is scheduled to cancel at the end of the current
+    /// period (Stripe's `cancel_at_period_end`) while its status stays live.
+    pub cancel_at_period_end: bool,
 }
 
 impl SubscriptionRow {
@@ -137,7 +143,7 @@ pub async fn load_subscription(
         // decode into the row's `i64` (sqlx will not coerce int4 → i64 on its own).
         "SELECT provider_subscription_id, provider_customer_id, plan, \"interval\", status, \
                 current_period_end, seats::bigint AS seats, \
-                extra_storage_units::bigint AS extra_storage_units \
+                extra_storage_units::bigint AS extra_storage_units, cancel_at_period_end \
          FROM subscriptions WHERE workspace_id = $1",
     )
     .bind(workspace_id)
@@ -355,6 +361,7 @@ mod tests {
             current_period_end: period_end,
             seats,
             extra_storage_units: 0,
+            cancel_at_period_end: false,
         }
     }
 
@@ -368,19 +375,19 @@ mod tests {
 
     #[test]
     fn paid_limits_scale_linearly_per_seat() {
-        // 1 seat: 1 member, 10 GiB, 5 links, 5 sessions.
+        // 1 seat: 1 member, 10 GiB, 5 links, uncapped sessions.
         let one = Plan::Paid { seats: 1 }.limits();
         assert_eq!(one.max_members, Some(1));
         assert_eq!(one.max_storage_bytes, Some(10 * GIB));
         assert_eq!(one.max_active_share_links, Some(5));
-        assert_eq!(one.max_concurrent_share_sessions, Some(5));
+        assert_eq!(one.max_concurrent_share_sessions, None);
 
-        // 10 seats: 10 members, 100 GiB, 50 links, 50 sessions.
+        // 10 seats: 10 members, 100 GiB, 50 links, uncapped sessions.
         let ten = Plan::Paid { seats: 10 }.limits();
         assert_eq!(ten.max_members, Some(10));
         assert_eq!(ten.max_storage_bytes, Some(100 * GIB));
         assert_eq!(ten.max_active_share_links, Some(50));
-        assert_eq!(ten.max_concurrent_share_sessions, Some(50));
+        assert_eq!(ten.max_concurrent_share_sessions, None);
 
         // Unlimited is all-None.
         assert_eq!(Plan::Unlimited.limits(), PlanLimits::UNLIMITED);

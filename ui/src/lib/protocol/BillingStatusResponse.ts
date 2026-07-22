@@ -39,6 +39,14 @@ interval: BillingInterval | null,
  */
 current_period_end: string | null, 
 /**
+ * Whether the subscription is scheduled to cancel at the end of the current
+ * period (Stripe's `cancel_at_period_end`) while its `status` stays `active`.
+ * `false` when there is no subscription or it is not scheduled to cancel; the
+ * UI surfaces a calm "your plan ends on `current_period_end`" notice when
+ * `true`.
+ */
+cancel_at_period_end: boolean, 
+/**
  * Extra storage granted by the add-on, in GiB (`extra_storage_units × 10`).
  * `0` when no storage add-on is active. Already folded into
  * `limits.max_storage_bytes`; surfaced separately so the UI can show it.

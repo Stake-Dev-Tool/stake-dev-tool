@@ -110,6 +110,55 @@ pub async fn create_checkout(
     Ok(created.url)
 }
 
+#[derive(Deserialize)]
+struct PortalCreated {
+    url: String,
+}
+
+/// Opens a Stripe Customer Portal session for `customer_id` and returns its hosted
+/// URL (the browser navigates to it to update the payment method, view invoices,
+/// or cancel). `return_url` is where Stripe returns the customer afterward.
+/// `configuration_id` carries a non-default portal configuration (`bpc_…`) when
+/// the account has one to use; `None` falls back to the account's default portal
+/// configuration.
+pub async fn create_portal_session(
+    client: &reqwest::Client,
+    cfg: &StripeConfig,
+    customer_id: &str,
+    return_url: &str,
+    configuration_id: Option<&str>,
+) -> Result<String, ApiError> {
+    let mut form: Vec<(String, String)> = vec![
+        ("customer".to_string(), customer_id.to_string()),
+        ("return_url".to_string(), return_url.to_string()),
+    ];
+    if let Some(configuration) = configuration_id {
+        form.push(("configuration".to_string(), configuration.to_string()));
+    }
+
+    let response = client
+        .post(format!("{}/v1/billing_portal/sessions", api_base()))
+        .bearer_auth(&cfg.secret_key)
+        .form(&form)
+        .send()
+        .await
+        .map_err(stripe_unreachable)?;
+
+    if !response.status().is_success() {
+        let status = response.status();
+        let detail = response.text().await.unwrap_or_default();
+        return Err(ApiError::internal(format!(
+            "Stripe portal session creation failed ({status}): {detail}"
+        )));
+    }
+
+    let created: PortalCreated = response
+        .json()
+        .await
+        .map_err(|e| ApiError::internal(format!("malformed Stripe portal response: {e}")))?;
+    Ok(created.url)
+}
+
 /// A subscription's seat line item: the Stripe subscription-item id (`si_…`, the
 /// handle an update targets) and its current quantity (the seat count).
 #[derive(Debug, Clone)]
@@ -240,6 +289,7 @@ mod tests {
             price_seat_monthly: "price_seat_m".into(),
             price_seat_yearly: "price_seat_y".into(),
             price_storage: "price_storage".into(),
+            portal_configuration: None,
         }
     }
 

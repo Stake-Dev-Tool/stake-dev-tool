@@ -13,7 +13,7 @@ use chrono::Utc;
 use protocol::Role;
 use protocol::billing::{
     BillingLimits, BillingStatusResponse, BillingUsage, CheckoutRequest, CheckoutResponse,
-    StorageCheckoutRequest, UpdateSeatsRequest,
+    PortalResponse, StorageCheckoutRequest, UpdateSeatsRequest,
 };
 use uuid::Uuid;
 
@@ -43,6 +43,7 @@ pub fn router() -> Router<AppState> {
         .route("/workspaces/:slug/billing/checkout", post(checkout))
         .route("/workspaces/:slug/billing/seats", post(update_seats))
         .route("/workspaces/:slug/billing/storage", post(buy_storage))
+        .route("/workspaces/:slug/billing/portal", post(portal))
         .route("/billing/webhook", post(crate::billing::webhook::handle))
 }
 
@@ -236,6 +237,50 @@ async fn buy_storage(
     Ok(Json(CheckoutResponse { checkout_url }))
 }
 
+/// Opens a Stripe Customer Portal session for the workspace's subscription
+/// (owner-only, billing-enabled-only). Requires a subscription row carrying a
+/// Stripe customer id (else 409 `no_subscription`) — the customer id is captured
+/// by the webhook when the subscription is created. Returns `{ url }`, a
+/// short-lived Stripe-hosted page where the customer can update their payment
+/// method, view invoices, or cancel; the portal returns them to the workspace's
+/// billing page. The account's default portal configuration is used unless
+/// `STRIPE_PORTAL_CONFIGURATION` is set.
+async fn portal(
+    State(state): State<AppState>,
+    user: CurrentUser,
+    Path(slug): Path<String>,
+) -> ApiResult<Json<PortalResponse>> {
+    let (stripe_cfg, workspace) = owner_checkout_context(&state, &user, &slug).await?;
+
+    // A portal session needs the Stripe customer id. A workspace with no
+    // subscription, or a comp override (no Stripe row at all), has nothing to
+    // manage — reject cleanly.
+    let customer_id = plan::load_subscription(&state.pool, workspace.id)
+        .await?
+        .and_then(|sub| sub.provider_customer_id)
+        .ok_or_else(|| {
+            ApiError::conflict(
+                "no_subscription",
+                "this workspace has no subscription to manage",
+            )
+        })?;
+
+    let return_url = format!(
+        "{}/w/{}/billing",
+        state.config.public_base_url(),
+        workspace.slug
+    );
+    let url = stripe::create_portal_session(
+        &state.http_client,
+        stripe_cfg,
+        &customer_id,
+        &return_url,
+        stripe_cfg.portal_configuration.as_deref(),
+    )
+    .await?;
+    Ok(Json(PortalResponse { url }))
+}
+
 /// The workspace's plan, subscription status, usage, and limits (member-only).
 async fn status(
     State(state): State<AppState>,
@@ -287,6 +332,11 @@ async fn billing_status_payload(
         // No subscription: no plan, so no period end to surface.
         None => (None, None, None),
     };
+    // Scheduled cancellation is meaningful only while a subscription exists.
+    let cancel_at_period_end = subscription
+        .as_ref()
+        .map(|sub| sub.cancel_at_period_end)
+        .unwrap_or(false);
 
     Ok(BillingStatusResponse {
         enabled,
@@ -295,6 +345,7 @@ async fn billing_status_payload(
         status,
         interval,
         current_period_end,
+        cancel_at_period_end,
         extra_storage_gib,
         usage,
         limits: billing_limits(limits),

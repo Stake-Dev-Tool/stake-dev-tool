@@ -53,6 +53,10 @@ fn hmac_sha256_rfc4231_vectors() {
 /// exactly these bytes.
 const WEBHOOK_SECRET: &str = "whsec_m7_stripe_test_secret_0123456789ab";
 
+/// The synthetic portal configuration id the tests expect on the captured portal
+/// session request (mirrors a `STRIPE_PORTAL_CONFIGURATION` env value).
+const PORTAL_CONFIG_ID: &str = "bpc_m7_test_config";
+
 fn stripe_config() -> StripeConfig {
     StripeConfig {
         secret_key: "sk_test_m7".to_string(),
@@ -60,6 +64,7 @@ fn stripe_config() -> StripeConfig {
         price_seat_monthly: "price_seat_m".to_string(),
         price_seat_yearly: "price_seat_y".to_string(),
         price_storage: "price_storage".to_string(),
+        portal_configuration: Some(PORTAL_CONFIG_ID.to_string()),
     }
 }
 
@@ -89,6 +94,7 @@ async fn setup(stripe: Option<StripeConfig>) -> Option<Ctx> {
         server_tenant_books_cap_bytes: None,
         play_domain: None,
         admin_emails: Vec::new(),
+        trusted_proxies: Default::default(),
     };
     let pool = db::connect_lazy(&database_url).expect("lazy pool");
     let store = storage::build_object_store(&config).expect("fs store");
@@ -315,6 +321,23 @@ async fn insert_subscription_seats(
     .bind(status)
     .bind(period_end)
     .bind(seats)
+    .execute(&state.pool)
+    .await
+    .unwrap();
+}
+
+/// Inserts an active 1-seat plan subscription carrying a Stripe customer id (the
+/// portal endpoint requires a non-null `provider_customer_id`).
+async fn insert_subscription_with_customer(state: &AppState, ws_id: Uuid, customer_id: &str) {
+    sqlx::query(
+        "INSERT INTO subscriptions \
+           (workspace_id, provider_subscription_id, provider_customer_id, plan, \"interval\", status, current_period_end, seats) \
+         VALUES ($1, $2, $3, 'paid', 'monthly', 'active', $4, 1)",
+    )
+    .bind(ws_id)
+    .bind(format!("sub_{}", Uuid::new_v4()))
+    .bind(customer_id)
+    .bind(Some(Utc::now() + Duration::days(30)))
     .execute(&state.pool)
     .await
     .unwrap();
@@ -1590,4 +1613,138 @@ async fn seats_update_happy_path_prorates_and_updates_db() {
         form.contains("proration_behavior=create_prorations"),
         "form: {form}"
     );
+}
+
+// ===========================================================================
+// Customer Portal — POST /billing/portal
+// ===========================================================================
+
+/// The URL the portal mock returns for a created session.
+const MOCK_PORTAL_URL: &str = "https://billing.stripe.com/session/test_portal_m7";
+
+/// Spawns a local server impersonating Stripe's `POST /v1/billing_portal/sessions`
+/// call: it captures the form body (for assertions) and returns a session `url`.
+/// Returns the base URL to point `STRIPE_API_BASE` at, plus the captured-body handle.
+async fn spawn_portal_mock() -> (String, Captured) {
+    use axum::Router;
+    use axum::extract::State;
+    use axum::routing::post;
+
+    async fn create_portal(State(cap): State<Captured>, body: String) -> axum::Json<Value> {
+        *cap.lock().unwrap() = Some(body);
+        axum::Json(json!({ "id": "bps_test", "url": MOCK_PORTAL_URL }))
+    }
+
+    let captured: Captured = std::sync::Arc::new(std::sync::Mutex::new(None));
+    let app = Router::new()
+        .route("/v1/billing_portal/sessions", post(create_portal))
+        .with_state(captured.clone());
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+    (format!("http://{addr}"), captured)
+}
+
+#[tokio::test]
+async fn portal_happy_path_returns_url_with_customer_and_config() {
+    let Some(ctx) = setup(Some(stripe_config())).await else {
+        return;
+    };
+    let (mut owner, ws, _t) = bootstrap(&ctx.state).await;
+    let ws_id = workspace_id(&ctx.state, &ws).await;
+    // A subscription carrying the Stripe customer id the portal session targets.
+    insert_subscription_with_customer(&ctx.state, ws_id, "cus_portal_123").await;
+
+    let (base, captured) = spawn_portal_mock().await;
+    // SAFETY: single-threaded env mutation for the duration of this call; on
+    // Windows (the gate platform) std env access is lock-protected.
+    unsafe {
+        std::env::set_var("STRIPE_API_BASE", &base);
+    }
+
+    let (status, body) = owner
+        .post(&format!("/api/workspaces/{ws}/billing/portal"), json!({}))
+        .await;
+
+    unsafe {
+        std::env::remove_var("STRIPE_API_BASE");
+    }
+
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(s(&body["url"]), MOCK_PORTAL_URL);
+
+    // The captured form carries the customer id, the workspace billing return_url
+    // (form-urlencoded, so `/` arrives as `%2F`), and the configured portal
+    // configuration id.
+    let form = captured
+        .lock()
+        .unwrap()
+        .clone()
+        .expect("portal session was created");
+    assert!(form.contains("customer=cus_portal_123"), "form: {form}");
+    assert!(
+        form.contains(&format!("%2Fw%2F{ws}%2Fbilling")),
+        "form: {form}"
+    );
+    assert!(
+        form.contains(&format!("configuration={PORTAL_CONFIG_ID}")),
+        "form: {form}"
+    );
+}
+
+#[tokio::test]
+async fn portal_requires_a_subscription() {
+    let Some(ctx) = setup(Some(stripe_config())).await else {
+        return;
+    };
+    // A fresh workspace is Free (no subscription row, no customer id) → 409.
+    let (mut owner, ws, _t) = bootstrap(&ctx.state).await;
+
+    let (status, body) = owner
+        .post(&format!("/api/workspaces/{ws}/billing/portal"), json!({}))
+        .await;
+    assert_eq!(status, StatusCode::CONFLICT, "{body}");
+    assert_eq!(s(&body["error"]["code"]), "no_subscription");
+}
+
+#[tokio::test]
+async fn portal_is_owner_only() {
+    let Some(ctx) = setup(Some(stripe_config())).await else {
+        return;
+    };
+    let (mut owner, ws, _t) = bootstrap(&ctx.state).await;
+    let ws_id = workspace_id(&ctx.state, &ws).await;
+    // A 10-seat plan so a second member can join (Free would block invite-accept).
+    insert_subscription_seats(
+        &ctx.state,
+        ws_id,
+        "paid",
+        "monthly",
+        "active",
+        Some(Utc::now() + Duration::days(30)),
+        10,
+    )
+    .await;
+    let (_, invite) = owner
+        .post(
+            &format!("/api/workspaces/{ws}/invites"),
+            json!({ "role": "member" }),
+        )
+        .await;
+    let invite_token = s(&invite["token"]).to_string();
+    let mut member = register(&ctx.state, &unique_email(), "Member").await;
+    let (status, _) = member
+        .post(&format!("/api/invites/{invite_token}/accept"), json!({}))
+        .await;
+    assert_eq!(status, StatusCode::OK);
+
+    // A non-owner member cannot open the portal (403 forbidden, before any Stripe call).
+    let (status, body) = member
+        .post(&format!("/api/workspaces/{ws}/billing/portal"), json!({}))
+        .await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
+    assert_eq!(s(&body["error"]["code"]), "forbidden");
 }

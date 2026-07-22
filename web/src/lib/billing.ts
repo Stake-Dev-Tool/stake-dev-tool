@@ -164,22 +164,22 @@ export function storageMonthlyEur(units: number): number {
 // ---------------------------------------------------------------------------
 // Entitlements ("what you get") — the caps one seat grants, and the totals for a
 // chosen seat count. Mirrors the server's per-seat scaling in billing/plan.rs:
-// each seat = 1 member + 10 GiB storage + 5 active share links + 5 live sessions.
+// each seat = 1 member + 10 GiB storage + 5 active share links. Concurrent play
+// sessions are uncapped on any paid plan (server sends null), so they are not an
+// entitlement number here.
 // ---------------------------------------------------------------------------
 
 /** What a single seat grants — the unit shown next to the stepper. */
 export const PER_SEAT = {
   members: 1,
   storageGib: STORAGE_UNIT_GIB, // 10
-  shareLinks: 5,
-  sessions: 5
+  shareLinks: 5
 } as const;
 
 export interface SeatEntitlements {
   members: number;
   storageGib: number;
   shareLinks: number;
-  sessions: number;
 }
 
 /** Total entitlements granted by `seats` seats (before any storage add-on). */
@@ -188,8 +188,7 @@ export function seatEntitlements(seats: number): SeatEntitlements {
   return {
     members: n * PER_SEAT.members,
     storageGib: n * PER_SEAT.storageGib,
-    shareLinks: n * PER_SEAT.shareLinks,
-    sessions: n * PER_SEAT.sessions
+    shareLinks: n * PER_SEAT.shareLinks
   };
 }
 

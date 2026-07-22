@@ -354,6 +354,12 @@ export interface BillingStatus {
   /** The subscription's current period end; null when there is no subscription. */
   current_period_end: string | null;
   /**
+   * Whether the subscription is scheduled to cancel at the end of the current
+   * period (Stripe's `cancel_at_period_end`) while `status` stays "active". The
+   * page shows a calm "your plan ends on `current_period_end`" notice when true.
+   */
+  cancel_at_period_end: boolean;
+  /**
    * Extra storage granted by the add-on, in GiB (already folded into
    * `limits.max_storage_bytes`). `0` when no storage add-on is active.
    */
@@ -988,6 +994,7 @@ function normalizeBillingStatus(raw: unknown): BillingStatus {
     status: strOrNull(b.status),
     interval: asInterval(b.interval),
     current_period_end: strOrNull(b.current_period_end),
+    cancel_at_period_end: Boolean(b.cancel_at_period_end),
     extra_storage_gib: num(b.extra_storage_gib),
     usage: normalizeBillingUsage(b.usage),
     limits: normalizeBillingLimits(b.limits)
@@ -1765,6 +1772,21 @@ export const api = {
       );
       const r = (raw ?? {}) as Record<string, unknown>;
       return String(r.checkout_url ?? '');
+    },
+    /**
+     * Owner-only: open a Stripe Customer Portal session for the workspace's
+     * subscription (update payment method, view invoices, or cancel). Returns the
+     * short-lived hosted URL to navigate to (`window.location.href = url`). 404s
+     * when billing is disabled; throws an ApiError `no_subscription` (409) when the
+     * workspace has no subscription to manage.
+     */
+    async portal(slug: string): Promise<string> {
+      const raw = await request<unknown>(
+        'POST',
+        `/workspaces/${encodeURIComponent(slug)}/billing/portal`
+      );
+      const r = (raw ?? {}) as Record<string, unknown>;
+      return String(r.url ?? '');
     }
   },
 

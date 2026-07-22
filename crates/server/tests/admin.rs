@@ -59,6 +59,7 @@ fn stripe_config() -> StripeConfig {
         price_seat_monthly: "price_seat_m".to_string(),
         price_seat_yearly: "price_seat_y".to_string(),
         price_storage: "price_storage".to_string(),
+        portal_configuration: None,
     }
 }
 
@@ -83,6 +84,7 @@ async fn setup(admin_emails: Vec<String>, stripe: Option<StripeConfig>) -> Optio
         server_tenant_books_cap_bytes: None,
         play_domain: Some(PLAY_DOMAIN.to_string()),
         admin_emails,
+        trusted_proxies: Default::default(),
     };
     let pool = db::connect_lazy(&database_url).expect("lazy pool");
     let store = storage::build_object_store(&config).expect("fs store");
@@ -320,6 +322,19 @@ async fn set_is_admin(state: &AppState, user_id: Uuid, is_admin: bool) {
         .unwrap();
 }
 
+/// Force an account's email verification state (setup has no mail, so registered
+/// accounts are born verified — this lets a test model the pre-verification window).
+async fn set_email_verified(state: &AppState, user_id: Uuid, verified: bool) {
+    sqlx::query(
+        "UPDATE users SET email_verified_at = CASE WHEN $2 THEN now() ELSE NULL END WHERE id = $1",
+    )
+    .bind(user_id)
+    .bind(verified)
+    .execute(&state.pool)
+    .await
+    .unwrap();
+}
+
 /// Clears every `is_admin` flag instance-wide (only ever run while holding
 /// [`FLAG_LOCK`]).
 async fn reset_admin_flags(state: &AppState) {
@@ -452,6 +467,39 @@ async fn env_email_admin_without_flag_has_access() {
 
     let (status, _) = admin.get("/api/admin/overview").await;
     assert_eq!(status, StatusCode::OK);
+}
+
+#[tokio::test]
+async fn env_email_admin_requires_a_verified_email() {
+    let email = unique_email();
+    let Some(ctx) = setup(vec![email.clone()], None).await else {
+        return;
+    };
+    let mut user = register(&ctx.state, &email, "Env Admin").await;
+    let uid = user_id_by_email(&ctx.state, &email).await;
+
+    // The allowlist alone is not enough while the email is unverified: an attacker
+    // who registered the operator's address before the operator did gets no admin.
+    set_email_verified(&ctx.state, uid, false).await;
+    for uri in ["/api/admin/me", "/api/admin/overview"] {
+        let (status, body) = user.get(uri).await;
+        assert_eq!(status, StatusCode::NOT_FOUND, "{uri}: {body}");
+    }
+
+    // Once the email is verified, the allowlist admits them (still no DB flag).
+    set_email_verified(&ctx.state, uid, true).await;
+    let (status, body) = user.get("/api/admin/me").await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["is_admin"], json!(true));
+    let flag: bool = sqlx::query_scalar("SELECT is_admin FROM users WHERE id = $1")
+        .bind(uid)
+        .fetch_one(&ctx.state.pool)
+        .await
+        .unwrap();
+    assert!(
+        !flag,
+        "access is via the verified allowlist, not the is_admin flag"
+    );
 }
 
 #[tokio::test]

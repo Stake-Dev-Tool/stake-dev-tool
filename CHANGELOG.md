@@ -5,6 +5,61 @@ All notable changes to this project are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [2.0.0] — 2026-07-22
+
+V2 turns the desktop tool into a full platform: the same Rust engine now
+powers the desktop app, a cloud workbench, and real hosted share links.
+Everything remains open source and fully self-hostable
+([deploy/README.md](deploy/README.md)); the optional subscription at
+[stakedevtool.com](https://stakedevtool.com/pricing) sells hosting on our
+infrastructure, nothing else.
+
+### Added
+
+- **Cloud workspaces** — accounts (password or Discord login, email
+  verification, password reset), roles (owner / admin / member) and email
+  invites. Games, quotas and sync hang off the workspace.
+- **Math revisions** — immutable snapshots with content-addressed,
+  per-workspace dedup: unchanged files are never re-uploaded. Every push
+  gets an automatic changelog against the previous revision (RTP per mode,
+  max win, modes added/removed) and a full math compliance report
+  (RTP, volatility, tail risk, streaks, win distribution).
+- **Share links v2** — every link is a real hosted game instance on its own
+  `<slug>.play.` subdomain (custom workspace domains supported, TLS
+  automatic), playing against the server-side RGS. Pinned or tracking
+  revisions, expiry and password options, per-link analytics.
+- **Web workbench** — the multi-resolution test view served from the cloud,
+  zero install, with live revision/front pickers and team push
+  notifications.
+- **`sdt` CLI + MCP server** — device-flow login, scoped tokens, `sdt push`
+  from CI, ten MCP tools for AI assistants
+  ([crates/cli](crates/cli/README.md)).
+- **Desktop Cloud browser** — browse workspace games and pull any revision
+  into a local profile from inside the app.
+- **Billing (hosted instance only)** — one seat-based plan (first seat
+  €3/mo, each extra €2/mo, yearly = 2 months free) through Stripe as
+  merchant of record; per-seat quotas (members, 10 GiB storage, 5 share
+  links, 5 live sessions per seat), storage add-ons, prorated seat changes.
+  Self-hosted instances never see any of this — billing only activates when
+  Stripe env vars are set.
+
+### Changed
+
+- **GitHub-repo Teams are replaced by cloud workspaces.** The Teams tab,
+  repo-based sync and the migrate flow are removed. Profiles, saved rounds
+  and bookmarks now sync through a workspace, live over SSE; replays
+  reference `(revision, mode, eventId)` so a math push never breaks a
+  bookmark. Self-hosting the server gives the same sync for free.
+- The WASM/GitHub Pages share is replaced by hosted share links backed by
+  the real server-side RGS.
+- Desktop app chrome adopts the product design language (the test view is
+  unchanged).
+
+### Removed
+
+- GitHub Teams integration (tab, repo sync, migration path).
+- The WASM share export.
+
 ## [1.2.2] — 2026-07-20
 
 ### Fixed

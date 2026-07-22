@@ -281,6 +281,12 @@ async fn process_event(
             };
             let period_end = extract_period_end(object);
             let customer = extract_customer_id(object);
+            // Stripe keeps the subscription `active` after a portal cancellation
+            // but flips this flag; absent (e.g. on a deletion) → false.
+            let cancel_at_period_end = object
+                .get("cancel_at_period_end")
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
 
             // Split the line items into (optional) seat plan and (optional) storage.
             let (seat_plan, storage_units, has_storage) = parse_items(stripe, object);
@@ -299,6 +305,7 @@ async fn process_event(
                     seats,
                     status,
                     period_end,
+                    cancel_at_period_end,
                     // Only touch stored storage when THIS subscription carries it;
                     // a plan-only sub leaves any separate storage add-on intact.
                     has_storage.then_some(effective_units),
@@ -428,6 +435,7 @@ async fn upsert_plan(
     seats: i64,
     status: &str,
     period_end: Option<DateTime<Utc>>,
+    cancel_at_period_end: bool,
     storage: Option<i64>,
 ) -> Result<(), sqlx::Error> {
     match storage {
@@ -435,8 +443,9 @@ async fn upsert_plan(
             sqlx::query(
                 "INSERT INTO subscriptions \
                    (workspace_id, provider_subscription_id, provider_customer_id, plan, \
-                    \"interval\", status, current_period_end, seats, extra_storage_units, updated_at) \
-                 VALUES ($1, $2, $3, 'paid', $4, $5, $6, $7, $8, now()) \
+                    \"interval\", status, current_period_end, seats, extra_storage_units, \
+                    cancel_at_period_end, updated_at) \
+                 VALUES ($1, $2, $3, 'paid', $4, $5, $6, $7, $8, $9, now()) \
                  ON CONFLICT (workspace_id) DO UPDATE SET \
                    provider_subscription_id = EXCLUDED.provider_subscription_id, \
                    provider_customer_id     = EXCLUDED.provider_customer_id, \
@@ -446,6 +455,7 @@ async fn upsert_plan(
                    current_period_end       = EXCLUDED.current_period_end, \
                    seats                    = EXCLUDED.seats, \
                    extra_storage_units      = EXCLUDED.extra_storage_units, \
+                   cancel_at_period_end     = EXCLUDED.cancel_at_period_end, \
                    updated_at               = now()",
             )
             .bind(workspace_id)
@@ -456,6 +466,7 @@ async fn upsert_plan(
             .bind(period_end)
             .bind(seats)
             .bind(units)
+            .bind(cancel_at_period_end)
             .execute(pool)
             .await?;
         }
@@ -465,8 +476,8 @@ async fn upsert_plan(
             sqlx::query(
                 "INSERT INTO subscriptions \
                    (workspace_id, provider_subscription_id, provider_customer_id, plan, \
-                    \"interval\", status, current_period_end, seats, updated_at) \
-                 VALUES ($1, $2, $3, 'paid', $4, $5, $6, $7, now()) \
+                    \"interval\", status, current_period_end, seats, cancel_at_period_end, updated_at) \
+                 VALUES ($1, $2, $3, 'paid', $4, $5, $6, $7, $8, now()) \
                  ON CONFLICT (workspace_id) DO UPDATE SET \
                    provider_subscription_id = EXCLUDED.provider_subscription_id, \
                    provider_customer_id     = EXCLUDED.provider_customer_id, \
@@ -475,6 +486,7 @@ async fn upsert_plan(
                    status                   = EXCLUDED.status, \
                    current_period_end       = EXCLUDED.current_period_end, \
                    seats                    = EXCLUDED.seats, \
+                   cancel_at_period_end     = EXCLUDED.cancel_at_period_end, \
                    updated_at               = now()",
             )
             .bind(workspace_id)
@@ -484,6 +496,7 @@ async fn upsert_plan(
             .bind(status)
             .bind(period_end)
             .bind(seats)
+            .bind(cancel_at_period_end)
             .execute(pool)
             .await?;
         }
