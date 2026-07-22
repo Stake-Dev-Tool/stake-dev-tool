@@ -70,6 +70,12 @@ pub struct Config {
     /// `<slug>.<play_domain>` are dispatched to the share router (M5); unset
     /// disables host-based share serving entirely.
     pub play_domain: Option<String>,
+    /// Instance-operator email allowlist (`SERVER_ADMIN_EMAILS`, comma-separated,
+    /// trimmed + lowercased, empties dropped). A user whose email is in this list
+    /// is an admin even without the `users.is_admin` flag — this is how the FIRST
+    /// admin is bootstrapped, before any admin exists to set the flag via SQL.
+    /// Empty/unset means the allowlist grants no one.
+    pub admin_emails: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -282,8 +288,22 @@ impl Config {
             play_domain: get("SERVER_PLAY_DOMAIN")
                 .map(|s| s.trim_matches(['.', ' ']).to_ascii_lowercase())
                 .filter(|s| !s.is_empty()),
+            admin_emails: parse_admin_emails(get("SERVER_ADMIN_EMAILS")),
         })
     }
+}
+
+/// Splits `SERVER_ADMIN_EMAILS` on commas, trimming and lowercasing each entry
+/// and dropping empties. Unset/empty yields an empty list.
+fn parse_admin_emails(value: Option<String>) -> Vec<String> {
+    value
+        .map(|s| {
+            s.split(',')
+                .map(|e| e.trim().to_ascii_lowercase())
+                .filter(|e| !e.is_empty())
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 fn parse_bool(value: Option<String>, key: &'static str) -> Result<bool, ConfigError> {
@@ -559,6 +579,31 @@ mod tests {
         let cfg =
             Config::from_source(source(&[("SERVER_PUBLIC_URL", "http://localhost:8080")])).unwrap();
         assert_eq!(cfg.app_host().as_deref(), Some("localhost"));
+    }
+
+    #[test]
+    fn admin_emails_parse_trimmed_lowercased_and_deduped_of_empties() {
+        // Unset → no admins.
+        let cfg = Config::from_source(|_| None).unwrap();
+        assert!(cfg.admin_emails.is_empty());
+
+        // Comma-separated, trimmed, lowercased; blank entries dropped.
+        let cfg = Config::from_source(source(&[(
+            "SERVER_ADMIN_EMAILS",
+            " Owner@Example.com , ops@example.com ,, ",
+        )]))
+        .unwrap();
+        assert_eq!(
+            cfg.admin_emails,
+            vec![
+                "owner@example.com".to_string(),
+                "ops@example.com".to_string()
+            ]
+        );
+
+        // A whitespace-only value grants no one.
+        let cfg = Config::from_source(source(&[("SERVER_ADMIN_EMAILS", "   ")])).unwrap();
+        assert!(cfg.admin_emails.is_empty());
     }
 
     #[test]

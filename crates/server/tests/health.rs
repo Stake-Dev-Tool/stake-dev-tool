@@ -21,6 +21,7 @@ fn fs_state(database_url: &str, root: PathBuf) -> AppState {
         server_math_cache_bytes: 21_474_836_480,
         server_tenant_books_cap_bytes: None,
         play_domain: None,
+        admin_emails: Vec::new(),
     };
     let pool = db::connect_lazy(database_url).expect("lazy pool never connects");
     let store = storage::build_object_store(&config).expect("fs store");

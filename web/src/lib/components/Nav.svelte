@@ -42,10 +42,7 @@
     class="mx-auto flex w-full max-w-5xl flex-wrap items-center gap-x-4 gap-y-2 px-6 py-2.5 sm:min-h-14"
   >
     <a href="/" class="flex flex-shrink-0 items-center gap-2.5">
-      <span
-        class="flex h-7 w-7 items-center justify-center rounded-md bg-accent text-sm font-bold text-accent-ink"
-        >S</span
-      >
+      <img src="/icon-128.png" alt="" class="h-7 w-7 rounded-md" />
       <span class="text-sm font-semibold tracking-tight">Stake Dev Tool Cloud</span>
     </a>
 

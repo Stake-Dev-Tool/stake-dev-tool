@@ -1,6 +1,7 @@
 //! HTTP handlers for the `/api` surface, split by resource. `router()` returns
 //! the sub-router `http::build_router` nests under `/api`.
 
+pub mod admin;
 pub mod auth;
 pub mod billing;
 pub mod documents;
@@ -105,6 +106,7 @@ pub fn router(max_blob_bytes: usize) -> Router<AppState> {
         .merge(documents::router()) // M3 — document sync + workspace SSE
         .merge(shares::router()) // M5 — share links CRUD
         .merge(billing::router()) // M7 — plans + Polar webhook
+        .merge(admin::router()) // instance-admin surface under /admin/…
         .merge(ws::router()) // M4 — cloud LGS under /ws/…
         .fallback(not_found)
 }

@@ -122,17 +122,56 @@ pub async fn load_subscription(
     .await?)
 }
 
-/// Resolves a workspace's effective plan. Billing disabled → `Unlimited`.
-/// Otherwise: an active/trialing (or within-grace `past_due`) subscription grants
-/// its plan; failing that, the workspace is on the trial (`Trial` while within
-/// 14 days of creation, else `Expired`).
+/// Resolves a workspace's effective plan. Billing disabled → `Unlimited` (the
+/// self-host short-circuit, kept FIRST so overrides never touch a self-hosted
+/// instance). Otherwise a non-expired instance-admin plan override wins next;
+/// failing that, an active/trialing (or within-grace `past_due`) subscription
+/// grants its plan; failing that, the workspace is on the trial (`Trial` while
+/// within 14 days of creation, else `Expired`).
 pub async fn plan_for(state: &AppState, workspace_id: Uuid) -> ApiResult<Plan> {
     if state.config.polar.is_none() {
         return Ok(Plan::Unlimited);
     }
+    // An instance operator can comp a workspace a plan via `plan_overrides`; a
+    // non-expired row is honored before any subscription is even loaded. Expired
+    // rows are ignored lazily (no cleanup job).
+    if let Some(plan) = active_override(&state.pool, workspace_id, Utc::now()).await? {
+        return Ok(plan);
+    }
     let subscription = load_subscription(&state.pool, workspace_id).await?;
     let created_at = workspace_created_at(&state.pool, workspace_id).await?;
     Ok(resolve_plan(subscription.as_ref(), created_at, Utc::now()))
+}
+
+/// The plan granted by a non-expired `plan_overrides` row for this workspace, or
+/// `None` when there is no row or it has expired. `'unlimited'` → [`Plan::Unlimited`],
+/// `'solo'`/`'team'` → their plans.
+async fn active_override(
+    pool: &PgPool,
+    workspace_id: Uuid,
+    now: DateTime<Utc>,
+) -> ApiResult<Option<Plan>> {
+    let row: Option<(String, Option<DateTime<Utc>>)> =
+        sqlx::query_as("SELECT plan, expires_at FROM plan_overrides WHERE workspace_id = $1")
+            .bind(workspace_id)
+            .fetch_optional(pool)
+            .await?;
+    let Some((plan, expires_at)) = row else {
+        return Ok(None);
+    };
+    // An expired override is dead weight — fall through to subscription resolution.
+    if let Some(exp) = expires_at
+        && exp <= now
+    {
+        return Ok(None);
+    }
+    Ok(match plan.as_str() {
+        "unlimited" => Some(Plan::Unlimited),
+        "solo" => Some(Plan::Solo),
+        "team" => Some(Plan::Team),
+        // A value outside the CHECK set can't occur; treat it as no override.
+        _ => None,
+    })
 }
 
 /// Pure resolution given a loaded subscription and the workspace's creation time.

@@ -8,6 +8,7 @@
 use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 
+pub mod admin;
 pub mod auth;
 pub mod billing;
 pub mod documents;
@@ -16,6 +17,7 @@ pub mod math;
 pub mod shares;
 pub mod workspace;
 
+pub use admin::*;
 pub use auth::*;
 pub use documents::*;
 pub use error::*;
