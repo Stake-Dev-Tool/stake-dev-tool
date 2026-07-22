@@ -15,7 +15,7 @@ export const Route = createFileRoute('/open-source')({
   component: OpenSourcePage,
 })
 
-const REPO = 'https://github.com/simnJS/stake-dev-tool'
+const REPO = 'https://github.com/Stake-Dev-Tool/stake-dev-tool'
 
 function OpenSourcePage() {
   return (

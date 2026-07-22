@@ -34,7 +34,7 @@ export default function Header() {
 
         <div className="flex items-center gap-3">
           <a
-            href="https://github.com/simnJS/stake-dev-tool"
+            href="https://github.com/Stake-Dev-Tool/stake-dev-tool"
             target="_blank"
             rel="noopener noreferrer"
             aria-label="GitHub repository"
@@ -51,7 +51,7 @@ export default function Header() {
             Dashboard
           </a>
           <a
-            href="https://github.com/simnJS/stake-dev-tool/releases/latest"
+            href="https://github.com/Stake-Dev-Tool/stake-dev-tool/releases/latest"
             target="_blank"
             rel="noopener noreferrer"
             className="btn btn-primary hidden !px-4 !py-2.5 text-sm sm:inline-flex"

@@ -16,7 +16,7 @@ that is the point.
 ## First deploy
 
 ```bash
-git clone https://github.com/simnJS/stake-dev-tool.git && cd stake-dev-tool/deploy
+git clone https://github.com/Stake-Dev-Tool/stake-dev-tool.git && cd stake-dev-tool/deploy
 cp .env.prod.example .env.prod && $EDITOR .env.prod   # domains, DB password, R2 keys
 GIT_SHA=$(git rev-parse --short HEAD) docker compose -f docker-compose.prod.yml --env-file .env.prod up -d --build
 curl -s https://app.<domain>/healthz                  # {"status":"ok",...}

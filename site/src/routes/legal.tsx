@@ -54,11 +54,11 @@ function LegalNoticePage() {
         are released under the MIT licence and the cloud server under the
         AGPL-3.0 licence, at{' '}
         <a
-          href="https://github.com/simnJS/stake-dev-tool"
+          href="https://github.com/Stake-Dev-Tool/stake-dev-tool"
           target="_blank"
           rel="noopener noreferrer"
         >
-          github.com/simnJS/stake-dev-tool
+          github.com/Stake-Dev-Tool/stake-dev-tool
         </a>
         .
       </p>

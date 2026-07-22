@@ -45,7 +45,7 @@ function CopyBlock({ label, text }: { label?: string; text: string }) {
   )
 }
 
-const INSTALL = `cargo install --git https://github.com/simnJS/stake-dev-tool --branch v2 cli`
+const INSTALL = `cargo install --git https://github.com/Stake-Dev-Tool/stake-dev-tool --branch v2 cli`
 
 const QUICKSTART = `# sign in once (device flow — approve in the dashboard)
 sdt login --save --server https://app.stakedevtool.com
@@ -78,14 +78,14 @@ const MCP_GENERIC = `{
 
 const PROMPT_INSTALL = `Install the Stake Dev Tool CLI on this machine:
 1. Check Rust is available (rustup), then run:
-   cargo install --git https://github.com/simnJS/stake-dev-tool --branch v2 cli
+   cargo install --git https://github.com/Stake-Dev-Tool/stake-dev-tool --branch v2 cli
 2. Run \`sdt login --save --server https://app.stakedevtool.com\` and give me the
    verification URL + code so I can approve the device in my dashboard.
 3. Confirm everything works with \`sdt whoami\`.`
 
 const PROMPT_MCP = `Set up the Stake Dev Tool MCP server for this client:
 1. If the \`sdt\` binary is missing, install it:
-   cargo install --git https://github.com/simnJS/stake-dev-tool --branch v2 cli
+   cargo install --git https://github.com/Stake-Dev-Tool/stake-dev-tool --branch v2 cli
 2. Ask me for an API token (I create it at https://app.stakedevtool.com/account,
    scope push:math), then register the MCP server, e.g. for Claude Code:
    claude mcp add sdt -e SDT_TOKEN=<token> -- sdt mcp --server https://app.stakedevtool.com
@@ -124,7 +124,7 @@ function CliPage() {
         <p className="mt-3 max-w-xl text-moss">
           Grab a{' '}
           <a
-            href="https://github.com/simnJS/stake-dev-tool/releases?q=sdt-v&expanded=true"
+            href="https://github.com/Stake-Dev-Tool/stake-dev-tool/releases?q=sdt-v&expanded=true"
             target="_blank"
             rel="noopener noreferrer"
           >

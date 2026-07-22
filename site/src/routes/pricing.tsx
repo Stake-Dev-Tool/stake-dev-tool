@@ -28,7 +28,7 @@ export const Route = createFileRoute('/pricing')({
   component: PricingPage,
 })
 
-const REPO = 'https://github.com/simnJS/stake-dev-tool'
+const REPO = 'https://github.com/Stake-Dev-Tool/stake-dev-tool'
 
 const FAQ = [
   {

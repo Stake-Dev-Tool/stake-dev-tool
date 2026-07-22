@@ -126,7 +126,7 @@ function CloudPage() {
           Get started
         </Link>
         <a
-          href="https://github.com/simnJS/stake-dev-tool/blob/v2/V2.md"
+          href="https://github.com/Stake-Dev-Tool/stake-dev-tool/blob/v2/V2.md"
           target="_blank"
           rel="noopener noreferrer"
           className="btn btn-ghost"

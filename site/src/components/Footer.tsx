@@ -9,7 +9,7 @@ const COLUMNS = [
       { label: 'Pricing', href: '/pricing' },
       {
         label: 'Download',
-        href: 'https://github.com/simnJS/stake-dev-tool/releases/latest',
+        href: 'https://github.com/Stake-Dev-Tool/stake-dev-tool/releases/latest',
       },
       { label: 'Stake Engine', href: 'https://stake-engine.com/' },
     ],
@@ -18,18 +18,18 @@ const COLUMNS = [
     title: 'Project',
     links: [
       { label: 'Open source', href: '/open-source' },
-      { label: 'GitHub', href: 'https://github.com/simnJS/stake-dev-tool' },
+      { label: 'GitHub', href: 'https://github.com/Stake-Dev-Tool/stake-dev-tool' },
       {
         label: 'Issues',
-        href: 'https://github.com/simnJS/stake-dev-tool/issues',
+        href: 'https://github.com/Stake-Dev-Tool/stake-dev-tool/issues',
       },
       {
         label: 'Contributing',
-        href: 'https://github.com/simnJS/stake-dev-tool/blob/main/CONTRIBUTING.md',
+        href: 'https://github.com/Stake-Dev-Tool/stake-dev-tool/blob/main/CONTRIBUTING.md',
       },
       {
         label: 'Changelog',
-        href: 'https://github.com/simnJS/stake-dev-tool/blob/main/CHANGELOG.md',
+        href: 'https://github.com/Stake-Dev-Tool/stake-dev-tool/blob/main/CHANGELOG.md',
       },
     ],
   },

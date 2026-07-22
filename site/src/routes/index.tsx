@@ -4,7 +4,7 @@ import TestViewFigure from '../components/TestViewFigure'
 
 export const Route = createFileRoute('/')({ component: Home })
 
-const REPO = 'https://github.com/simnJS/stake-dev-tool'
+const REPO = 'https://github.com/Stake-Dev-Tool/stake-dev-tool'
 
 const HIGHLIGHTS = [
   {

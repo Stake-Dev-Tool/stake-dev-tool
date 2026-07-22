@@ -102,7 +102,7 @@ function FeaturesPage() {
 
       <div className="mt-14 flex flex-wrap gap-3">
         <a
-          href="https://github.com/simnJS/stake-dev-tool/releases/latest"
+          href="https://github.com/Stake-Dev-Tool/stake-dev-tool/releases/latest"
           target="_blank"
           rel="noopener noreferrer"
           className="btn btn-primary"

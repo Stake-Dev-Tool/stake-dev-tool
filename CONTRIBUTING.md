@@ -6,8 +6,8 @@ to get involved.
 
 ## Before you start
 
-- Browse open [issues](https://github.com/simnJS/stake-dev-tool/issues)
-  and [discussions](https://github.com/simnJS/stake-dev-tool/discussions)
+- Browse open [issues](https://github.com/Stake-Dev-Tool/stake-dev-tool/issues)
+  and [discussions](https://github.com/Stake-Dev-Tool/stake-dev-tool/discussions)
   to see if someone is already on it.
 - For non-trivial changes, open an issue first to align on the approach before
   sinking time into an implementation.
@@ -24,7 +24,7 @@ Prerequisites:
   libssl-dev libayatana-appindicator3-dev librsvg2-dev`
 
 ```bash
-git clone https://github.com/simnJS/stake-dev-tool.git
+git clone https://github.com/Stake-Dev-Tool/stake-dev-tool.git
 cd stake-dev-tool
 pnpm install
 pnpm tauri:dev          # hot-reloaded dev mode

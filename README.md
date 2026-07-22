@@ -8,24 +8,24 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/simnJS/stake-dev-tool/releases/latest">
-    <img alt="Latest release" src="https://img.shields.io/github/v/release/simnJS/stake-dev-tool?style=flat-square&color=emerald" />
+  <a href="https://github.com/Stake-Dev-Tool/stake-dev-tool/releases/latest">
+    <img alt="Latest release" src="https://img.shields.io/github/v/release/Stake-Dev-Tool/stake-dev-tool?style=flat-square&color=emerald" />
   </a>
-  <a href="https://github.com/simnJS/stake-dev-tool/releases">
-    <img alt="Total downloads" src="https://img.shields.io/github/downloads/simnJS/stake-dev-tool/total?style=flat-square&color=blue" />
+  <a href="https://github.com/Stake-Dev-Tool/stake-dev-tool/releases">
+    <img alt="Total downloads" src="https://img.shields.io/github/downloads/Stake-Dev-Tool/stake-dev-tool/total?style=flat-square&color=blue" />
   </a>
-  <a href="https://github.com/simnJS/stake-dev-tool/actions/workflows/ci.yml">
-    <img alt="CI" src="https://img.shields.io/github/actions/workflow/status/simnJS/stake-dev-tool/ci.yml?branch=main&label=CI&style=flat-square" />
+  <a href="https://github.com/Stake-Dev-Tool/stake-dev-tool/actions/workflows/ci.yml">
+    <img alt="CI" src="https://img.shields.io/github/actions/workflow/status/Stake-Dev-Tool/stake-dev-tool/ci.yml?branch=main&label=CI&style=flat-square" />
   </a>
   <a href="LICENSE">
-    <img alt="License" src="https://img.shields.io/github/license/simnJS/stake-dev-tool?style=flat-square" />
+    <img alt="License" src="https://img.shields.io/github/license/Stake-Dev-Tool/stake-dev-tool?style=flat-square" />
   </a>
 </p>
 
 <p align="center">
   <a href="https://stakedevtool.com"><b>Website</b></a> ·
   <a href="https://app.stakedevtool.com"><b>Cloud dashboard</b></a> ·
-  <a href="https://github.com/simnJS/stake-dev-tool/releases/latest"><b>Download</b></a> ·
+  <a href="https://github.com/Stake-Dev-Tool/stake-dev-tool/releases/latest"><b>Download</b></a> ·
   <a href="deploy/README.md"><b>Self-host</b></a> ·
   <a href="V2.md"><b>V2 plan</b></a>
 </p>
@@ -57,7 +57,7 @@ roadmap.
 ([pricing](https://stakedevtool.com/pricing)) — or self-host for free.
 
 **Install the desktop app.** Grab the latest build from the
-[Releases page](https://github.com/simnJS/stake-dev-tool/releases/latest):
+[Releases page](https://github.com/Stake-Dev-Tool/stake-dev-tool/releases/latest):
 
 | Platform                   | File                                            | Notes                                       |
 | -------------------------- | ----------------------------------------------- | ------------------------------------------- |
@@ -72,7 +72,7 @@ roadmap.
 Caddy — the same stack we run in production:
 
 ```bash
-git clone https://github.com/simnJS/stake-dev-tool.git && cd stake-dev-tool/deploy
+git clone https://github.com/Stake-Dev-Tool/stake-dev-tool.git && cd stake-dev-tool/deploy
 cp .env.prod.example .env.prod && $EDITOR .env.prod
 docker compose -f docker-compose.prod.yml --env-file .env.prod up -d --build
 ```
@@ -249,7 +249,7 @@ cargo run -p lgs --release
 - Linux: `libwebkit2gtk-4.1-dev build-essential curl wget file libxdo-dev libssl-dev libayatana-appindicator3-dev librsvg2-dev`
 
 ```bash
-git clone https://github.com/simnJS/stake-dev-tool.git
+git clone https://github.com/Stake-Dev-Tool/stake-dev-tool.git
 cd stake-dev-tool
 pnpm install
 
@@ -297,6 +297,6 @@ service to publish their changes.
     Built by <a href="https://github.com/simnJS">@simnJS</a> ·
     <a href="https://stakedevtool.com">stakedevtool.com</a> ·
     <a href="CHANGELOG.md">Changelog</a> ·
-    <a href="https://github.com/simnJS/stake-dev-tool/issues/new">Report a bug</a>
+    <a href="https://github.com/Stake-Dev-Tool/stake-dev-tool/issues/new">Report a bug</a>
   </sub>
 </p>
