@@ -60,14 +60,14 @@
       name: 'Solo',
       blurb: 'A single developer, unlimited games.',
       features: ['1 member', '10 GiB math storage', '5 active share links'],
-      price: { monthly: '≈ €5 / mo', yearly: '≈ €48 / yr' }
+      price: { monthly: '€5 / mo', yearly: '€48 / yr' }
     },
     {
       id: 'team',
       name: 'Team',
       blurb: 'Up to ten seats and higher share quotas.',
       features: ['10 members', '50 GiB math storage', '25 active share links'],
-      price: { monthly: '≈ €15 / mo', yearly: '≈ €144 / yr' }
+      price: { monthly: '€15 / mo', yearly: '€144 / yr' }
     }
   ];
 
@@ -336,8 +336,8 @@
       </div>
 
       <p class="mt-4 text-xs text-faint">
-        Indicative pricing — the final price, taxes and currency are shown at checkout. Payments are
-        processed securely by Stripe.
+        Prices exclude tax — VAT, when applicable, is added at checkout based on your country. Payments
+        are processed securely by Stripe as merchant of record.
       </p>
     </section>
 
