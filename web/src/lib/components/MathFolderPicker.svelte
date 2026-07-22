@@ -14,14 +14,27 @@
 
   type Props = {
     disabled?: boolean;
-    /** The file the folder must contain at its root. Default `index.json` (math). */
+    /**
+     * The file the folder must contain at its root. Default `index.json` (math);
+     * front bundles pass `index.html`. Pass the sentinel `'detect'` to accept a
+     * folder that has EITHER at its root and report which kind(s) it is — the
+     * per-kind file caps (math 1000, front 2000) then apply after detection.
+     */
     requiredRootFile?: string;
-    /** Max files allowed in the folder. Default 1000 (math); front bundles pass 2000. */
+    /** Max files allowed in the folder. Default 1000 (math); front bundles pass 2000. Ignored in `detect` mode (per-kind caps apply). */
     maxFiles?: number;
     /** Bold call-to-action in the drop zone. Default targets math folders. */
     label?: string;
-    /** Fired with the accepted files and the detected top folder name (may be ''). */
-    onpicked?: (files: IntakeFile[], rootName: string) => void;
+    /**
+     * Fired with the accepted files and the detected top folder name (may be '').
+     * In `detect` mode the third argument reports which push kinds the folder is
+     * valid for (present at root AND within that kind's file cap).
+     */
+    onpicked?: (
+      files: IntakeFile[],
+      rootName: string,
+      roots?: { math: boolean; front: boolean }
+    ) => void;
     /** Fired when the selection is cleared or rejected. */
     oncleared?: () => void;
   };
@@ -35,6 +48,11 @@
     oncleared
   }: Props = $props();
 
+  // Per-kind file caps, applied after auto-detection in `detect` mode.
+  const MATH_CAP = 1000;
+  const FRONT_CAP = 2000;
+
+  let detect = $derived(requiredRootFile === 'detect');
   let MAX_FILES = $derived(maxFiles);
 
   let dragOver = $state(false);
@@ -120,6 +138,34 @@
       reject('That folder has no usable files (dotfiles are skipped).');
       return;
     }
+
+    // --- Auto-detect mode: accept index.json (math) OR index.html (front) ------
+    if (detect) {
+      const paths = finalFiles.map((f) => f.path);
+      const hasMath = hasRootIndex(paths, 'index.json');
+      const hasFront = hasRootIndex(paths, 'index.html');
+      if (!hasMath && !hasFront) {
+        reject(
+          'No index.json or index.html at the folder root. Drop a math folder (index.json) or a front build (index.html).'
+        );
+        return;
+      }
+      // Per-kind caps: a kind is only available if its root file is present AND
+      // the folder is within that kind's cap. If a folder has both roots but
+      // exceeds one cap, that kind drops out while the other stays valid.
+      const mathAvailable = hasMath && finalFiles.length <= MATH_CAP;
+      const frontAvailable = hasFront && finalFiles.length <= FRONT_CAP;
+      if (!mathAvailable && !frontAvailable) {
+        const cap = hasFront ? FRONT_CAP : MATH_CAP;
+        reject(`Too many files: ${finalFiles.length.toLocaleString()} (max ${cap.toLocaleString()}).`);
+        return;
+      }
+      files = finalFiles;
+      rootName = root;
+      onpicked?.(finalFiles, root, { math: mathAvailable, front: frontAvailable });
+      return;
+    }
+
     if (finalFiles.length > MAX_FILES) {
       reject(`Too many files: ${finalFiles.length.toLocaleString()} (max ${MAX_FILES.toLocaleString()}).`);
       return;
@@ -228,9 +274,16 @@
       <span class="text-muted"> or </span>
       <span class="text-accent underline-offset-2 hover:underline">browse</span>
     </div>
-    <p class="text-xs text-faint">
-      The folder must contain an <span class="font-mono-tab text-muted">{requiredRootFile}</span> at its root · up to {MAX_FILES.toLocaleString()} files
-    </p>
+    {#if detect}
+      <p class="text-xs text-faint">
+        Root <span class="font-mono-tab text-muted">index.json</span> (math, up to {MATH_CAP.toLocaleString()} files)
+        or <span class="font-mono-tab text-muted">index.html</span> (front, up to {FRONT_CAP.toLocaleString()} files)
+      </p>
+    {:else}
+      <p class="text-xs text-faint">
+        The folder must contain an <span class="font-mono-tab text-muted">{requiredRootFile}</span> at its root · up to {MAX_FILES.toLocaleString()} files
+      </p>
+    {/if}
     <input
       bind:this={inputEl}
       use:directoryInput

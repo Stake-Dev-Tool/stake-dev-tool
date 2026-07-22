@@ -105,17 +105,26 @@ A revision can be pushed from the dashboard without leaving the browser — the
 same content-addressed flow `sdt push` uses. Session-cookie auth already carries
 the implicit `full` scope (which satisfies `push:math`), so no token is needed.
 
-- **Where:** a **Push a revision** button on the game page (`/w/[slug]/g/[game]`)
-  pushes into that game; a **New game** button on the workspace Games card runs
-  the same flow plus a live-derived, validated game-slug input
-  (`^[a-z0-9][a-z0-9-]{1,38}[a-z0-9]$`). CI (`sdt push`) remains available and is
-  offered alongside in every empty state.
+- **Where:** a single **Push** button on the game page (`/w/[slug]/g/[game]`)
+  opens the unified **`PushPanel`**, which auto-detects the kind from the dropped
+  folder's root — `index.json` ⇒ a math **revision** (message required; commits a
+  revision, then navigates to it), `index.html` ⇒ a **front bundle** (no message;
+  success shows a toast, no navigation), **both** present ⇒ a small radio to
+  choose, **neither** ⇒ a clear error naming both. A **New game** button on the
+  workspace Games card still runs the math-only flow (`MathPushPanel`) plus a
+  live-derived, validated game-slug input (`^[a-z0-9][a-z0-9-]{1,38}[a-z0-9]$`).
+  CI (`sdt push` / `sdt push-front`) remains available and is offered alongside in
+  every empty state.
 - **Intake** (`src/lib/components/MathFolderPicker.svelte`): drag a folder
   (walked via `DataTransferItem.webkitGetAsEntry`) or click to browse
   (`<input webkitdirectory>`). Paths are made relative POSIX with the top folder
-  stripped; dotfiles are skipped. Rejects a folder with no root `index.json`,
-  more than 1000 files, or nothing usable, and shows a summary (file count, total
-  size, largest file).
+  stripped; dotfiles are skipped, and it shows a summary (file count, total size,
+  largest file). The required root file is a prop — `index.json` (math, default),
+  `index.html` (front), or the sentinel **`"detect"`** used by `PushPanel`, which
+  accepts either root and reports which kinds fit via a third `onpicked` argument
+  (`{ math, front }`). Per-kind caps apply after detection (math 1000, front
+  2000); a folder that has both roots but overflows one cap stays valid for the
+  other kind rather than being rejected outright.
 - **Pipeline** (`src/lib/push.ts`, UI-agnostic + unit-testable): sha256 each file
   with `hash-wasm`, streamed from `file.stream()` in chunks so a multi-GB book is
   never buffered whole → `POST …/revisions/check` for the missing hashes → `PUT
@@ -129,7 +138,9 @@ the implicit `full` scope (which satisfies `push:math`), so no token is needed.
 - **Errors** map to precise copy: 413 → "larger than the server allows",
   `hash_mismatch`, `stale_parent` → "someone pushed meanwhile — reload",
   `invalid_manifest` → the server's message.
-- On success the flow navigates to the new revision's page, where stats poll.
+- On success a math push navigates to the new revision's page, where stats poll;
+  a front push stays put and shows a toast (shares and the test view pick up the
+  latest bundle automatically).
 
 `ApiError` now carries a `details` field (the parsed error body) so the commit
 handler can read the top-level `missing` array a 409 returns. Adds one runtime
@@ -190,13 +201,14 @@ page (`/w/[slug]/g/[game]`), in **`src/lib/components/SharePanel.svelte`**, with
 three stacked pieces:
 
 - **Game front** card: a share serves the game's front build (the web bundle
-  players load). Upload it once — the picker is the **same `MathFolderPicker`**,
-  reused with a `requiredRootFile="index.html"` prop (default stays `index.json`,
-  so math flows are untouched), `maxFiles={2000}`, and a custom drop label. Upload
-  runs **`runFrontPush`** with a compact inline progress recap (phase line +
-  global bar; no per-file table — a web build is many small files). On success it
-  confirms the new bundle id and notes that **new shares use the latest bundle
-  automatically** (there is no list-bundles endpoint, so nothing is fetched back).
+  players load). This card is a **read-only status probe** (HEAD on the front
+  route → "bundle uploaded" / "none yet") that points back to the Revisions tab.
+  The bundle itself is pushed from the unified **`PushPanel`** there: dropping an
+  `index.html` folder is detected as a front bundle and runs **`runFrontPush`**
+  with a compact inline progress recap (phase line + global bar; no per-file table
+  — a web build is many small files). On success it toasts and notes that **new
+  shares use the latest bundle automatically** (there is no list-bundles endpoint,
+  so nothing is fetched back).
 - **Create share** (owner/admin only — hidden for members): pin a revision
   (**Latest** tracks head, or any revision number, reusing the page's already-
   loaded revisions list) plus optional custom **slug**

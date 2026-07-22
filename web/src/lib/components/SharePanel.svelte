@@ -4,7 +4,7 @@
    *
    *   • Game front status — a best-effort probe of whether this game has an
    *     uploaded front bundle (the build a share serves). The bundle itself is
-   *     pushed from the Revisions tab (Push front); shares use the latest one.
+   *     pushed from the Revisions tab with the Push button; shares use the latest one.
    *   • Create share (owner/admin only) — pin a revision (or track latest),
    *     optional custom slug / password / expiry / session cap → POST, then
    *     prepend to the list and show the new URL prominently (stays inline).
@@ -276,7 +276,7 @@
       {/if}
     </div>
     <span class="text-xs text-faint">
-      Push or update it from the Revisions tab → Push front. Shares serve the latest bundle.
+      Push or update it from the Revisions tab with the Push button. Shares serve the latest bundle.
     </span>
   </Card>
 

@@ -9,8 +9,7 @@
   import Card from '$lib/components/Card.svelte';
   import Badge from '$lib/components/Badge.svelte';
   import CopyField from '$lib/components/CopyField.svelte';
-  import FrontPushPanel from '$lib/components/FrontPushPanel.svelte';
-  import MathPushPanel from '$lib/components/MathPushPanel.svelte';
+  import PushPanel from '$lib/components/PushPanel.svelte';
   import FrontUrlDialog from '$lib/components/FrontUrlDialog.svelte';
   import PlanBanner from '$lib/components/PlanBanner.svelte';
   import SharePanel from '$lib/components/SharePanel.svelte';
@@ -25,7 +24,6 @@
   let game = $derived(page.params.game ?? '');
 
   let showPush = $state(false);
-  let showFrontPush = $state(false);
   let testOpen = $state(false);
 
   // Client-side tabs (deep-linkable via #revisions / #share).
@@ -168,39 +166,30 @@
       <SectionHeader title="Revisions">
         {#snippet action()}
           {#if !showPush}
-            <Button size="sm" onclick={() => (showPush = true)}>Push a revision</Button>
-          {/if}
-          {#if !showFrontPush}
-            <Button variant="secondary" size="sm" onclick={() => (showFrontPush = true)}>
-              Push front
-            </Button>
+            <Button size="sm" onclick={() => (showPush = true)}>Push</Button>
           {/if}
         {/snippet}
       </SectionHeader>
 
       {#if showPush}
         <div class="mb-6">
-          <MathPushPanel
+          <PushPanel
             {slug}
             {game}
             parentNumber={headNumber}
             ondone={(n) => onPushed(n)}
+            onfrontuploaded={() => (showPush = false)}
             oncancel={() => (showPush = false)}
           />
         </div>
       {/if}
 
-      {#if showFrontPush}
-        <div class="mb-6">
-          <FrontPushPanel {slug} {game} oncancel={() => (showFrontPush = false)} />
-        </div>
-      {/if}
-
       {#if revisions.length === 0}
         <EmptyState title="No revisions yet">
-          Revisions are immutable math snapshots. Push one straight from your browser with
-          <span class="text-text">Push a revision</span> above, or run
-          <span class="font-mono-tab text-text">sdt push</span> from CI.
+          Revisions are immutable math snapshots. Push your math or front build with the
+          <span class="text-text">Push</span> button above, or use
+          <span class="font-mono-tab text-text">sdt push</span> /
+          <span class="font-mono-tab text-text">sdt push-front</span> from CI.
           {#snippet cta()}
             <div class="w-full max-w-xs"><CopyField value="sdt push" /></div>
           {/snippet}
