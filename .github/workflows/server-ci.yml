@@ -5,7 +5,7 @@ name: Server CI
 # (test view, include_dir'd into lgs) + web/ (dashboard, served at runtime).
 on:
   push:
-    branches: [v2]
+    branches: [main]
     paths:
       - 'crates/server/**'
       - 'crates/protocol/**'
@@ -22,7 +22,7 @@ on:
       - 'deploy/docker-compose.prod.yml'
       - '.github/workflows/server-ci.yml'
   pull_request:
-    branches: [v2, main]
+    branches: [main]
     paths:
       - 'crates/server/**'
       - 'crates/protocol/**'
@@ -138,14 +138,14 @@ jobs:
 
       - run: pnpm --filter web build
 
-  # Continuous deployment: every green push to v2 rebuilds and restarts the
+  # Continuous deployment: every green push to main rebuilds and restarts the
   # production server. The SSH key is locked to a forced command on the box
   # (/usr/local/bin/sdt-deploy) that only accepts a full commit sha already on
-  # origin/v2 — it cannot open a shell or run anything else. Caddy is left
+  # origin/main — it cannot open a shell or run anything else. Caddy is left
   # untouched (recreating it drops live connections); deploy/Caddyfile changes
   # remain a rare manual step, see deploy/README.md.
   deploy:
-    if: github.event_name == 'push' && github.ref == 'refs/heads/v2'
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     needs: [server, web]
     runs-on: ubuntu-latest
     timeout-minutes: 30
