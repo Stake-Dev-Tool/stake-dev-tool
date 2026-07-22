@@ -16,9 +16,10 @@ use std::path::PathBuf;
 /// Environment variable that overrides the configured / default base URL.
 pub const ENV_VAR: &str = "STAKE_DEV_CLOUD_URL";
 
-/// Built-in default: the server's default bind address (`crates/server`
-/// `SERVER_BIND_ADDR`). Fine for local dev; self-hosters override it.
-pub const DEFAULT_BASE_URL: &str = "http://127.0.0.1:8080";
+/// Built-in default: the hosted instance, so "sign in to cloud" works out of
+/// the box for every installed copy. Self-hosters (and local dev against
+/// `cargo run -p server`) override via `STAKE_DEV_CLOUD_URL` or `cloud.json`.
+pub const DEFAULT_BASE_URL: &str = "https://app.stakedevtool.com";
 
 /// On-disk shape of `cloud.json`. Uses the same camelCase + serde convention as
 /// the app's other config files (`profiles.json`, `teams.json`).
