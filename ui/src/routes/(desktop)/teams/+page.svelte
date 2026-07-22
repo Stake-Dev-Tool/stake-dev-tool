@@ -284,8 +284,9 @@
       <Button variant="ghost" size="icon-lg" onclick={() => goto('/')} aria-label="Back">
         <ArrowLeftIcon />
       </Button>
+      <img src="/icon-128.png" alt="Stake Dev Tool" class="h-9 w-9 rounded-lg border" />
       <div>
-        <h1 class="text-2xl font-semibold tracking-tight">Workspaces</h1>
+        <h1 class="display text-2xl font-bold tracking-tight">Workspaces</h1>
         <p class="text-sm text-muted-foreground">
           Share profiles, saved rounds, and math across your team — live.
         </p>

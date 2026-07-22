@@ -104,7 +104,7 @@
     role="status"
     aria-live="polite"
   >
-    <Card.Root class="border-foreground/20 shadow-lg">
+    <Card.Root class="border-primary/25 shadow-lg">
       <Card.Content class="flex flex-col gap-3 py-4">
         <div class="flex items-center justify-between gap-2">
           <div class="flex items-center gap-2">
@@ -127,7 +127,7 @@
 
         <div class="h-2 w-full overflow-hidden rounded-full bg-muted">
           <div
-            class="h-full bg-foreground transition-all"
+            class="h-full bg-primary transition-all"
             style="width: {percent}%"
           ></div>
         </div>

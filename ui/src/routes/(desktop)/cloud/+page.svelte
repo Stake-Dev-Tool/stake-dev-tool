@@ -254,8 +254,9 @@
       <Button variant="ghost" size="icon-lg" onclick={() => goto('/')} aria-label="Back">
         <ArrowLeftIcon />
       </Button>
+      <img src="/icon-128.png" alt="Stake Dev Tool" class="h-9 w-9 rounded-lg border" />
       <div>
-        <h1 class="flex items-center gap-2 text-2xl font-semibold tracking-tight">
+        <h1 class="display flex items-center gap-2 text-2xl font-bold tracking-tight">
           <CloudIcon class="h-6 w-6 text-emerald-500" />
           Cloud
         </h1>
@@ -369,7 +370,7 @@
             {#each games as g (g.slug)}
               <button
                 type="button"
-                class="group flex items-center gap-4 rounded-lg border bg-card p-4 text-left transition hover:border-foreground/25"
+                class="group flex items-center gap-4 rounded-lg border bg-card p-4 text-left transition hover:border-primary/30"
                 onclick={() => openGame(g.slug)}
               >
                 <div class="flex h-10 w-10 flex-shrink-0 items-center justify-center rounded-lg border bg-muted text-muted-foreground">

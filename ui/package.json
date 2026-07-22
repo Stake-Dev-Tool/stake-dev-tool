@@ -11,7 +11,9 @@
     "tauri": "tauri"
   },
   "devDependencies": {
+    "@fontsource-variable/bricolage-grotesque": "^5.2.0",
     "@fontsource-variable/geist": "^5.2.8",
+    "@fontsource-variable/geist-mono": "^5.2.8",
     "@internationalized/date": "^3.12.1",
     "@lucide/svelte": "^1.8.0",
     "@sveltejs/adapter-static": "^3.0.6",

@@ -915,11 +915,9 @@
   <!-- Topbar -->
   <header class="flex items-center justify-between">
     <div class="flex items-center gap-4">
-      <div class="flex h-10 w-10 items-center justify-center rounded-xl border bg-card text-lg font-semibold">
-        S
-      </div>
+      <img src="/icon-128.png" alt="Stake Dev Tool" class="h-10 w-10 rounded-xl border" />
       <div>
-        <h1 class="text-2xl font-semibold tracking-tight">Stake Dev Tool</h1>
+        <h1 class="display text-2xl font-bold tracking-tight">Stake Dev Tool</h1>
         <p class="text-sm text-muted-foreground">
           {#if currentVersion}
             <span class="font-mono-tab">v{currentVersion}</span> ·
@@ -1152,7 +1150,7 @@
   <section class="flex flex-col gap-5">
     <div class="flex items-center justify-between">
       <div>
-        <h2 class="text-xl font-semibold tracking-tight">Games</h2>
+        <h2 class="display text-xl font-bold tracking-tight">Games</h2>
         <p class="mt-1 text-sm text-muted-foreground">
           {#if hasProfiles}
             Click a profile to launch. Press <span class="kbd">↵</span> to launch the active one,
@@ -1234,13 +1232,13 @@
               : null}
             {@const canRemoveFromTeam = teamOfProfile?.role === 'owner'}
             <Card.Root
-              class="group fade-in relative overflow-hidden transition hover:border-foreground/25 {active
-                ? 'border-foreground/40'
+              class="group fade-in relative overflow-hidden transition hover:border-primary/30 {active
+                ? 'border-primary/50'
                 : ''}"
               style="animation-delay: {i * 40}ms;"
             >
               {#if active}
-                <span class="absolute left-0 top-4 bottom-4 w-[3px] rounded-r bg-foreground/80"></span>
+                <span class="absolute left-0 top-4 bottom-4 w-[3px] rounded-r bg-primary"></span>
               {/if}
               <Card.Content class="flex items-center gap-4 py-4 pl-6 pr-4">
                 <div class="min-w-0 flex-1">
@@ -1485,7 +1483,7 @@
   <section class="flex flex-col gap-4">
     <div class="flex items-center justify-between">
       <div>
-        <h2 class="text-xl font-semibold tracking-tight">Resolutions</h2>
+        <h2 class="display text-xl font-bold tracking-tight">Resolutions</h2>
         <p class="mt-1 text-sm text-muted-foreground">
           <span class="font-mono-tab text-foreground">{enabledResCount}/{resolutions.length}</span> enabled ·
           applied per launch.
@@ -1642,7 +1640,7 @@
         <label
           class="flex cursor-pointer items-start gap-3 rounded-md border p-3 hover:bg-accent {shareMathMode ===
           'sampled'
-            ? 'border-foreground/40 bg-accent/40'
+            ? 'border-primary/50 bg-primary/5'
             : ''}"
         >
           <input
@@ -1665,7 +1663,7 @@
         <label
           class="flex cursor-pointer items-start gap-3 rounded-md border p-3 hover:bg-accent {shareMathMode ===
           'partial'
-            ? 'border-foreground/40 bg-accent/40'
+            ? 'border-primary/50 bg-primary/5'
             : ''}"
         >
           <input
@@ -1687,7 +1685,7 @@
         <label
           class="flex cursor-pointer items-start gap-3 rounded-md border p-3 hover:bg-accent {shareMathMode ===
           'full'
-            ? 'border-foreground/40 bg-accent/40'
+            ? 'border-primary/50 bg-primary/5'
             : ''}"
         >
           <input
