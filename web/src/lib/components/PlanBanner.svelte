@@ -5,7 +5,7 @@
    *   • nothing            when billing is disabled (self-host) or unknown;
    *   • a prominent banner when the workspace has no active plan (Free — writes blocked);
    *   • a warning banner   when the subscription is past_due (grace period);
-   *   • a tiny plan chip   on a healthy Solo/Team plan (no banner).
+   *   • a tiny plan chip   on a healthy Paid plan (no banner).
    *
    * Mounted on the workspace page and both game pages; pass `slug`, it does the
    * rest. Never throws up the tree — a failed fetch simply renders nothing.
@@ -67,14 +67,18 @@
         Fix billing →
       </a>
     </div>
-  {:else if st.plan === 'solo' || st.plan === 'team'}
+  {:else if st.plan === 'paid'}
     <a
       href={billingHref}
       class="mb-6 inline-flex items-center gap-1 rounded-full border border-border bg-surface-2 px-2.5 py-0.5 text-xs font-medium text-muted transition hover:text-text"
       title="Manage billing"
     >
       <span class="h-1.5 w-1.5 rounded-full bg-accent"></span>
-      {st.plan === 'team' ? 'Team' : 'Solo'} plan
+      {#if st.seats != null}
+        Paid · {st.seats}{st.seats === 1 ? ' seat' : ' seats'}
+      {:else}
+        Paid plan
+      {/if}
     </a>
   {/if}
 {/if}

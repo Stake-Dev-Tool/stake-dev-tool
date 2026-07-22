@@ -14,10 +14,16 @@ export type BillingStatusResponse = {
 enabled: boolean, 
 /**
  * The resolved plan label: `"free"` (billing enabled, no active subscription
- * — reads still work, writes are blocked with `upgrade_required`), `"solo"`,
- * `"team"`, or `"unlimited"` (billing disabled, self-host).
+ * — reads still work, writes are blocked with `upgrade_required`), `"paid"`
+ * (an active seat subscription or comp), or `"unlimited"` (billing disabled,
+ * self-host).
  */
 plan: string, 
+/**
+ * The seat count backing a `"paid"` plan (the subscription quantity or the
+ * comp's seat count). `null` when the plan is not `"paid"`.
+ */
+seats: number | null, 
 /**
  * The subscription status verbatim from Stripe (e.g. `"active"`, `"trialing"`,
  * `"past_due"`, `"canceled"`), or `null` when there is no subscription. A

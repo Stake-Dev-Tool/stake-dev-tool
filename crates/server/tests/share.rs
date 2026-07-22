@@ -11,7 +11,7 @@
 use axum::body::Body;
 use axum::http::{HeaderMap, Method, Request, StatusCode};
 use serde_json::{Value, json};
-use server::config::{Config, StorageConfig};
+use server::config::{Config, StorageConfig, StripeConfig};
 use server::{AppState, db, http, storage};
 use sha2::{Digest, Sha256};
 use tower::ServiceExt;
@@ -59,6 +59,23 @@ struct Ctx {
 }
 
 async fn setup() -> Option<Ctx> {
+    setup_with(None).await
+}
+
+/// Billing-enabled variant: plan resolution runs (Free/Paid) instead of
+/// short-circuiting to Unlimited, so the share host enforces the 0-session Free cap.
+async fn setup_billing() -> Option<Ctx> {
+    setup_with(Some(StripeConfig {
+        secret_key: "sk_test_share".to_string(),
+        webhook_secret: "whsec_test".to_string(),
+        price_seat_monthly: "price_seat_m".to_string(),
+        price_seat_yearly: "price_seat_y".to_string(),
+        price_storage: "price_storage".to_string(),
+    }))
+    .await
+}
+
+async fn setup_with(stripe: Option<StripeConfig>) -> Option<Ctx> {
     let database_url = std::env::var("TEST_DATABASE_URL").ok()?;
     let tmp = tempfile::tempdir().unwrap();
     let config = Config {
@@ -72,7 +89,7 @@ async fn setup() -> Option<Ctx> {
         github: None,
         discord: None,
         mail: None,
-        stripe: None,
+        stripe,
         web_dir: None,
         storage_max_blob_bytes: 8_589_934_592,
         server_math_cache_bytes: 21_474_836_480,
@@ -85,6 +102,39 @@ async fn setup() -> Option<Ctx> {
     let state = AppState::new(config, pool, store);
     db::migrate(&state.pool).await.expect("migrations apply");
     Some(Ctx { state, _tmp: tmp })
+}
+
+/// The workspace id for a slug.
+async fn workspace_id(state: &AppState, slug: &str) -> Uuid {
+    sqlx::query_scalar("SELECT id FROM workspaces WHERE slug = $1")
+        .bind(slug)
+        .fetch_one(&state.pool)
+        .await
+        .unwrap()
+}
+
+/// Insert an active 1-seat paid subscription so a billing-enabled workspace can
+/// push content and serve sessions.
+async fn insert_paid_subscription(state: &AppState, ws_id: Uuid) {
+    sqlx::query(
+        "INSERT INTO subscriptions \
+           (workspace_id, provider_subscription_id, plan, \"interval\", status, seats) \
+         VALUES ($1, $2, 'paid', 'monthly', 'active', 1)",
+    )
+    .bind(ws_id)
+    .bind(format!("sub_{}", Uuid::new_v4()))
+    .execute(&state.pool)
+    .await
+    .unwrap();
+}
+
+/// Drop a workspace's subscription, returning it to the read-only Free state.
+async fn delete_subscription(state: &AppState, ws_id: Uuid) {
+    sqlx::query("DELETE FROM subscriptions WHERE workspace_id = $1")
+        .bind(ws_id)
+        .execute(&state.pool)
+        .await
+        .unwrap();
 }
 
 // --- HTTP harness -----------------------------------------------------------
@@ -780,6 +830,68 @@ async fn concurrent_session_cap() {
     )
     .await;
     assert_eq!(existing.status, StatusCode::OK);
+}
+
+/// A workspace that drops to Free (no active plan) stops serving NEW play
+/// sessions on its existing share links — a clean 403, never a 500 — because the
+/// Free plan's concurrent-session cap is 0. Existing content stays readable.
+#[tokio::test]
+async fn free_workspace_refuses_new_share_sessions() {
+    let Some(ctx) = setup_billing().await else {
+        return;
+    };
+    let token = owner_token(&ctx.state).await;
+    let ws = create_workspace(&ctx.state, &token).await;
+    let ws_id = workspace_id(&ctx.state, &ws).await;
+
+    // Paid while seeding (writes need an active plan on a billing-enabled instance).
+    insert_paid_subscription(&ctx.state, ws_id).await;
+    push_math(&ctx.state, &ws, &rev_files(INDEX_1MODE), None, &token).await;
+    push_bundle(&ctx.state, &ws, &bundle_files(), &token).await;
+    let share = create_share(&ctx.state, &ws, &token, json!({})).await;
+    let host = host_for(share["slug"].as_str().unwrap());
+
+    // While paid, a wallet session is admitted.
+    let ok = share_post_json(
+        &ctx.state,
+        &host,
+        &format!("/api/rgs/{GAME}/wallet/authenticate"),
+        json!({ "sessionID": "paid-sess", "language": "en" }),
+    )
+    .await;
+    assert_eq!(
+        ok.status,
+        StatusCode::OK,
+        "paid session admitted: {:?}",
+        ok.json()
+    );
+
+    // Drop the subscription → Free (0 concurrent-session cap).
+    delete_subscription(&ctx.state, ws_id).await;
+
+    // A brand-new session is refused cleanly (403 JSON, not a 500).
+    let refused = share_post_json(
+        &ctx.state,
+        &host,
+        &format!("/api/rgs/{GAME}/wallet/authenticate"),
+        json!({ "sessionID": "free-sess", "language": "en" }),
+    )
+    .await;
+    assert_eq!(
+        refused.status,
+        StatusCode::FORBIDDEN,
+        "free workspace must refuse new sessions: {:?}",
+        refused.json()
+    );
+    assert_eq!(
+        refused.json()["error"]["code"].as_str(),
+        Some("unavailable")
+    );
+
+    // The static bundle is still readable (deletion/reads stay allowed).
+    let root = share_get(&ctx.state, &host, "/?sessionID=probe", None).await;
+    assert_eq!(root.status, StatusCode::OK);
+    assert_eq!(root.body, INDEX_HTML);
 }
 
 /// A front bundle without a root index.html is rejected.

@@ -8,10 +8,15 @@ import type { AdminOverride } from "./AdminOverride";
  */
 export type AdminWorkspace = { id: string, slug: string, name: string, created_at: string, members: bigint, games: bigint, storage_bytes: bigint, 
 /**
- * Resolved plan label: `"unlimited"` (billing disabled), `"free"`,
- * `"solo"`, or `"team"`.
+ * Resolved plan label: `"unlimited"` (billing disabled), `"free"`, or
+ * `"paid"`.
  */
-plan: string, override: AdminOverride | null, 
+plan: string, 
+/**
+ * The resolved seat count when the plan is `"paid"` (from the comp override
+ * or the subscription); `null` otherwise.
+ */
+seats: number | null, override: AdminOverride | null, 
 /**
  * The Stripe subscription status verbatim (`"active"`, `"past_due"`, …), or
  * `null` when there is no subscription row.

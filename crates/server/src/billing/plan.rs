@@ -31,35 +31,32 @@ pub enum Plan {
     /// Billing disabled (self-host) — no limits, no gating.
     Unlimited,
     /// Billing enabled with no active subscription and no admin override: reads
-    /// work, writes are blocked. The hosted default until a workspace subscribes.
+    /// work, writes are blocked and every quota is 0. The hosted default until a
+    /// workspace subscribes.
     Free,
-    Solo,
-    Team,
+    /// An active seat subscription (or comp). Quotas scale linearly per seat.
+    Paid { seats: u32 },
 }
 
 impl Plan {
-    /// The quota limits for this plan. `Free` keeps read limits — writes are
-    /// refused by [`write_allowed`], not by the limits.
+    /// The quota limits for this plan. `Free` is all-zero — reads still work, but
+    /// writes are refused by [`write_allowed`] and no quota is usable. `Paid`
+    /// scales linearly: `seats` members, `seats × 10 GiB` storage, `seats × 5`
+    /// active share links and `seats × 5` concurrent share sessions.
     pub fn limits(self) -> PlanLimits {
         match self {
             Plan::Unlimited => PlanLimits::UNLIMITED,
             Plan::Free => PlanLimits {
-                max_members: Some(3),
-                max_storage_bytes: Some(2 * GIB),
-                max_active_share_links: Some(2),
-                max_concurrent_share_sessions: Some(5),
+                max_members: Some(0),
+                max_storage_bytes: Some(0),
+                max_active_share_links: Some(0),
+                max_concurrent_share_sessions: Some(0),
             },
-            Plan::Solo => PlanLimits {
-                max_members: Some(1),
-                max_storage_bytes: Some(10 * GIB),
-                max_active_share_links: Some(5),
-                max_concurrent_share_sessions: Some(5),
-            },
-            Plan::Team => PlanLimits {
-                max_members: Some(10),
-                max_storage_bytes: Some(50 * GIB),
-                max_active_share_links: Some(25),
-                max_concurrent_share_sessions: Some(25),
+            Plan::Paid { seats } => PlanLimits {
+                max_members: Some(seats),
+                max_storage_bytes: Some(u64::from(seats) * 10 * GIB),
+                max_active_share_links: Some(seats * 5),
+                max_concurrent_share_sessions: Some(seats * 5),
             },
         }
     }
@@ -69,8 +66,15 @@ impl Plan {
         match self {
             Plan::Unlimited => "unlimited",
             Plan::Free => "free",
-            Plan::Solo => "solo",
-            Plan::Team => "team",
+            Plan::Paid { .. } => "paid",
+        }
+    }
+
+    /// The seat count when this is a `Paid` plan; `None` otherwise.
+    pub fn seats(self) -> Option<u32> {
+        match self {
+            Plan::Paid { seats } => Some(seats),
+            _ => None,
         }
     }
 
@@ -78,6 +82,13 @@ impl Plan {
     pub fn writes_allowed(self) -> bool {
         !matches!(self, Plan::Free)
     }
+}
+
+/// Clamp a stored/received seat count into the sane `1..=100` range. A seat count
+/// is a subscription quantity or comp value; below 1 makes no sense and above 100
+/// is beyond what checkout allows, so both are clamped rather than trusted.
+fn clamp_seats(seats: i64) -> u32 {
+    seats.clamp(1, 100) as u32
 }
 
 /// A workspace's subscription row, as stored by the webhook.
@@ -89,6 +100,9 @@ pub struct SubscriptionRow {
     pub interval: String,
     pub status: String,
     pub current_period_end: Option<DateTime<Utc>>,
+    /// Seat count (the subscription quantity). Defaults to 1; only meaningful for
+    /// a plan-granting `'paid'` row.
+    pub seats: i64,
     /// Storage add-on units (one unit = +10 GiB). `0` when no add-on is active.
     pub extra_storage_units: i64,
 }
@@ -111,10 +125,11 @@ pub async fn load_subscription(
     workspace_id: Uuid,
 ) -> ApiResult<Option<SubscriptionRow>> {
     Ok(sqlx::query_as::<_, SubscriptionRow>(
-        // `extra_storage_units` is an INTEGER column; cast to bigint so it decodes
-        // into the row's `i64` (sqlx will not coerce int4 → i64 on its own).
+        // `seats`/`extra_storage_units` are INTEGER columns; cast to bigint so they
+        // decode into the row's `i64` (sqlx will not coerce int4 → i64 on its own).
         "SELECT provider_subscription_id, provider_customer_id, plan, \"interval\", status, \
-                current_period_end, extra_storage_units::bigint AS extra_storage_units \
+                current_period_end, seats::bigint AS seats, \
+                extra_storage_units::bigint AS extra_storage_units \
          FROM subscriptions WHERE workspace_id = $1",
     )
     .bind(workspace_id)
@@ -156,18 +171,19 @@ pub async fn plan_for(state: &AppState, workspace_id: Uuid) -> ApiResult<Plan> {
 
 /// The plan granted by a non-expired `plan_overrides` row for this workspace, or
 /// `None` when there is no row or it has expired. `'unlimited'` → [`Plan::Unlimited`],
-/// `'solo'`/`'team'` → their plans.
+/// `'paid'` → [`Plan::Paid`] with the override's seat count (clamped, default 1).
 async fn active_override(
     pool: &PgPool,
     workspace_id: Uuid,
     now: DateTime<Utc>,
 ) -> ApiResult<Option<Plan>> {
-    let row: Option<(String, Option<DateTime<Utc>>)> =
-        sqlx::query_as("SELECT plan, expires_at FROM plan_overrides WHERE workspace_id = $1")
-            .bind(workspace_id)
-            .fetch_optional(pool)
-            .await?;
-    let Some((plan, expires_at)) = row else {
+    let row: Option<(String, Option<i64>, Option<DateTime<Utc>>)> = sqlx::query_as(
+        "SELECT plan, seats::bigint, expires_at FROM plan_overrides WHERE workspace_id = $1",
+    )
+    .bind(workspace_id)
+    .fetch_optional(pool)
+    .await?;
+    let Some((plan, seats, expires_at)) = row else {
         return Ok(None);
     };
     // An expired override is dead weight — fall through to subscription resolution.
@@ -178,8 +194,9 @@ async fn active_override(
     }
     Ok(match plan.as_str() {
         "unlimited" => Some(Plan::Unlimited),
-        "solo" => Some(Plan::Solo),
-        "team" => Some(Plan::Team),
+        "paid" => Some(Plan::Paid {
+            seats: clamp_seats(seats.unwrap_or(1)),
+        }),
         // A value outside the CHECK set can't occur; treat it as no override.
         _ => None,
     })
@@ -198,7 +215,7 @@ fn resolve_plan(subscription: Option<&SubscriptionRow>, now: DateTime<Utc>) -> P
 
 /// The plan a subscription currently grants, or `None` if it grants nothing.
 /// `storage_only` is the sentinel for a storage-add-on row with no plan (its
-/// `plan` column is a placeholder `'solo'`), so it never grants a plan; likewise
+/// `plan` column is a placeholder `'paid'`), so it never grants a plan; likewise
 /// Stripe's terminal statuses (canceled/unpaid/incomplete_expired/incomplete) and
 /// a `past_due` past its 7-day grace fall through to the `Free` resolution.
 fn active_plan(sub: &SubscriptionRow, now: DateTime<Utc>) -> Option<Plan> {
@@ -207,8 +224,9 @@ fn active_plan(sub: &SubscriptionRow, now: DateTime<Utc>) -> Option<Plan> {
         return None;
     }
     let plan = match sub.plan.as_str() {
-        "solo" => Plan::Solo,
-        "team" => Plan::Team,
+        "paid" => Plan::Paid {
+            seats: clamp_seats(sub.seats),
+        },
         _ => return None,
     };
     match sub.status.as_str() {
@@ -311,6 +329,15 @@ mod tests {
     use super::*;
 
     fn sub(plan: &str, status: &str, period_end: Option<DateTime<Utc>>) -> SubscriptionRow {
+        seat_sub(plan, status, period_end, 1)
+    }
+
+    fn seat_sub(
+        plan: &str,
+        status: &str,
+        period_end: Option<DateTime<Utc>>,
+        seats: i64,
+    ) -> SubscriptionRow {
         SubscriptionRow {
             provider_subscription_id: "sub_x".into(),
             provider_customer_id: None,
@@ -318,24 +345,34 @@ mod tests {
             interval: "monthly".into(),
             status: status.into(),
             current_period_end: period_end,
+            seats,
             extra_storage_units: 0,
         }
     }
 
     #[test]
-    fn plan_limits_match_the_contract_table() {
-        assert_eq!(Plan::Free.limits().max_members, Some(3));
-        assert_eq!(Plan::Free.limits().max_storage_bytes, Some(2 * GIB));
-        assert_eq!(Plan::Free.limits().max_active_share_links, Some(2));
-        assert_eq!(Plan::Free.limits().max_concurrent_share_sessions, Some(5));
+    fn free_limits_are_all_zero() {
+        assert_eq!(Plan::Free.limits().max_members, Some(0));
+        assert_eq!(Plan::Free.limits().max_storage_bytes, Some(0));
+        assert_eq!(Plan::Free.limits().max_active_share_links, Some(0));
+        assert_eq!(Plan::Free.limits().max_concurrent_share_sessions, Some(0));
+    }
 
-        assert_eq!(Plan::Solo.limits().max_members, Some(1));
-        assert_eq!(Plan::Solo.limits().max_storage_bytes, Some(10 * GIB));
-        assert_eq!(Plan::Solo.limits().max_active_share_links, Some(5));
+    #[test]
+    fn paid_limits_scale_linearly_per_seat() {
+        // 1 seat: 1 member, 10 GiB, 5 links, 5 sessions.
+        let one = Plan::Paid { seats: 1 }.limits();
+        assert_eq!(one.max_members, Some(1));
+        assert_eq!(one.max_storage_bytes, Some(10 * GIB));
+        assert_eq!(one.max_active_share_links, Some(5));
+        assert_eq!(one.max_concurrent_share_sessions, Some(5));
 
-        assert_eq!(Plan::Team.limits().max_members, Some(10));
-        assert_eq!(Plan::Team.limits().max_storage_bytes, Some(50 * GIB));
-        assert_eq!(Plan::Team.limits().max_concurrent_share_sessions, Some(25));
+        // 10 seats: 10 members, 100 GiB, 50 links, 50 sessions.
+        let ten = Plan::Paid { seats: 10 }.limits();
+        assert_eq!(ten.max_members, Some(10));
+        assert_eq!(ten.max_storage_bytes, Some(100 * GIB));
+        assert_eq!(ten.max_active_share_links, Some(50));
+        assert_eq!(ten.max_concurrent_share_sessions, Some(50));
 
         // Unlimited is all-None.
         assert_eq!(Plan::Unlimited.limits(), PlanLimits::UNLIMITED);
@@ -344,23 +381,38 @@ mod tests {
     #[test]
     fn free_is_the_only_write_gated_plan() {
         assert!(Plan::Unlimited.writes_allowed());
-        assert!(Plan::Solo.writes_allowed());
-        assert!(Plan::Team.writes_allowed());
+        assert!(Plan::Paid { seats: 1 }.writes_allowed());
         assert!(!Plan::Free.writes_allowed());
+    }
+
+    #[test]
+    fn labels_and_seats_accessor() {
+        assert_eq!(Plan::Unlimited.label(), "unlimited");
+        assert_eq!(Plan::Free.label(), "free");
+        assert_eq!(Plan::Paid { seats: 4 }.label(), "paid");
+        assert_eq!(Plan::Paid { seats: 4 }.seats(), Some(4));
+        assert_eq!(Plan::Free.seats(), None);
+        assert_eq!(Plan::Unlimited.seats(), None);
     }
 
     #[test]
     fn resolution_prefers_active_subscription_then_free() {
         let now = Utc::now();
 
-        // Active/trialing grant their plan.
+        // Active/trialing grant the paid plan with the row's seat count.
         assert_eq!(
-            resolve_plan(Some(&sub("solo", "active", None)), now),
-            Plan::Solo
+            resolve_plan(Some(&seat_sub("paid", "active", None, 3)), now),
+            Plan::Paid { seats: 3 }
         );
         assert_eq!(
-            resolve_plan(Some(&sub("team", "trialing", None)), now),
-            Plan::Team
+            resolve_plan(Some(&seat_sub("paid", "trialing", None, 10)), now),
+            Plan::Paid { seats: 10 }
+        );
+
+        // A seat count below 1 is clamped up to 1.
+        assert_eq!(
+            resolve_plan(Some(&seat_sub("paid", "active", None, 0)), now),
+            Plan::Paid { seats: 1 }
         );
 
         // No subscription → Free.
@@ -368,11 +420,11 @@ mod tests {
 
         // Canceled/revoked fall through to Free.
         assert_eq!(
-            resolve_plan(Some(&sub("team", "canceled", None)), now),
+            resolve_plan(Some(&sub("paid", "canceled", None)), now),
             Plan::Free
         );
         assert_eq!(
-            resolve_plan(Some(&sub("solo", "revoked", None)), now),
+            resolve_plan(Some(&sub("paid", "revoked", None)), now),
             Plan::Free
         );
     }
@@ -380,30 +432,30 @@ mod tests {
     #[test]
     fn past_due_holds_the_plan_only_within_grace() {
         let now = Utc::now();
-        // 1 day into grace → still granted.
-        let within = sub("team", "past_due", Some(now - Duration::days(1)));
-        assert_eq!(resolve_plan(Some(&within), now), Plan::Team);
+        // 1 day into grace → still granted (with its seats).
+        let within = seat_sub("paid", "past_due", Some(now - Duration::days(1)), 5);
+        assert_eq!(resolve_plan(Some(&within), now), Plan::Paid { seats: 5 });
         // 8 days past period end (> 7-day grace) → lapses to Free.
-        let beyond = sub("team", "past_due", Some(now - Duration::days(8)));
+        let beyond = sub("paid", "past_due", Some(now - Duration::days(8)));
         assert_eq!(resolve_plan(Some(&beyond), now), Plan::Free);
         // past_due with no known period end gets no grace.
-        let unknown = sub("solo", "past_due", None);
+        let unknown = sub("paid", "past_due", None);
         assert_eq!(resolve_plan(Some(&unknown), now), Plan::Free);
     }
 
     #[test]
     fn storage_only_never_grants_a_plan() {
         let now = Utc::now();
-        // Placeholder plan='solo' with the storage_only sentinel status: the
-        // workspace falls through to Free, not Solo.
-        let storage = sub("solo", "storage_only", None);
+        // Placeholder plan='paid' with the storage_only sentinel status: the
+        // workspace falls through to Free, not Paid.
+        let storage = sub("paid", "storage_only", None);
         assert_eq!(resolve_plan(Some(&storage), now), Plan::Free);
     }
 
     #[test]
     fn extra_storage_units_add_ten_gib_each_to_a_capped_plan() {
-        // Solo's 10 GiB cap + 3 units (30 GiB) = 40 GiB.
-        let limits = Plan::Solo.limits().with_extra_storage_units(3);
+        // Paid(1 seat) 10 GiB cap + 3 units (30 GiB) = 40 GiB.
+        let limits = Plan::Paid { seats: 1 }.limits().with_extra_storage_units(3);
         assert_eq!(limits.max_storage_bytes, Some(40 * GIB));
         // Other caps are untouched by the storage add-on.
         assert_eq!(limits.max_members, Some(1));
@@ -412,20 +464,20 @@ mod tests {
         let unlimited = Plan::Unlimited.limits().with_extra_storage_units(5);
         assert_eq!(unlimited.max_storage_bytes, None);
 
-        // Zero / negative unit counts are a no-op.
+        // Zero / negative unit counts are a no-op (Paid 2 seats = 20 GiB).
         assert_eq!(
-            Plan::Team
+            Plan::Paid { seats: 2 }
                 .limits()
                 .with_extra_storage_units(0)
                 .max_storage_bytes,
-            Some(50 * GIB)
+            Some(20 * GIB)
         );
         assert_eq!(
-            Plan::Team
+            Plan::Paid { seats: 2 }
                 .limits()
                 .with_extra_storage_units(-2)
                 .max_storage_bytes,
-            Some(50 * GIB)
+            Some(20 * GIB)
         );
     }
 }

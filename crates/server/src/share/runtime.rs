@@ -97,6 +97,15 @@ impl ShareRuntime {
         Admit::Created
     }
 
+    /// Drop a visitor session that was just admitted by [`note_session`] but must
+    /// not be counted after all (e.g. the workspace's plan forbids new sessions).
+    /// Idempotent — a no-op when the id is absent.
+    pub(super) fn forget_session(&self, share_id: Uuid, session_id: &str) {
+        if let Some(sessions) = self.sessions.get(&share_id) {
+            sessions.remove(session_id);
+        }
+    }
+
     /// Live (non-stale) visitor-session count for a link, for the dashboard.
     pub(super) fn active_sessions(&self, share_id: Uuid) -> usize {
         match self.sessions.get(&share_id) {

@@ -5,7 +5,7 @@ use axum::http::StatusCode;
 use serde::Deserialize;
 use uuid::Uuid;
 
-use protocol::billing::{BillingInterval, PlanId};
+use protocol::billing::BillingInterval;
 
 use crate::config::StripeConfig;
 use crate::error::ApiError;
@@ -13,28 +13,23 @@ use crate::error::ApiError;
 /// Stripe's REST API base. Test vs live is chosen by the secret key, not the URL.
 const STRIPE_API_BASE: &str = "https://api.stripe.com";
 
-/// The configured price id for a (plan, interval) pair.
-pub fn price_id_for(cfg: &StripeConfig, plan: PlanId, interval: BillingInterval) -> &str {
-    match (plan, interval) {
-        (PlanId::Solo, BillingInterval::Monthly) => &cfg.price_solo_monthly,
-        (PlanId::Solo, BillingInterval::Yearly) => &cfg.price_solo_yearly,
-        (PlanId::Team, BillingInterval::Monthly) => &cfg.price_team_monthly,
-        (PlanId::Team, BillingInterval::Yearly) => &cfg.price_team_yearly,
+/// The configured per-seat price id for an interval. The subscription quantity is
+/// the seat count; Stripe's graduated tiers compute €3 first seat + €2 each more.
+pub fn seat_price_id(cfg: &StripeConfig, interval: BillingInterval) -> &str {
+    match interval {
+        BillingInterval::Monthly => &cfg.price_seat_monthly,
+        BillingInterval::Yearly => &cfg.price_seat_yearly,
     }
 }
 
-/// Reverse mapping: which (plan, interval) a Stripe price id corresponds to, or
-/// `None` if it is not one of the four configured plan prices (the storage price
-/// is deliberately excluded — it maps to no plan).
-pub fn plan_for_price(cfg: &StripeConfig, price_id: &str) -> Option<(PlanId, BillingInterval)> {
-    if price_id == cfg.price_solo_monthly {
-        Some((PlanId::Solo, BillingInterval::Monthly))
-    } else if price_id == cfg.price_solo_yearly {
-        Some((PlanId::Solo, BillingInterval::Yearly))
-    } else if price_id == cfg.price_team_monthly {
-        Some((PlanId::Team, BillingInterval::Monthly))
-    } else if price_id == cfg.price_team_yearly {
-        Some((PlanId::Team, BillingInterval::Yearly))
+/// Reverse mapping: which interval a Stripe price id is the seat price for, or
+/// `None` if it is not one of the two configured seat prices (the storage price is
+/// deliberately excluded — it maps to no plan).
+pub fn interval_for_price(cfg: &StripeConfig, price_id: &str) -> Option<BillingInterval> {
+    if price_id == cfg.price_seat_monthly {
+        Some(BillingInterval::Monthly)
+    } else if price_id == cfg.price_seat_yearly {
+        Some(BillingInterval::Yearly)
     } else {
         None
     }
@@ -117,10 +112,8 @@ mod tests {
         StripeConfig {
             secret_key: "sk_test_x".into(),
             webhook_secret: "whsec_x".into(),
-            price_solo_monthly: "price_solo_m".into(),
-            price_solo_yearly: "price_solo_y".into(),
-            price_team_monthly: "price_team_m".into(),
-            price_team_yearly: "price_team_y".into(),
+            price_seat_monthly: "price_seat_m".into(),
+            price_seat_yearly: "price_seat_y".into(),
             price_storage: "price_storage".into(),
         }
     }
@@ -128,18 +121,16 @@ mod tests {
     #[test]
     fn price_mapping_round_trips() {
         let c = cfg();
-        for (plan, interval, id) in [
-            (PlanId::Solo, BillingInterval::Monthly, "price_solo_m"),
-            (PlanId::Solo, BillingInterval::Yearly, "price_solo_y"),
-            (PlanId::Team, BillingInterval::Monthly, "price_team_m"),
-            (PlanId::Team, BillingInterval::Yearly, "price_team_y"),
+        for (interval, id) in [
+            (BillingInterval::Monthly, "price_seat_m"),
+            (BillingInterval::Yearly, "price_seat_y"),
         ] {
-            assert_eq!(price_id_for(&c, plan, interval), id);
-            assert_eq!(plan_for_price(&c, id), Some((plan, interval)));
+            assert_eq!(seat_price_id(&c, interval), id);
+            assert_eq!(interval_for_price(&c, id), Some(interval));
         }
         // The storage price maps to no plan, and neither does an unknown id.
-        assert_eq!(plan_for_price(&c, "price_storage"), None);
-        assert_eq!(plan_for_price(&c, "price_unknown"), None);
+        assert_eq!(interval_for_price(&c, "price_storage"), None);
+        assert_eq!(interval_for_price(&c, "price_unknown"), None);
     }
 
     #[test]

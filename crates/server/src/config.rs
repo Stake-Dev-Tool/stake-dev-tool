@@ -124,10 +124,10 @@ pub struct StripeConfig {
     /// as the raw-ASCII HMAC key when verifying the `Stripe-Signature` header
     /// (Stripe does NOT base64-decode it, unlike Standard Webhooks).
     pub webhook_secret: String,
-    pub price_solo_monthly: String,
-    pub price_solo_yearly: String,
-    pub price_team_monthly: String,
-    pub price_team_yearly: String,
+    /// Per-seat price (Stripe graduated tiers: €3 first seat, €2 each additional).
+    /// The subscription quantity is the seat count.
+    pub price_seat_monthly: String,
+    pub price_seat_yearly: String,
     /// Quantity-based price for the storage add-on (one unit = +10 GiB).
     pub price_storage: String,
 }
@@ -282,32 +282,26 @@ impl Config {
         };
 
         // Stripe billing stays disabled unless the secret key, the webhook
-        // secret, and all five price ids are present. Any one missing (or blank)
+        // secret, and all three price ids are present. Any one missing (or blank)
         // leaves the whole block off — self-hosters run unlimited.
         let stripe = match (
             non_empty(get("STRIPE_SECRET_KEY")),
             non_empty(get("STRIPE_WEBHOOK_SECRET")),
-            non_empty(get("STRIPE_PRICE_SOLO_MONTHLY")),
-            non_empty(get("STRIPE_PRICE_SOLO_YEARLY")),
-            non_empty(get("STRIPE_PRICE_TEAM_MONTHLY")),
-            non_empty(get("STRIPE_PRICE_TEAM_YEARLY")),
+            non_empty(get("STRIPE_PRICE_SEAT_MONTHLY")),
+            non_empty(get("STRIPE_PRICE_SEAT_YEARLY")),
             non_empty(get("STRIPE_PRICE_STORAGE")),
         ) {
             (
                 Some(secret_key),
                 Some(webhook_secret),
-                Some(price_solo_monthly),
-                Some(price_solo_yearly),
-                Some(price_team_monthly),
-                Some(price_team_yearly),
+                Some(price_seat_monthly),
+                Some(price_seat_yearly),
                 Some(price_storage),
             ) => Some(StripeConfig {
                 secret_key,
                 webhook_secret,
-                price_solo_monthly,
-                price_solo_yearly,
-                price_team_monthly,
-                price_team_yearly,
+                price_seat_monthly,
+                price_seat_yearly,
                 price_storage,
             }),
             _ => None,
@@ -590,13 +584,11 @@ mod tests {
     }
 
     /// The full set of env vars that enable Stripe billing.
-    const STRIPE_ENV: [(&str, &str); 7] = [
+    const STRIPE_ENV: [(&str, &str); 5] = [
         ("STRIPE_SECRET_KEY", "sk_test_xxx"),
         ("STRIPE_WEBHOOK_SECRET", "whsec_abc"),
-        ("STRIPE_PRICE_SOLO_MONTHLY", "price_solo_m"),
-        ("STRIPE_PRICE_SOLO_YEARLY", "price_solo_y"),
-        ("STRIPE_PRICE_TEAM_MONTHLY", "price_team_m"),
-        ("STRIPE_PRICE_TEAM_YEARLY", "price_team_y"),
+        ("STRIPE_PRICE_SEAT_MONTHLY", "price_seat_m"),
+        ("STRIPE_PRICE_SEAT_YEARLY", "price_seat_y"),
         ("STRIPE_PRICE_STORAGE", "price_storage"),
     ];
 
@@ -613,8 +605,8 @@ mod tests {
         let stripe = cfg.stripe.expect("billing enabled");
         assert_eq!(stripe.secret_key, "sk_test_xxx");
         assert_eq!(stripe.webhook_secret, "whsec_abc");
-        assert_eq!(stripe.price_solo_monthly, "price_solo_m");
-        assert_eq!(stripe.price_team_yearly, "price_team_y");
+        assert_eq!(stripe.price_seat_monthly, "price_seat_m");
+        assert_eq!(stripe.price_seat_yearly, "price_seat_y");
         assert_eq!(stripe.price_storage, "price_storage");
 
         // Dropping any single required var disables the whole block.

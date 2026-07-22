@@ -1,7 +1,7 @@
 <script lang="ts">
   import { page } from '$app/state';
   import { goto, replaceState } from '$app/navigation';
-  import { api, type BillingStatus, type BillingInterval, type PlanId, type Role } from '$lib/api';
+  import { api, type BillingStatus, type BillingInterval, type Role } from '$lib/api';
   import {
     billingStatus,
     setBillingStatus,
@@ -10,6 +10,13 @@
     intervalLabel,
     meter,
     meterFill,
+    clampSeats,
+    seatMonthlyEur,
+    seatYearlyEur,
+    SEATS_MIN,
+    SEATS_MAX,
+    SEAT_FIRST_EUR,
+    SEAT_ADDITIONAL_EUR,
     clampStorageUnits,
     storageMonthlyEur,
     STORAGE_UNIT_GIB,
@@ -38,43 +45,28 @@
   let activating = $state(false);
 
   let checkoutError = $state('');
-  let checkoutBusy = $state<PlanId | null>(null);
+  let checkoutBusy = $state(false);
+
+  // Seat subscription: a stepper (1..100) + a monthly/yearly toggle.
+  let seats = $state(1);
+  let interval = $state<BillingInterval>('monthly');
+  let seatsSeeded = false;
+  const INTERVALS: BillingInterval[] = ['monthly', 'yearly'];
 
   // Storage add-on stepper (one unit = +10 GiB for €1/mo).
   let storageUnits = $state(1);
   let storageBusy = $state(false);
   let storageError = $state('');
 
-  // Per-card Monthly/Yearly toggle.
-  let intervals = $state<Record<PlanId, BillingInterval>>({ solo: 'monthly', team: 'monthly' });
-  const INTERVALS: BillingInterval[] = ['monthly', 'yearly'];
-
   let isOwner = $derived(role === 'owner');
+  let isFree = $derived(status?.plan === 'free');
+  let isPaid = $derived(status?.plan === 'paid');
 
-  // The two purchasable plans (limits + indicative pricing from V2.md).
-  const PLANS: {
-    id: PlanId;
-    name: string;
-    blurb: string;
-    features: string[];
-    price: Record<BillingInterval, string>;
-  }[] = [
-    {
-      id: 'solo',
-      name: 'Solo',
-      blurb: 'A single developer, unlimited games.',
-      features: ['1 member', '10 GiB math storage', '5 active share links'],
-      price: { monthly: '€5 / mo', yearly: '€48 / yr' }
-    },
-    {
-      id: 'team',
-      name: 'Team',
-      blurb: 'Up to ten seats and higher share quotas.',
-      features: ['10 members', '50 GiB math storage', '25 active share links'],
-      price: { monthly: '€15 / mo', yearly: '€144 / yr' }
-    }
-  ];
+  // Live seat pricing.
+  let monthlyPrice = $derived(seatMonthlyEur(seats));
+  let yearlyPrice = $derived(seatYearlyEur(seats));
 
+  // Usage meters — only meaningful (shown with caps) once a plan is active.
   let meters = $derived(
     status
       ? [
@@ -108,6 +100,10 @@
     return `Renews ${d}`;
   });
 
+  function plural(n: number, one: string, many = one + 's'): string {
+    return `${n.toLocaleString()} ${n === 1 ? one : many}`;
+  }
+
   function payLater() {
     void goto(`/w/${slug}`);
   }
@@ -128,6 +124,7 @@
       role = detail?.role ?? null;
       wsName = detail?.workspace.name ?? '';
       status = cached;
+      seedSeats();
 
       // Stripe success redirect (?upgraded=1): celebrate, refetch fresh (the
       // cache may predate the subscription), and strip the param. Read here —
@@ -138,6 +135,7 @@
           const fresh = await api.billing.status(slug);
           setBillingStatus(slug, fresh);
           status = fresh;
+          seedSeats();
         } catch {
           // Keep the cached status; the toast still stands.
         }
@@ -162,12 +160,26 @@
     }
   }
 
-  async function upgrade(plan: PlanId) {
+  // Seed the seat stepper once: a paid workspace's current seat count, else the
+  // current member count (so the default at least covers today's team). Clamped ≥ 1.
+  function seedSeats() {
+    if (seatsSeeded || !status) return;
+    const base = status.seats ?? status.usage.members ?? 1;
+    seats = clampSeats(base);
+    if (status.interval) interval = status.interval;
+    seatsSeeded = true;
+  }
+
+  function stepSeats(delta: number) {
+    seats = clampSeats(seats + delta);
+  }
+
+  async function subscribe() {
     if (!isOwner || checkoutBusy) return;
-    checkoutBusy = plan;
+    checkoutBusy = true;
     checkoutError = '';
     try {
-      const url = await api.billing.checkout(slug, plan, intervals[plan]);
+      const url = await api.billing.checkout(slug, interval, clampSeats(seats));
       if (url) {
         window.location.href = url; // full navigation to the hosted checkout
         return; // leave the button busy; the page is unloading
@@ -176,7 +188,7 @@
     } catch (e) {
       checkoutError = errorText(e);
     }
-    checkoutBusy = null;
+    checkoutBusy = false;
   }
 
   function stepStorage(delta: number) {
@@ -213,7 +225,7 @@
     <div class="mb-8">
       <h1 class="text-2xl font-semibold tracking-tight">Activate {wsName || workspaceName(slug)}</h1>
       <p class="mt-2 max-w-prose text-sm leading-relaxed text-muted">
-        Pick a plan to start pushing math, inviting your team and sharing games.
+        Subscribe to start pushing math, inviting your team and sharing games.
       </p>
       <Button variant="outline" size="sm" class="mt-4" onclick={payLater}>Pay later</Button>
     </div>
@@ -244,11 +256,14 @@
       <Card class="p-6">
         <div class="flex flex-wrap items-center gap-3">
           <span class="text-lg font-semibold">{planLabel(status.plan)}</span>
+          {#if isPaid && status.seats != null}
+            <span class="text-sm text-muted">· {plural(status.seats, 'seat')}</span>
+          {/if}
           {#if status.status}
             <Badge tone={status.status === 'past_due' ? 'warn' : 'accent'}>
               {statusLabel(status.status)}
             </Badge>
-          {:else if status.plan === 'free'}
+          {:else if isFree}
             <Badge tone="danger">No plan</Badge>
           {/if}
           {#if status.interval}
@@ -261,37 +276,66 @@
       </Card>
     </section>
 
-    <!-- Usage vs limits -->
+    <!-- Usage -->
     <section class="mb-8">
       <h2 class="mb-3 text-sm font-semibold uppercase tracking-wide text-faint">Usage</h2>
-      <Card class="flex flex-col gap-5 p-6">
-        {#each meters as m (m.label)}
-          {@const mt = meter(m.usage, m.limit)}
-          <div>
-            <div class="mb-1.5 flex items-baseline justify-between gap-3 text-sm">
-              <span class="text-muted">{m.label}</span>
+      {#if isFree}
+        <!-- Free: no caps to show (all limits are 0). Report plain facts, then a
+             single line explaining that everything is locked until subscribed. -->
+        <Card class="flex flex-col gap-4 p-6">
+          <ul class="flex flex-col gap-2 text-sm">
+            <li class="flex items-baseline justify-between gap-3">
+              <span class="text-muted">Members</span>
+              <span class="font-mono-tab text-text">{plural(status.usage.members, 'member')}</span>
+            </li>
+            <li class="flex items-baseline justify-between gap-3">
+              <span class="text-muted">Storage</span>
+              <span class="font-mono-tab text-text">{humanSize(status.usage.storage_bytes)} used</span>
+            </li>
+            <li class="flex items-baseline justify-between gap-3">
+              <span class="text-muted">Share links</span>
               <span class="font-mono-tab text-text">
-                {m.fmt(m.usage)}
-                <span class="text-faint">/ {mt.unlimited ? '∞' : m.fmt(m.limit ?? 0)}</span>
+                {plural(status.usage.active_share_links, 'share link')}
+                <span class="text-faint">(inactive)</span>
               </span>
+            </li>
+          </ul>
+          <p class="rounded-md border border-danger/30 bg-danger/10 px-3 py-2 text-sm text-danger">
+            No active plan — pushes, invites and new share links are locked, and existing share
+            links stop serving new play sessions until you subscribe. Your content stays readable.
+          </p>
+        </Card>
+      {:else}
+        <!-- Active plan: meters against the seat-derived caps. -->
+        <Card class="flex flex-col gap-5 p-6">
+          {#each meters as m (m.label)}
+            {@const mt = meter(m.usage, m.limit)}
+            <div>
+              <div class="mb-1.5 flex items-baseline justify-between gap-3 text-sm">
+                <span class="text-muted">{m.label}</span>
+                <span class="font-mono-tab text-text">
+                  {m.fmt(m.usage)}
+                  <span class="text-faint">/ {mt.unlimited ? '∞' : m.fmt(m.limit ?? 0)}</span>
+                </span>
+              </div>
+              <div class="h-2 w-full overflow-hidden rounded-full bg-surface-2">
+                {#if !mt.unlimited}
+                  <div
+                    class="h-full rounded-full {meterFill(mt.tone)} transition-all"
+                    style="width: {mt.pct}%"
+                  ></div>
+                {/if}
+              </div>
             </div>
-            <div class="h-2 w-full overflow-hidden rounded-full bg-surface-2">
-              {#if !mt.unlimited}
-                <div
-                  class="h-full rounded-full {meterFill(mt.tone)} transition-all"
-                  style="width: {mt.pct}%"
-                ></div>
-              {/if}
-            </div>
-          </div>
-        {/each}
-      </Card>
+          {/each}
+        </Card>
+      {/if}
     </section>
 
-    <!-- Upgrade -->
+    <!-- Subscribe / change seats -->
     <section>
       <h2 class="mb-3 text-sm font-semibold uppercase tracking-wide text-faint">
-        {status.plan === 'solo' || status.plan === 'team' ? 'Change plan' : 'Choose a plan'}
+        {isPaid ? 'Change plan' : 'Subscribe'}
       </h2>
 
       {#if !isOwner}
@@ -305,59 +349,88 @@
         </p>
       {/if}
 
-      <div class="grid gap-4 sm:grid-cols-2">
-        {#each PLANS as p (p.id)}
-          {@const active = status.plan === p.id}
-          <Card class="flex flex-col gap-4 p-6">
-            <div class="flex items-center justify-between gap-2">
-              <span class="text-base font-semibold">{p.name}</span>
-              {#if active}<Badge tone="accent">Current</Badge>{/if}
-            </div>
-            <p class="text-sm text-muted">{p.blurb}</p>
+      <Card class="flex flex-col gap-5 p-6">
+        <div>
+          <div class="text-base font-semibold">Seat plan</div>
+          <p class="mt-1 max-w-prose text-sm text-muted">
+            €{SEAT_FIRST_EUR}/mo for the first seat, €{SEAT_ADDITIONAL_EUR}/mo for each additional
+            seat. Every seat adds a member slot plus {STORAGE_UNIT_GIB} GiB storage, 5 share links
+            and 5 live play sessions.
+          </p>
+        </div>
 
-            <ul class="flex flex-col gap-1.5 text-sm">
-              {#each p.features as f (f)}
-                <li class="flex items-center gap-2 text-muted">
-                  <span class="text-accent" aria-hidden="true">✓</span>
-                  {f}
-                </li>
-              {/each}
-            </ul>
-
-            <!-- Monthly / Yearly toggle -->
-            <div class="inline-flex rounded-md border border-border p-0.5 text-sm">
-              {#each INTERVALS as iv (iv)}
-                <button
-                  type="button"
-                  class="rounded px-3 py-1 transition {intervals[p.id] === iv
-                    ? 'bg-surface-2 text-text'
-                    : 'text-muted hover:text-text'}"
-                  aria-pressed={intervals[p.id] === iv}
-                  onclick={() => (intervals[p.id] = iv)}
-                >
-                  {iv === 'monthly' ? 'Monthly' : 'Yearly'}
-                </button>
-              {/each}
-            </div>
-
-            <div>
-              <div class="text-lg font-semibold">{p.price[intervals[p.id]]}</div>
-              {#if intervals[p.id] === 'yearly'}
-                <div class="text-xs text-accent">2 months free</div>
-              {/if}
-            </div>
-
-            <Button
-              class="w-full"
-              loading={checkoutBusy === p.id}
-              disabled={!isOwner || checkoutBusy !== null}
-              onclick={() => upgrade(p.id)}
+        <!-- Monthly / Yearly toggle -->
+        <div class="inline-flex w-fit rounded-md border border-border p-0.5 text-sm">
+          {#each INTERVALS as iv (iv)}
+            <button
+              type="button"
+              class="rounded px-3 py-1 transition {interval === iv
+                ? 'bg-surface-2 text-text'
+                : 'text-muted hover:text-text'}"
+              aria-pressed={interval === iv}
+              onclick={() => (interval = iv)}
             >
-              {active ? 'Switch billing' : 'Subscribe'}
-            </Button>
-          </Card>
-        {/each}
-      </div>
+              {iv === 'monthly' ? 'Monthly' : 'Yearly'}
+            </button>
+          {/each}
+          <span class="self-center px-2 text-xs text-accent">2 months free</span>
+        </div>
+
+        <!-- Seat stepper -->
+        <div class="flex flex-wrap items-center gap-4">
+          <span class="text-sm text-muted">Seats</span>
+          <div class="inline-flex items-center rounded-md border border-border">
+            <button
+              type="button"
+              class="px-3 py-1.5 text-lg leading-none text-muted transition hover:text-text disabled:opacity-40"
+              aria-label="Fewer seats"
+              disabled={!isOwner || seats <= SEATS_MIN}
+              onclick={() => stepSeats(-1)}
+            >
+              −
+            </button>
+            <span class="min-w-[4rem] px-3 text-center font-mono-tab text-sm font-medium text-text">
+              {seats}
+            </span>
+            <button
+              type="button"
+              class="px-3 py-1.5 text-lg leading-none text-muted transition hover:text-text disabled:opacity-40"
+              aria-label="More seats"
+              disabled={!isOwner || seats >= SEATS_MAX}
+              onclick={() => stepSeats(1)}
+            >
+              +
+            </button>
+          </div>
+        </div>
+
+        <!-- Live price -->
+        <div>
+          <div class="text-sm text-muted">
+            €{SEAT_FIRST_EUR}
+            {#if seats > 1}
+              + €{SEAT_ADDITIONAL_EUR} × {seats - 1}
+            {/if}
+            =
+            <span class="font-semibold text-text">€{monthlyPrice} / mo</span>
+          </div>
+          {#if interval === 'yearly'}
+            <div class="mt-0.5 text-sm">
+              <span class="font-semibold text-text">€{yearlyPrice} / yr</span>
+              <span class="text-accent">· 2 months free</span>
+            </div>
+          {/if}
+        </div>
+
+        <Button
+          class="w-fit"
+          loading={checkoutBusy}
+          disabled={!isOwner || checkoutBusy}
+          onclick={subscribe}
+        >
+          {isPaid ? 'Update subscription' : 'Subscribe'}
+        </Button>
+      </Card>
 
       <p class="mt-4 text-xs text-faint">
         Prices exclude tax — VAT, when applicable, is added at checkout based on your country. Payments

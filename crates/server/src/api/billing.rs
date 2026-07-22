@@ -27,6 +27,10 @@ use crate::error::{ApiError, ApiResult};
 const MIN_STORAGE_UNITS: i64 = 1;
 const MAX_STORAGE_UNITS: i64 = 100;
 
+/// Inclusive bounds on the seat count at checkout (the subscription quantity).
+const MIN_SEATS: u32 = 1;
+const MAX_SEATS: u32 = 100;
+
 pub fn router() -> Router<AppState> {
     Router::new()
         .route("/workspaces/:slug/billing", get(status))
@@ -67,18 +71,26 @@ fn success_url(state: &AppState, workspace: &WorkspaceRow) -> String {
     )
 }
 
-/// Starts a Stripe checkout for the workspace's plan (owner-only,
-/// billing-enabled-only). The checkout carries `metadata.workspace_id` so the
-/// webhook can bind the resulting subscription without ever guessing from an email.
+/// Starts a Stripe checkout for the workspace's seat subscription (owner-only,
+/// billing-enabled-only). `seats` (1..=100) becomes the line-item quantity;
+/// Stripe's graduated tiers price it (€3 first seat + €2 each additional). The
+/// checkout carries `metadata.workspace_id` so the webhook can bind the resulting
+/// subscription without ever guessing from an email.
 async fn checkout(
     State(state): State<AppState>,
     user: CurrentUser,
     Path(slug): Path<String>,
     Json(req): Json<CheckoutRequest>,
 ) -> ApiResult<Json<CheckoutResponse>> {
+    if req.seats < MIN_SEATS || req.seats > MAX_SEATS {
+        return Err(ApiError::bad_request(
+            "invalid_seats",
+            format!("seats must be between {MIN_SEATS} and {MAX_SEATS}"),
+        ));
+    }
     let (stripe_cfg, workspace) = owner_checkout_context(&state, &user, &slug).await?;
 
-    let price_id = stripe::price_id_for(stripe_cfg, req.plan, req.interval);
+    let price_id = stripe::seat_price_id(stripe_cfg, req.interval);
     let success_url = success_url(&state, &workspace);
     let checkout_url = stripe::create_checkout(
         &state.http_client,
@@ -86,7 +98,7 @@ async fn checkout(
         price_id,
         workspace.id,
         &success_url,
-        1,
+        i64::from(req.seats),
     )
     .await?;
     Ok(Json(CheckoutResponse { checkout_url }))
@@ -168,6 +180,7 @@ async fn status(
     Ok(Json(BillingStatusResponse {
         enabled,
         plan: resolved.label().to_string(),
+        seats: resolved.seats(),
         status,
         interval,
         current_period_end,

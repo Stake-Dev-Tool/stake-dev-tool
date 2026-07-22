@@ -25,7 +25,7 @@ use sha2::{Digest, Sha256};
 use sqlx::PgPool;
 use uuid::Uuid;
 
-use protocol::billing::{BillingInterval, PlanId};
+use protocol::billing::BillingInterval;
 
 use crate::AppState;
 use crate::config::StripeConfig;
@@ -282,21 +282,21 @@ async fn process_event(
             let period_end = extract_period_end(object);
             let customer = extract_customer_id(object);
 
-            // Split the line items into (optional) plan and (optional) storage.
-            let (plan_interval, storage_units, has_storage) = parse_items(stripe, object);
+            // Split the line items into (optional) seat plan and (optional) storage.
+            let (seat_plan, storage_units, has_storage) = parse_items(stripe, object);
             // Storage counts only while the subscription is live; a dead status
             // (or a deletion) drops the add-on to zero.
             let storage_live = matches!(status, "active" | "trialing" | "past_due");
             let effective_units = if storage_live { storage_units } else { 0 };
 
-            match plan_interval {
-                Some((plan, interval)) => upsert_plan(
+            match seat_plan {
+                Some((interval, seats)) => upsert_plan(
                     &state.pool,
                     workspace_id,
                     subscription_id,
                     customer.as_deref(),
-                    plan,
                     interval,
+                    seats,
                     status,
                     period_end,
                     // Only touch stored storage when THIS subscription carries it;
@@ -366,14 +366,15 @@ fn extract_period_end(object: &Value) -> Option<DateTime<Utc>> {
         .and_then(|ts| DateTime::from_timestamp(ts, 0))
 }
 
-/// Walks `items.data[*]`, resolving each item's price into either a (plan,
-/// interval) or the storage add-on quantity. Returns the plan mapping (if any),
-/// the summed storage units, and whether the storage price appeared at all.
+/// Walks `items.data[*]`, resolving each item's price into either the seat plan
+/// (its interval + the item quantity as the seat count) or the storage add-on
+/// quantity. Returns the seat plan mapping (if any), the summed storage units, and
+/// whether the storage price appeared at all.
 fn parse_items(
     stripe: &StripeConfig,
     object: &Value,
-) -> (Option<(PlanId, BillingInterval)>, i64, bool) {
-    let mut plan_interval = None;
+) -> (Option<(BillingInterval, i64)>, i64, bool) {
+    let mut seat_plan = None;
     let mut storage_units = 0i64;
     let mut has_storage = false;
 
@@ -382,7 +383,7 @@ fn parse_items(
         .and_then(|i| i.get("data"))
         .and_then(Value::as_array);
     let Some(items) = items else {
-        return (plan_interval, storage_units, has_storage);
+        return (seat_plan, storage_units, has_storage);
     };
 
     for item in items {
@@ -393,21 +394,16 @@ fn parse_items(
         let Some(price) = price else { continue };
         let quantity = item.get("quantity").and_then(Value::as_i64).unwrap_or(1);
 
-        if let Some(pi) = super::stripe::plan_for_price(stripe, price) {
-            plan_interval = Some(pi);
+        if let Some(interval) = super::stripe::interval_for_price(stripe, price) {
+            // Seat count = the line item's quantity (Stripe's graduated tiers
+            // price it; we only need the count for our own quota math).
+            seat_plan = Some((interval, quantity.max(1)));
         } else if price == stripe.price_storage {
             has_storage = true;
             storage_units += quantity;
         }
     }
-    (plan_interval, storage_units, has_storage)
-}
-
-fn plan_str(plan: PlanId) -> &'static str {
-    match plan {
-        PlanId::Solo => "solo",
-        PlanId::Team => "team",
-    }
+    (seat_plan, storage_units, has_storage)
 }
 
 fn interval_str(interval: BillingInterval) -> &'static str {
@@ -417,8 +413,9 @@ fn interval_str(interval: BillingInterval) -> &'static str {
     }
 }
 
-/// Upserts the workspace's plan columns. `storage` is `Some(units)` only when the
-/// SAME subscription also carries the storage price (a mixed subscription) — then
+/// Upserts the workspace's seat-plan columns (plan is always `'paid'`; `seats` is
+/// the subscription quantity). `storage` is `Some(units)` only when the SAME
+/// subscription also carries the storage price (a mixed subscription) — then
 /// `extra_storage_units` is set too; `None` leaves any separately-purchased
 /// storage add-on untouched.
 #[allow(clippy::too_many_arguments)]
@@ -427,8 +424,8 @@ async fn upsert_plan(
     workspace_id: Uuid,
     subscription_id: &str,
     customer_id: Option<&str>,
-    plan: PlanId,
     interval: BillingInterval,
+    seats: i64,
     status: &str,
     period_end: Option<DateTime<Utc>>,
     storage: Option<i64>,
@@ -438,8 +435,8 @@ async fn upsert_plan(
             sqlx::query(
                 "INSERT INTO subscriptions \
                    (workspace_id, provider_subscription_id, provider_customer_id, plan, \
-                    \"interval\", status, current_period_end, extra_storage_units, updated_at) \
-                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, now()) \
+                    \"interval\", status, current_period_end, seats, extra_storage_units, updated_at) \
+                 VALUES ($1, $2, $3, 'paid', $4, $5, $6, $7, $8, now()) \
                  ON CONFLICT (workspace_id) DO UPDATE SET \
                    provider_subscription_id = EXCLUDED.provider_subscription_id, \
                    provider_customer_id     = EXCLUDED.provider_customer_id, \
@@ -447,16 +444,17 @@ async fn upsert_plan(
                    \"interval\"             = EXCLUDED.\"interval\", \
                    status                   = EXCLUDED.status, \
                    current_period_end       = EXCLUDED.current_period_end, \
+                   seats                    = EXCLUDED.seats, \
                    extra_storage_units      = EXCLUDED.extra_storage_units, \
                    updated_at               = now()",
             )
             .bind(workspace_id)
             .bind(subscription_id)
             .bind(customer_id)
-            .bind(plan_str(plan))
             .bind(interval_str(interval))
             .bind(status)
             .bind(period_end)
+            .bind(seats)
             .bind(units)
             .execute(pool)
             .await?;
@@ -467,8 +465,8 @@ async fn upsert_plan(
             sqlx::query(
                 "INSERT INTO subscriptions \
                    (workspace_id, provider_subscription_id, provider_customer_id, plan, \
-                    \"interval\", status, current_period_end, updated_at) \
-                 VALUES ($1, $2, $3, $4, $5, $6, $7, now()) \
+                    \"interval\", status, current_period_end, seats, updated_at) \
+                 VALUES ($1, $2, $3, 'paid', $4, $5, $6, $7, now()) \
                  ON CONFLICT (workspace_id) DO UPDATE SET \
                    provider_subscription_id = EXCLUDED.provider_subscription_id, \
                    provider_customer_id     = EXCLUDED.provider_customer_id, \
@@ -476,15 +474,16 @@ async fn upsert_plan(
                    \"interval\"             = EXCLUDED.\"interval\", \
                    status                   = EXCLUDED.status, \
                    current_period_end       = EXCLUDED.current_period_end, \
+                   seats                    = EXCLUDED.seats, \
                    updated_at               = now()",
             )
             .bind(workspace_id)
             .bind(subscription_id)
             .bind(customer_id)
-            .bind(plan_str(plan))
             .bind(interval_str(interval))
             .bind(status)
             .bind(period_end)
+            .bind(seats)
             .execute(pool)
             .await?;
         }
@@ -495,9 +494,10 @@ async fn upsert_plan(
 /// Upserts a storage-only subscription (no plan price). When a plan row already
 /// exists, only `extra_storage_units` changes — the plan columns are untouched.
 /// When none exists and `units > 0`, a placeholder row is inserted with
-/// plan='solo', interval='monthly', status='storage_only' (which `plan_for`
-/// treats as NOT plan-granting). When `units == 0` (a canceled add-on) no new row
-/// is created — a plain update clears any existing add-on and no-ops otherwise.
+/// plan='paid', interval='monthly', status='storage_only' (which `plan_for`
+/// treats as NOT plan-granting; 'paid' is just the CHECK-valid placeholder). When
+/// `units == 0` (a canceled add-on) no new row is created — a plain update clears
+/// any existing add-on and no-ops otherwise.
 async fn upsert_storage_only(
     pool: &PgPool,
     workspace_id: Uuid,
@@ -521,7 +521,7 @@ async fn upsert_storage_only(
         "INSERT INTO subscriptions \
            (workspace_id, provider_subscription_id, provider_customer_id, plan, \"interval\", \
             status, current_period_end, extra_storage_units, updated_at) \
-         VALUES ($1, $2, $3, 'solo', 'monthly', 'storage_only', $4, $5, now()) \
+         VALUES ($1, $2, $3, 'paid', 'monthly', 'storage_only', $4, $5, now()) \
          ON CONFLICT (workspace_id) DO UPDATE SET \
            extra_storage_units = EXCLUDED.extra_storage_units, \
            updated_at          = now()",

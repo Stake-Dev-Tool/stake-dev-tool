@@ -26,10 +26,8 @@ prompt() {
 
 prompt STRIPE_SECRET_KEY         "Secret key (sk_live_… or sk_test_…)"
 prompt STRIPE_WEBHOOK_SECRET     "Webhook signing secret (whsec_…)"
-prompt STRIPE_PRICE_SOLO_MONTHLY "Price ID — Solo monthly (price_…)"
-prompt STRIPE_PRICE_SOLO_YEARLY  "Price ID — Solo yearly"
-prompt STRIPE_PRICE_TEAM_MONTHLY "Price ID — Team monthly"
-prompt STRIPE_PRICE_TEAM_YEARLY  "Price ID — Team yearly"
+prompt STRIPE_PRICE_SEAT_MONTHLY "Price ID — per-seat monthly, graduated tiers €3/€2 (price_…)"
+prompt STRIPE_PRICE_SEAT_YEARLY  "Price ID — per-seat yearly, graduated tiers €30/€20"
 prompt STRIPE_PRICE_STORAGE      "Price ID — extra storage (per 10 GiB unit)"
 
 echo "Restarting the server with billing enabled…"

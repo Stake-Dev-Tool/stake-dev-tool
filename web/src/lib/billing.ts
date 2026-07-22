@@ -60,10 +60,8 @@ export function planLabel(plan: string): string {
   switch (plan) {
     case 'free':
       return 'Free';
-    case 'solo':
-      return 'Solo';
-    case 'team':
-      return 'Team';
+    case 'paid':
+      return 'Paid';
     case 'unlimited':
       return 'Unlimited';
     default:
@@ -107,6 +105,37 @@ export function meter(
 /** Tailwind background class for a meter tone. */
 export function meterFill(tone: MeterTone): string {
   return tone === 'danger' ? 'bg-danger' : tone === 'warn' ? 'bg-warn' : 'bg-accent';
+}
+
+// ---------------------------------------------------------------------------
+// Seat pricing (the single paid plan: €3 first seat, €2 each additional)
+// ---------------------------------------------------------------------------
+
+/** Monthly price (EUR) of the first seat. */
+export const SEAT_FIRST_EUR = 3;
+/** Monthly price (EUR) of each additional seat. */
+export const SEAT_ADDITIONAL_EUR = 2;
+/** Yearly billing charges 10 months (2 months free). */
+export const YEARLY_MONTHS = 10;
+/** Inclusive bounds on the seat count (mirrors the server's 1..=100). */
+export const SEATS_MIN = 1;
+export const SEATS_MAX = 100;
+
+/** Clamp a seat count into the purchasable range. */
+export function clampSeats(seats: number): number {
+  if (!Number.isFinite(seats)) return SEATS_MIN;
+  return Math.min(SEATS_MAX, Math.max(SEATS_MIN, Math.round(seats)));
+}
+
+/** Monthly price (EUR) for `seats`: €3 first seat + €2 each additional. */
+export function seatMonthlyEur(seats: number): number {
+  const n = clampSeats(seats);
+  return SEAT_FIRST_EUR + SEAT_ADDITIONAL_EUR * (n - 1);
+}
+
+/** Yearly price (EUR) for `seats`: the monthly total × 10 (2 months free). */
+export function seatYearlyEur(seats: number): number {
+  return seatMonthlyEur(seats) * YEARLY_MONTHS;
 }
 
 // ---------------------------------------------------------------------------

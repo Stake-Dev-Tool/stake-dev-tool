@@ -10,16 +10,6 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 
-/// A purchasable plan. Serialized lowercase to match the `subscriptions.plan`
-/// `CHECK` constraint and the Stripe price mapping.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
-#[serde(rename_all = "lowercase")]
-#[ts(export, export_to = "protocol/")]
-pub enum PlanId {
-    Solo,
-    Team,
-}
-
 /// Billing cadence chosen at checkout. Serialized lowercase to match the
 /// `subscriptions."interval"` `CHECK` constraint.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
@@ -30,12 +20,14 @@ pub enum BillingInterval {
     Yearly,
 }
 
-/// `POST /workspaces/:slug/billing/checkout` request body.
+/// `POST /workspaces/:slug/billing/checkout` request body. The single paid plan
+/// is billed per seat (Stripe graduated tiers: €3 first seat, €2 each additional);
+/// `seats` becomes the subscription quantity. Bounded `1..=100` server-side.
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
 #[ts(export, export_to = "protocol/")]
 pub struct CheckoutRequest {
-    pub plan: PlanId,
     pub interval: BillingInterval,
+    pub seats: u32,
 }
 
 /// `POST /workspaces/:slug/billing/checkout` response: the hosted Stripe checkout
@@ -86,9 +78,13 @@ pub struct BillingStatusResponse {
     /// never enforced and every limit is unlimited.
     pub enabled: bool,
     /// The resolved plan label: `"free"` (billing enabled, no active subscription
-    /// — reads still work, writes are blocked with `upgrade_required`), `"solo"`,
-    /// `"team"`, or `"unlimited"` (billing disabled, self-host).
+    /// — reads still work, writes are blocked with `upgrade_required`), `"paid"`
+    /// (an active seat subscription or comp), or `"unlimited"` (billing disabled,
+    /// self-host).
     pub plan: String,
+    /// The seat count backing a `"paid"` plan (the subscription quantity or the
+    /// comp's seat count). `null` when the plan is not `"paid"`.
+    pub seats: Option<u32>,
     /// The subscription status verbatim from Stripe (e.g. `"active"`, `"trialing"`,
     /// `"past_due"`, `"canceled"`), or `null` when there is no subscription. A
     /// storage-only subscription (no plan) reports the sentinel `"storage_only"`.

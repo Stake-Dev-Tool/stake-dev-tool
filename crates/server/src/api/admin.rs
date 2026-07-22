@@ -35,6 +35,10 @@ use crate::billing::plan;
 use crate::error::{ApiError, ApiResult};
 use crate::share;
 
+/// Inclusive bounds on a comped seat count (mirrors the checkout `1..=100`).
+const MIN_SEATS: u32 = 1;
+const MAX_SEATS: u32 = 100;
+
 pub fn router() -> Router<AppState> {
     Router::new()
         .route("/admin/me", get(me))
@@ -231,6 +235,7 @@ struct AdminWorkspaceRow {
     games: i64,
     storage_bytes: i64,
     override_plan: Option<String>,
+    override_seats: Option<i64>,
     override_expires_at: Option<DateTime<Utc>>,
     override_note: Option<String>,
     subscription_status: Option<String>,
@@ -245,7 +250,8 @@ fn admin_workspace_select(tail: &str) -> String {
                 (SELECT count(*) FROM games g WHERE g.workspace_id = w.id) AS games, \
                 (SELECT COALESCE(SUM(b.size), 0)::bigint FROM blobs b WHERE b.workspace_id = w.id) \
                     AS storage_bytes, \
-                po.plan AS override_plan, po.expires_at AS override_expires_at, \
+                po.plan AS override_plan, po.seats::bigint AS override_seats, \
+                po.expires_at AS override_expires_at, \
                 po.note AS override_note, s.status AS subscription_status \
          FROM workspaces w \
          LEFT JOIN plan_overrides po ON po.workspace_id = w.id \
@@ -283,9 +289,10 @@ async fn admin_workspace_view(
     state: &AppState,
     row: AdminWorkspaceRow,
 ) -> ApiResult<AdminWorkspace> {
-    let plan = plan::plan_for(state, row.id).await?.label().to_string();
+    let resolved = plan::plan_for(state, row.id).await?;
     let plan_override = row.override_plan.map(|plan| AdminOverride {
         plan,
+        seats: row.override_seats.map(|s| s as u32),
         expires_at: row.override_expires_at,
         note: row.override_note,
     });
@@ -297,7 +304,8 @@ async fn admin_workspace_view(
         members: row.members,
         games: row.games,
         storage_bytes: row.storage_bytes,
-        plan,
+        plan: resolved.label().to_string(),
+        seats: resolved.seats(),
         plan_override,
         subscription_status: row.subscription_status,
     })
@@ -332,24 +340,45 @@ async fn set_override(
                 .await?;
         }
         Some(plan) => {
-            if !matches!(plan, "solo" | "team" | "unlimited") {
-                return Err(ApiError::unprocessable(
-                    "invalid_plan",
-                    "plan must be one of \"solo\", \"team\", \"unlimited\", or null",
-                ));
-            }
+            // Seats are required (and 1..=100) for a "paid" comp; ignored for
+            // "unlimited" (stored NULL).
+            let seats: Option<i32> = match plan {
+                "unlimited" => None,
+                "paid" => {
+                    let seats = req.seats.ok_or_else(|| {
+                        ApiError::unprocessable(
+                            "invalid_seats",
+                            "seats is required when plan is \"paid\"",
+                        )
+                    })?;
+                    if !(MIN_SEATS..=MAX_SEATS).contains(&seats) {
+                        return Err(ApiError::unprocessable(
+                            "invalid_seats",
+                            format!("seats must be between {MIN_SEATS} and {MAX_SEATS}"),
+                        ));
+                    }
+                    Some(seats as i32)
+                }
+                _ => {
+                    return Err(ApiError::unprocessable(
+                        "invalid_plan",
+                        "plan must be one of \"paid\", \"unlimited\", or null",
+                    ));
+                }
+            };
             let expires_at = req
                 .expires_in_days
                 .map(|days| Utc::now() + Duration::days(days));
             sqlx::query(
-                "INSERT INTO plan_overrides (workspace_id, plan, expires_at, note, created_by) \
-                 VALUES ($1, $2, $3, $4, $5) \
+                "INSERT INTO plan_overrides (workspace_id, plan, seats, expires_at, note, created_by) \
+                 VALUES ($1, $2, $3, $4, $5, $6) \
                  ON CONFLICT (workspace_id) DO UPDATE SET \
-                   plan = EXCLUDED.plan, expires_at = EXCLUDED.expires_at, \
+                   plan = EXCLUDED.plan, seats = EXCLUDED.seats, expires_at = EXCLUDED.expires_at, \
                    note = EXCLUDED.note, created_by = EXCLUDED.created_by",
             )
             .bind(id)
             .bind(plan)
+            .bind(seats)
             .bind(expires_at)
             .bind(req.note.as_deref())
             .bind(admin.user_id)

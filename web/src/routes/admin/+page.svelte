@@ -115,15 +115,16 @@
 
   function planTone(plan: string): 'neutral' | 'accent' | 'info' | 'danger' {
     if (plan === 'unlimited') return 'info';
-    if (plan === 'solo' || plan === 'team') return 'accent';
+    if (plan === 'paid') return 'accent';
     if (plan === 'free') return 'danger';
     return 'neutral'; // anything unexpected
   }
 
   // Plan-override (comp) editor — an inline panel expanded under a row.
-  type MgPlan = 'none' | 'solo' | 'team' | 'unlimited';
+  type MgPlan = 'none' | 'paid' | 'unlimited';
   let managingId = $state<string | null>(null);
   let mgPlan = $state<MgPlan>('none');
+  let mgSeats = $state('1');
   let mgExpiry = $state('');
   let mgNote = $state('');
   let mgBusy = $state(false);
@@ -138,10 +139,9 @@
     mgError = '';
     mgBusy = false;
     const op = w.override;
-    mgPlan =
-      op && (op.plan === 'solo' || op.plan === 'team' || op.plan === 'unlimited')
-        ? op.plan
-        : 'none';
+    mgPlan = op && (op.plan === 'paid' || op.plan === 'unlimited') ? op.plan : 'none';
+    // Seed the seat box from the override's seats (or the workspace's resolved seats), default 1.
+    mgSeats = String(op?.seats ?? w.seats ?? 1);
     // Seed the expiry box from the override's remaining days (blank = no expiry).
     mgExpiry = op?.expires_at ? String(daysUntil(op.expires_at)) : '';
     mgNote = op?.note ?? '';
@@ -149,10 +149,18 @@
 
   async function saveOverride(w: AdminWorkspace) {
     if (mgBusy) return;
-    mgBusy = true;
-    mgError = '';
     const plan: AdminOverridePlan = mgPlan === 'none' ? null : mgPlan;
     const input: AdminOverrideInput = { plan };
+    if (plan === 'paid') {
+      const n = Number(mgSeats.trim());
+      if (!Number.isFinite(n) || n < 1 || n > 100) {
+        mgError = 'Seats must be a whole number between 1 and 100.';
+        return;
+      }
+      input.seats = Math.round(n);
+    }
+    mgBusy = true;
+    mgError = '';
     if (plan) {
       const days = mgExpiry.trim();
       if (days !== '') {
@@ -496,7 +504,8 @@
                           <Badge tone={planTone(w.plan)}>{planLabel(w.plan)}</Badge>
                           {#if w.override}
                             <span class="text-xs text-warn">
-                              comped: {w.override.plan}
+                              comped: {w.override.plan}{#if w.override.plan === 'paid' && w.override.seats != null}
+                                · {w.override.seats} {w.override.seats === 1 ? 'seat' : 'seats'}{/if}
                               {#if w.override.expires_at}
                                 → {formatDate(w.override.expires_at)}
                               {:else}
@@ -534,11 +543,20 @@
                                   class="h-9 rounded-md border border-border bg-surface-2 px-3 text-sm text-text outline-none transition focus:border-accent/60 focus:ring-2 focus:ring-accent/25"
                                 >
                                   <option value="none">None (clear comp)</option>
-                                  <option value="solo">Solo</option>
-                                  <option value="team">Team</option>
+                                  <option value="paid">Paid (seats)</option>
                                   <option value="unlimited">Unlimited</option>
                                 </select>
                               </label>
+                              <Input
+                                label="Seats"
+                                type="number"
+                                min="1"
+                                max="100"
+                                bind:value={mgSeats}
+                                hint="1–100"
+                                disabled={mgPlan !== 'paid'}
+                                class="w-28"
+                              />
                               <Input
                                 label="Expires in (days)"
                                 type="number"

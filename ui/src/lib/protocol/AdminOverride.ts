@@ -5,4 +5,8 @@
  * on the admin workspace list regardless of expiry; `plan_for` ignores it once
  * `expires_at` has passed.
  */
-export type AdminOverride = { plan: string, expires_at: string | null, note: string | null, };
+export type AdminOverride = { plan: string, 
+/**
+ * The comped seat count when `plan == "paid"`; `null` for `"unlimited"`.
+ */
+seats: number | null, expires_at: string | null, note: string | null, };

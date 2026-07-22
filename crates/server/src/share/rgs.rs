@@ -56,6 +56,14 @@ pub(super) async fn dispatch_rgs(
         match runtime().note_session(link.id, &session_id, link.max_concurrent_sessions) {
             Admit::OverCap => return too_many_json(),
             Admit::Created => {
+                // A brand-new session must clear the workspace's live plan cap: an
+                // unpaid (Free) workspace has a 0 concurrent-session cap, so its
+                // existing links stop serving new play sessions cleanly. Checked
+                // only on Created so the lookup fires once per visitor, not per call.
+                if workspace_sessions_blocked(state, link.workspace_id).await {
+                    runtime().forget_session(link.id, &session_id);
+                    return unavailable_json();
+                }
                 if !runtime().allow_new_session(link.id, client_ip) {
                     return too_many_json();
                 }
@@ -261,6 +269,28 @@ fn too_many_json() -> Response {
         StatusCode::TOO_MANY_REQUESTS,
         "too_many_sessions",
         "this demo is at capacity, please try again later",
+    )
+}
+
+/// A brand-new visitor session is refused because the workspace's live plan
+/// forbids new sessions (a 0 concurrent-session cap — the Free/unpaid state). A
+/// clean 403 JSON body, never a 500.
+fn unavailable_json() -> Response {
+    pages::api_error(
+        StatusCode::FORBIDDEN,
+        "unavailable",
+        "this demo is not currently available",
+    )
+}
+
+/// True when the workspace's resolved plan forbids new visitor sessions — its
+/// concurrent-session cap is `Some(0)`, which is the Free (unpaid) state.
+/// Self-hosted instances (billing disabled) resolve to Unlimited → always false,
+/// with no DB hit.
+async fn workspace_sessions_blocked(state: &AppState, workspace_id: Uuid) -> bool {
+    matches!(
+        crate::billing::plan_for(state, workspace_id).await,
+        Ok(plan) if plan.limits().max_concurrent_share_sessions == Some(0)
     )
 }
 

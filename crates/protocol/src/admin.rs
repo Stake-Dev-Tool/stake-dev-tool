@@ -74,6 +74,8 @@ pub struct AdminOverview {
 #[ts(export, export_to = "protocol/")]
 pub struct AdminOverride {
     pub plan: String,
+    /// The comped seat count when `plan == "paid"`; `null` for `"unlimited"`.
+    pub seats: Option<u32>,
     pub expires_at: Option<DateTime<Utc>>,
     pub note: Option<String>,
 }
@@ -91,9 +93,12 @@ pub struct AdminWorkspace {
     pub members: i64,
     pub games: i64,
     pub storage_bytes: i64,
-    /// Resolved plan label: `"unlimited"` (billing disabled), `"free"`,
-    /// `"solo"`, or `"team"`.
+    /// Resolved plan label: `"unlimited"` (billing disabled), `"free"`, or
+    /// `"paid"`.
     pub plan: String,
+    /// The resolved seat count when the plan is `"paid"` (from the comp override
+    /// or the subscription); `null` otherwise.
+    pub seats: Option<u32>,
     #[serde(rename = "override")]
     #[ts(rename = "override")]
     pub plan_override: Option<AdminOverride>,
@@ -108,8 +113,12 @@ pub struct AdminWorkspace {
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
 #[ts(export, export_to = "protocol/")]
 pub struct SetOverrideRequest {
-    /// `"solo"`, `"team"`, `"unlimited"`, or `null` (which clears the override).
+    /// `"paid"`, `"unlimited"`, or `null` (which clears the override).
     pub plan: Option<String>,
+    /// Required when `plan == "paid"` (the comped seat count, `1..=100`); ignored
+    /// for `"unlimited"`.
+    #[serde(default)]
+    pub seats: Option<u32>,
     #[serde(default)]
     pub expires_in_days: Option<i64>,
     #[serde(default)]

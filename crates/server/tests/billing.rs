@@ -57,10 +57,8 @@ fn stripe_config() -> StripeConfig {
     StripeConfig {
         secret_key: "sk_test_m7".to_string(),
         webhook_secret: WEBHOOK_SECRET.to_string(),
-        price_solo_monthly: "price_solo_m".to_string(),
-        price_solo_yearly: "price_solo_y".to_string(),
-        price_team_monthly: "price_team_m".to_string(),
-        price_team_yearly: "price_team_y".to_string(),
+        price_seat_monthly: "price_seat_m".to_string(),
+        price_seat_yearly: "price_seat_y".to_string(),
         price_storage: "price_storage".to_string(),
     }
 }
@@ -291,10 +289,23 @@ async fn insert_subscription(
     status: &str,
     period_end: Option<DateTime<Utc>>,
 ) {
+    insert_subscription_seats(state, ws_id, plan, interval, status, period_end, 1).await;
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn insert_subscription_seats(
+    state: &AppState,
+    ws_id: Uuid,
+    plan: &str,
+    interval: &str,
+    status: &str,
+    period_end: Option<DateTime<Utc>>,
+    seats: i32,
+) {
     sqlx::query(
         "INSERT INTO subscriptions \
-           (workspace_id, provider_subscription_id, provider_customer_id, plan, \"interval\", status, current_period_end) \
-         VALUES ($1, $2, $3, $4, $5, $6, $7)",
+           (workspace_id, provider_subscription_id, provider_customer_id, plan, \"interval\", status, current_period_end, seats) \
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8)",
     )
     .bind(ws_id)
     .bind(format!("sub_{}", Uuid::new_v4()))
@@ -303,6 +314,7 @@ async fn insert_subscription(
     .bind(interval)
     .bind(status)
     .bind(period_end)
+    .bind(seats)
     .execute(&state.pool)
     .await
     .unwrap();
@@ -424,7 +436,7 @@ async fn billing_disabled_is_unlimited_and_routes_404() {
     let (status, _) = owner
         .post(
             &format!("/api/workspaces/{ws}/billing/checkout"),
-            json!({ "plan": "solo", "interval": "monthly" }),
+            json!({ "interval": "monthly", "seats": 1 }),
         )
         .await;
     assert_eq!(status, StatusCode::NOT_FOUND);
@@ -444,70 +456,79 @@ async fn plan_matrix_resolves_expected_limits() {
         return;
     };
 
-    // Fresh workspace, no subscription → Free (2 GiB, 3 members), writes gated.
+    // Fresh workspace, no subscription → Free (all limits 0), writes gated.
     let (mut owner, ws, _t) = bootstrap(&ctx.state).await;
     let (status, body) = owner.get(&format!("/api/workspaces/{ws}/billing")).await;
     assert_eq!(status, StatusCode::OK, "{body}");
     assert_eq!(body["enabled"], json!(true));
     assert_eq!(s(&body["plan"]), "free");
+    assert_eq!(body["seats"], json!(null));
     assert_eq!(body["status"], json!(null));
-    assert_eq!(body["limits"]["max_members"], json!(3));
-    assert_eq!(
-        body["limits"]["max_storage_bytes"],
-        json!(2u64 * 1024 * 1024 * 1024)
-    );
+    assert_eq!(body["limits"]["max_members"], json!(0));
+    assert_eq!(body["limits"]["max_storage_bytes"], json!(0));
+    assert_eq!(body["limits"]["max_active_share_links"], json!(0));
+    assert_eq!(body["limits"]["max_concurrent_share_sessions"], json!(0));
     // No subscription → no period end.
     assert_eq!(body["current_period_end"], json!(null));
 
-    // trialing subscription → its plan (team).
+    // trialing 10-seat subscription → paid, limits scale by seats (10 members).
     let ws_id = workspace_id(&ctx.state, &ws).await;
-    insert_subscription(
+    insert_subscription_seats(
         &ctx.state,
         ws_id,
-        "team",
+        "paid",
         "yearly",
         "trialing",
         Some(Utc::now() + Duration::days(20)),
+        10,
     )
     .await;
     let (_, body) = owner.get(&format!("/api/workspaces/{ws}/billing")).await;
-    assert_eq!(s(&body["plan"]), "team");
+    assert_eq!(s(&body["plan"]), "paid");
+    assert_eq!(body["seats"], json!(10));
     assert_eq!(s(&body["status"]), "trialing");
     assert_eq!(s(&body["interval"]), "yearly");
     assert_eq!(body["limits"]["max_members"], json!(10));
+    assert_eq!(
+        body["limits"]["max_storage_bytes"],
+        json!(100u64 * 1024 * 1024 * 1024)
+    );
 
-    // active solo → solo limits.
+    // active 1-seat → 1 member, 10 GiB.
     let (mut solo_owner, solo_ws, _t) = bootstrap(&ctx.state).await;
     let solo_id = workspace_id(&ctx.state, &solo_ws).await;
-    insert_subscription(
+    insert_subscription_seats(
         &ctx.state,
         solo_id,
-        "solo",
+        "paid",
         "monthly",
         "active",
         Some(Utc::now() + Duration::days(30)),
+        1,
     )
     .await;
     let (_, body) = solo_owner
         .get(&format!("/api/workspaces/{solo_ws}/billing"))
         .await;
-    assert_eq!(s(&body["plan"]), "solo");
+    assert_eq!(s(&body["plan"]), "paid");
+    assert_eq!(body["seats"], json!(1));
     assert_eq!(body["limits"]["max_members"], json!(1));
     assert_eq!(
         body["limits"]["max_storage_bytes"],
         json!(10u64 * 1024 * 1024 * 1024)
     );
 
-    // past_due within the 7-day grace → keeps its plan.
+    // past_due within the 7-day grace → keeps its plan (and seats).
     let (mut grace_owner, grace_ws, _t) = bootstrap(&ctx.state).await;
     let grace_id = workspace_id(&ctx.state, &grace_ws).await;
-    insert_subscription(
+    insert_subscription_seats(
         &ctx.state,
         grace_id,
-        "team",
+        "paid",
         "monthly",
         "past_due",
         Some(Utc::now() - Duration::days(1)),
+        10,
     )
     .await;
     let (_, body) = grace_owner
@@ -515,9 +536,10 @@ async fn plan_matrix_resolves_expected_limits() {
         .await;
     assert_eq!(
         s(&body["plan"]),
-        "team",
+        "paid",
         "past_due within grace keeps the plan"
     );
+    assert_eq!(body["seats"], json!(10));
     assert_eq!(s(&body["status"]), "past_due");
 }
 
@@ -588,20 +610,21 @@ async fn free_user_can_create_multiple_workspaces() {
 // ===========================================================================
 
 #[tokio::test]
-async fn member_cap_blocks_second_accept_on_solo() {
+async fn member_cap_blocks_second_accept_on_one_seat() {
     let Some(ctx) = setup(Some(stripe_config())).await else {
         return;
     };
     let (mut owner, ws, _t) = bootstrap(&ctx.state).await;
     let ws_id = workspace_id(&ctx.state, &ws).await;
-    // Solo caps members at 1 — the owner already fills it.
-    insert_subscription(
+    // A 1-seat paid plan caps members at 1 — the owner already fills it.
+    insert_subscription_seats(
         &ctx.state,
         ws_id,
-        "solo",
+        "paid",
         "monthly",
         "active",
         Some(Utc::now() + Duration::days(30)),
+        1,
     )
     .await;
 
@@ -622,19 +645,21 @@ async fn member_cap_blocks_second_accept_on_solo() {
 }
 
 #[tokio::test]
-async fn team_plan_allows_second_member_and_idempotent_reaccept() {
+async fn multi_seat_plan_allows_second_member_and_idempotent_reaccept() {
     let Some(ctx) = setup(Some(stripe_config())).await else {
         return;
     };
     let (mut owner, ws, _t) = bootstrap(&ctx.state).await;
     let ws_id = workspace_id(&ctx.state, &ws).await;
-    insert_subscription(
+    // 10 seats → 10 members allowed.
+    insert_subscription_seats(
         &ctx.state,
         ws_id,
-        "team",
+        "paid",
         "monthly",
         "active",
         Some(Utc::now() + Duration::days(30)),
+        10,
     )
     .await;
 
@@ -647,7 +672,7 @@ async fn team_plan_allows_second_member_and_idempotent_reaccept() {
     let token = s(&invite["token"]).to_string();
 
     let mut bob = register(&ctx.state, &unique_email(), "Bob").await;
-    // First accept succeeds (team allows 10).
+    // First accept succeeds (10 seats allow up to 10 members).
     let (status, _) = bob
         .post(&format!("/api/invites/{token}/accept"), json!({}))
         .await;
@@ -666,11 +691,11 @@ async fn storage_cap_blocks_commit_over_quota() {
     };
     let (mut owner, ws, token) = bootstrap(&ctx.state).await;
     let ws_id = workspace_id(&ctx.state, &ws).await;
-    // Solo (10 GiB cap) so writes are allowed — the Free state blocks writes outright.
+    // A 1-seat paid plan (10 GiB cap) so writes are allowed — Free blocks writes outright.
     insert_subscription(
         &ctx.state,
         ws_id,
-        "solo",
+        "paid",
         "monthly",
         "active",
         Some(Utc::now() + Duration::days(30)),
@@ -716,11 +741,11 @@ async fn storage_cap_blocks_upload_via_content_length() {
     };
     let (mut owner, ws, token) = bootstrap(&ctx.state).await;
     let ws_id = workspace_id(&ctx.state, &ws).await;
-    // Solo (10 GiB cap) so writes are allowed — the Free state blocks writes outright.
+    // A 1-seat paid plan (10 GiB cap) so writes are allowed — Free blocks writes outright.
     insert_subscription(
         &ctx.state,
         ws_id,
-        "solo",
+        "paid",
         "monthly",
         "active",
         Some(Utc::now() + Duration::days(30)),
@@ -763,11 +788,11 @@ async fn storage_cap_blocks_upload_without_content_length() {
     };
     let (mut owner, ws, token) = bootstrap(&ctx.state).await;
     let ws_id = workspace_id(&ctx.state, &ws).await;
-    // Solo (10 GiB cap) so writes are allowed — the Free state blocks writes outright.
+    // A 1-seat paid plan (10 GiB cap) so writes are allowed — Free blocks writes outright.
     insert_subscription(
         &ctx.state,
         ws_id,
-        "solo",
+        "paid",
         "monthly",
         "active",
         Some(Utc::now() + Duration::days(30)),
@@ -826,7 +851,7 @@ async fn usage_endpoint_counts_members_and_storage() {
     insert_subscription(
         &ctx.state,
         ws_id,
-        "solo",
+        "paid",
         "monthly",
         "active",
         Some(Utc::now() + Duration::days(30)),
@@ -868,14 +893,15 @@ async fn checkout_is_owner_only() {
     };
     let (mut owner, ws, _t) = bootstrap(&ctx.state).await;
     let ws_id = workspace_id(&ctx.state, &ws).await;
-    // Give room for a second member.
-    insert_subscription(
+    // Give room for a second member (10 seats).
+    insert_subscription_seats(
         &ctx.state,
         ws_id,
-        "team",
+        "paid",
         "monthly",
         "active",
         Some(Utc::now() + Duration::days(30)),
+        10,
     )
     .await;
 
@@ -897,11 +923,32 @@ async fn checkout_is_owner_only() {
     let (status, body) = member
         .post(
             &format!("/api/workspaces/{ws}/billing/checkout"),
-            json!({ "plan": "team", "interval": "monthly" }),
+            json!({ "interval": "monthly", "seats": 2 }),
         )
         .await;
     assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
     assert_eq!(s(&body["error"]["code"]), "forbidden");
+}
+
+#[tokio::test]
+async fn checkout_rejects_out_of_range_seats() {
+    let Some(ctx) = setup(Some(stripe_config())).await else {
+        return;
+    };
+    let (mut owner, ws, _t) = bootstrap(&ctx.state).await;
+
+    // Seat counts outside 1..=100 are rejected with 400 invalid_seats (before any
+    // Stripe call). A negative seat count fails to deserialize (u32) → 422.
+    for seats in [0, 101] {
+        let (status, body) = owner
+            .post(
+                &format!("/api/workspaces/{ws}/billing/checkout"),
+                json!({ "interval": "monthly", "seats": seats }),
+            )
+            .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "seats={seats}: {body}");
+        assert_eq!(s(&body["error"]["code"]), "invalid_seats");
+    }
 }
 
 // ===========================================================================
@@ -919,13 +966,14 @@ async fn webhook_verifies_and_upserts_subscription() {
     // provider_subscription_id is UNIQUE, so make it unique per run too.
     let sub_id = format!("sub-{}", Uuid::new_v4());
     let id = evt_id();
-    let event = subscription_event(
+    // A 3-seat monthly subscription: the seat count is the item quantity.
+    let event = subscription_event_items(
         &id,
         "customer.subscription.created",
         ws_id,
-        "price_solo_m",
         "active",
         &sub_id,
+        json!([{ "price": { "id": "price_seat_m" }, "quantity": 3 }]),
     );
     let body = serde_json::to_vec(&event).unwrap();
     let ts = Utc::now().timestamp();
@@ -934,9 +982,9 @@ async fn webhook_verifies_and_upserts_subscription() {
     let (status, _) = post_webhook(&mut owner, &headers, &body).await;
     assert_eq!(status, StatusCode::OK);
 
-    // Subscription upserted from the payload (price → solo/monthly).
-    let row: (String, String, String, String) = sqlx::query_as(
-        "SELECT plan, \"interval\", status, provider_subscription_id FROM subscriptions WHERE workspace_id = $1",
+    // Subscription upserted from the payload (seat price → paid/monthly, seats=3).
+    let row: (String, String, String, i32, String) = sqlx::query_as(
+        "SELECT plan, \"interval\", status, seats, provider_subscription_id FROM subscriptions WHERE workspace_id = $1",
     )
     .bind(ws_id)
     .fetch_one(&ctx.state.pool)
@@ -945,9 +993,10 @@ async fn webhook_verifies_and_upserts_subscription() {
     assert_eq!(
         row,
         (
-            "solo".into(),
+            "paid".into(),
             "monthly".into(),
             "active".into(),
+            3,
             sub_id.clone()
         )
     );
@@ -961,9 +1010,10 @@ async fn webhook_verifies_and_upserts_subscription() {
             .unwrap();
     assert!(processed.is_some());
 
-    // The status endpoint now reflects the plan (and no storage add-on).
+    // The status endpoint now reflects the plan + seats (and no storage add-on).
     let (_, view) = owner.get(&format!("/api/workspaces/{ws}/billing")).await;
-    assert_eq!(s(&view["plan"]), "solo");
+    assert_eq!(s(&view["plan"]), "paid");
+    assert_eq!(view["seats"], json!(3));
     assert_eq!(s(&view["status"]), "active");
     assert_eq!(view["extra_storage_gib"], json!(0));
 
@@ -990,7 +1040,7 @@ async fn webhook_rejects_tampered_and_stale() {
         &evt_id(),
         "customer.subscription.updated",
         ws_id,
-        "price_team_y",
+        "price_seat_y",
         "active",
         "sub_tamper",
     );
@@ -1003,7 +1053,7 @@ async fn webhook_rejects_tampered_and_stale() {
         &evt_id(),
         "customer.subscription.updated",
         ws_id,
-        "price_team_y",
+        "price_seat_y",
         "canceled",
         "sub_tamper",
     ))
@@ -1044,7 +1094,7 @@ async fn webhook_unknown_workspace_is_recorded_error_but_200() {
         &id,
         "customer.subscription.created",
         Uuid::new_v4(),
-        "price_solo_m",
+        "price_seat_m",
         "active",
         "sub_orphan",
     );
@@ -1077,7 +1127,7 @@ async fn webhook_storage_only_adds_storage_without_granting_a_plan() {
     let Some(ctx) = setup(Some(stripe_config())).await else {
         return;
     };
-    let (mut owner, ws, _t) = bootstrap(&ctx.state).await; // fresh → Free (2 GiB)
+    let (mut owner, ws, _t) = bootstrap(&ctx.state).await; // fresh → Free (0 GiB)
     let ws_id = workspace_id(&ctx.state, &ws).await;
 
     // A storage-only subscription: two units (+20 GiB), no plan price.
@@ -1095,14 +1145,16 @@ async fn webhook_storage_only_adds_storage_without_granting_a_plan() {
     let (status, _) = post_webhook(&mut owner, &signed_headers(ts, &body), &body).await;
     assert_eq!(status, StatusCode::OK);
 
-    // The plan stays Free (storage_only never grants a plan), but the Free
-    // 2 GiB cap is lifted to 2 + 20 = 22 GiB and the add-on is surfaced.
+    // The plan stays Free (storage_only never grants a plan), and seats is null.
+    // The Free 0 GiB cap is lifted to 0 + 20 = 20 GiB and the add-on is surfaced
+    // (though writes stay blocked while Free).
     let (_, view) = owner.get(&format!("/api/workspaces/{ws}/billing")).await;
     assert_eq!(s(&view["plan"]), "free", "{view}");
+    assert_eq!(view["seats"], json!(null));
     assert_eq!(view["extra_storage_gib"], json!(20));
     assert_eq!(
         view["limits"]["max_storage_bytes"],
-        json!(22u64 * 1024 * 1024 * 1024)
+        json!(20u64 * 1024 * 1024 * 1024)
     );
 }
 
@@ -1114,12 +1166,12 @@ async fn storage_add_on_stacks_on_a_plan_and_is_removed_on_cancel() {
     let (mut owner, ws, _t) = bootstrap(&ctx.state).await;
     let ws_id = workspace_id(&ctx.state, &ws).await;
 
-    // Plan subscription first (Solo, 10 GiB).
+    // Plan subscription first (1 seat, 10 GiB).
     let plan_evt = subscription_event(
         &evt_id(),
         "customer.subscription.created",
         ws_id,
-        "price_solo_m",
+        "price_seat_m",
         "active",
         &format!("sub-plan-{}", Uuid::new_v4()),
     );
@@ -1143,9 +1195,9 @@ async fn storage_add_on_stacks_on_a_plan_and_is_removed_on_cancel() {
     let (status, _) = post_webhook(&mut owner, &signed_headers(ts, &stor_body), &stor_body).await;
     assert_eq!(status, StatusCode::OK);
 
-    // Solo (10 GiB) + 30 GiB = 40 GiB; plan still Solo.
+    // Paid 1-seat (10 GiB) + 30 GiB = 40 GiB; plan still paid.
     let (_, view) = owner.get(&format!("/api/workspaces/{ws}/billing")).await;
-    assert_eq!(s(&view["plan"]), "solo", "{view}");
+    assert_eq!(s(&view["plan"]), "paid", "{view}");
     assert_eq!(s(&view["status"]), "active");
     assert_eq!(view["extra_storage_gib"], json!(30));
     assert_eq!(
@@ -1153,7 +1205,7 @@ async fn storage_add_on_stacks_on_a_plan_and_is_removed_on_cancel() {
         json!(40u64 * 1024 * 1024 * 1024)
     );
 
-    // Canceling the storage subscription drops the add-on to 0 but keeps Solo.
+    // Canceling the storage subscription drops the add-on to 0 but keeps the plan.
     let cancel_evt = subscription_event_items(
         &evt_id(),
         "customer.subscription.deleted",
@@ -1168,7 +1220,7 @@ async fn storage_add_on_stacks_on_a_plan_and_is_removed_on_cancel() {
     assert_eq!(status, StatusCode::OK);
 
     let (_, view) = owner.get(&format!("/api/workspaces/{ws}/billing")).await;
-    assert_eq!(s(&view["plan"]), "solo");
+    assert_eq!(s(&view["plan"]), "paid");
     assert_eq!(view["extra_storage_gib"], json!(0));
     assert_eq!(
         view["limits"]["max_storage_bytes"],
@@ -1197,13 +1249,14 @@ async fn storage_checkout_validates_bounds_and_owner() {
 
     // A non-owner member cannot start a storage checkout even with valid units.
     let ws_id = workspace_id(&ctx.state, &ws).await;
-    insert_subscription(
+    insert_subscription_seats(
         &ctx.state,
         ws_id,
-        "team",
+        "paid",
         "monthly",
         "active",
         Some(Utc::now() + Duration::days(30)),
+        10,
     )
     .await;
     let (_, invite) = owner

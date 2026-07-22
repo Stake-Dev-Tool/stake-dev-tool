@@ -310,18 +310,17 @@ export interface RevisionDiff {
 // Billing & subscriptions (M7)
 // ---------------------------------------------------------------------------
 
-/** A purchasable plan (mirrors the generated `PlanId` binding). */
-export type PlanId = 'solo' | 'team';
 /** Billing cadence chosen at checkout (mirrors the generated `BillingInterval`). */
 export type BillingInterval = 'monthly' | 'yearly';
 
 /**
  * The resolved plan label the status endpoint reports. `unlimited` = billing
  * disabled (self-host, everything unlimited); `free` = billing enabled with no
- * active subscription (reads work, writes are blocked with `upgrade_required`).
- * Kept open to `string` so an unknown server value is never a runtime throw.
+ * active subscription (reads work, writes are blocked with `upgrade_required`);
+ * `paid` = an active seat subscription (or comp). Kept open to `string` so an
+ * unknown server value is never a runtime throw.
  */
-export type PlanLabel = 'free' | 'solo' | 'team' | 'unlimited';
+export type PlanLabel = 'free' | 'paid' | 'unlimited';
 
 /**
  * Current resource usage. The wire fields are `bigint` in the generated
@@ -347,6 +346,8 @@ export interface BillingStatus {
   /** Whether Stripe billing is configured on this instance. `false` → unlimited. */
   enabled: boolean;
   plan: PlanLabel | string;
+  /** Seat count backing a `paid` plan (subscription quantity or comp); null otherwise. */
+  seats: number | null;
   /** Stripe's status verbatim ("active", "trialing", "past_due", …) or null. */
   status: string | null;
   interval: BillingInterval | null;
@@ -506,6 +507,8 @@ export interface AdminOverview {
  */
 export interface AdminOverrideInfo {
   plan: string;
+  /** Comped seat count when `plan === 'paid'`; null for `unlimited`. */
+  seats: number | null;
   expires_at: string | null;
   note: string | null;
 }
@@ -519,8 +522,10 @@ export interface AdminWorkspace {
   members: number;
   games: number;
   storage_bytes: number;
-  /** Effective resolved plan label ("free"/"solo"/"team"/"unlimited"). */
+  /** Effective resolved plan label ("free"/"paid"/"unlimited"). */
   plan: string;
+  /** Resolved seat count when the plan is `paid` (comp or subscription); null otherwise. */
+  seats: number | null;
   /** Present when an operator comp is active; null otherwise. */
   override: AdminOverrideInfo | null;
   /** Stripe's verbatim subscription status, or null when there's no subscription. */
@@ -528,15 +533,16 @@ export interface AdminWorkspace {
 }
 
 /** The plan an override sets; `null` clears the override entirely. */
-export type AdminOverridePlan = 'solo' | 'team' | 'unlimited' | null;
+export type AdminOverridePlan = 'paid' | 'unlimited' | null;
 
 /**
  * Body for `PUT /admin/workspaces/:id/override`. `plan: null` clears the comp;
- * `expires_in_days` (relative) and `note` are optional and only meaningful when
- * granting a plan.
+ * `seats` is required when `plan === 'paid'`; `expires_in_days` (relative) and
+ * `note` are optional and only meaningful when granting a plan.
  */
 export interface AdminOverrideInput {
   plan: AdminOverridePlan;
+  seats?: number;
   expires_in_days?: number;
   note?: string;
 }
@@ -978,6 +984,7 @@ function normalizeBillingStatus(raw: unknown): BillingStatus {
     // Default to `unlimited` (the no-restrictions plan) if the server ever omits
     // it, so a shape surprise never invents a false paywall.
     plan: String(b.plan ?? 'unlimited'),
+    seats: numOrNull(b.seats),
     status: strOrNull(b.status),
     interval: asInterval(b.interval),
     current_period_end: strOrNull(b.current_period_end),
@@ -1068,6 +1075,7 @@ function normalizeAdminOverride(raw: unknown): AdminOverrideInfo | null {
   const o = raw as Record<string, unknown>;
   return {
     plan: String(o.plan ?? ''),
+    seats: numOrNull(o.seats),
     expires_at: strOrNull(o.expires_at),
     note: strOrNull(o.note)
   };
@@ -1086,6 +1094,7 @@ function normalizeAdminWorkspace(raw: unknown): AdminWorkspace {
     // Default to `free` (the most-restricted state) if ever omitted, so a
     // shape surprise never paints a false "unlimited".
     plan: String(w.plan ?? 'free'),
+    seats: numOrNull(w.seats),
     override: normalizeAdminOverride(w.override),
     subscription_status: strOrNull(w.subscription_status)
   };
@@ -1703,15 +1712,17 @@ export const api = {
       return normalizeBillingStatus(raw);
     },
     /**
-     * Owner-only: start a Stripe checkout for `plan`/`interval`. Returns the
-     * hosted checkout URL to navigate to (`window.location.href = url`). The
-     * endpoint 404s when billing is disabled on the instance.
+     * Owner-only: start a Stripe checkout for the seat subscription. `seats`
+     * (1..=100) is the subscription quantity, priced by Stripe's graduated tiers
+     * (€3 first seat + €2 each additional). Returns the hosted checkout URL to
+     * navigate to (`window.location.href = url`). 404s when billing is disabled;
+     * throws an ApiError `invalid_seats` when `seats` is out of range.
      */
-    async checkout(slug: string, plan: PlanId, interval: BillingInterval): Promise<string> {
+    async checkout(slug: string, interval: BillingInterval, seats: number): Promise<string> {
       const raw = await request<unknown>(
         'POST',
         `/workspaces/${encodeURIComponent(slug)}/billing/checkout`,
-        { plan, interval }
+        { interval, seats }
       );
       const r = (raw ?? {}) as Record<string, unknown>;
       return String(r.checkout_url ?? '');

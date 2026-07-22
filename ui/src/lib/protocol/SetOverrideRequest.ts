@@ -7,6 +7,11 @@
  */
 export type SetOverrideRequest = { 
 /**
- * `"solo"`, `"team"`, `"unlimited"`, or `null` (which clears the override).
+ * `"paid"`, `"unlimited"`, or `null` (which clears the override).
  */
-plan: string | null, expires_in_days: bigint | null, note: string | null, };
+plan: string | null, 
+/**
+ * Required when `plan == "paid"` (the comped seat count, `1..=100`); ignored
+ * for `"unlimited"`.
+ */
+seats: number | null, expires_in_days: bigint | null, note: string | null, };

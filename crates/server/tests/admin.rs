@@ -56,10 +56,8 @@ fn stripe_config() -> StripeConfig {
     StripeConfig {
         secret_key: "sk_test_admin".to_string(),
         webhook_secret: "whsec_test".to_string(),
-        price_solo_monthly: "price_solo_m".to_string(),
-        price_solo_yearly: "price_solo_y".to_string(),
-        price_team_monthly: "price_team_m".to_string(),
-        price_team_yearly: "price_team_y".to_string(),
+        price_seat_monthly: "price_seat_m".to_string(),
+        price_seat_yearly: "price_seat_y".to_string(),
         price_storage: "price_storage".to_string(),
     }
 }
@@ -409,7 +407,7 @@ async fn non_admin_member_gets_404_on_every_admin_route() {
         .send(
             Method::PUT,
             &format!("/api/admin/workspaces/{fake}/override"),
-            Some(json!({ "plan": "team" })),
+            Some(json!({ "plan": "paid", "seats": 1 })),
         )
         .await;
     assert_eq!(status, StatusCode::NOT_FOUND);
@@ -569,26 +567,32 @@ async fn override_grant_flips_resolved_plan() {
     assert_eq!(s(&row["plan"]), "free");
     assert_eq!(row["override"], json!(null));
 
-    // Comp a team plan → the response echoes the flipped resolution + raw row.
+    // Comp a paid plan (8 seats) → the response echoes the flipped resolution + raw row.
     let (status, granted) = admin
         .send(
             Method::PUT,
             &format!("/api/admin/workspaces/{ws_id}/override"),
-            Some(json!({ "plan": "team", "note": "comped for launch" })),
+            Some(json!({ "plan": "paid", "seats": 8, "note": "comped for launch" })),
         )
         .await;
     assert_eq!(status, StatusCode::OK, "{granted}");
-    assert_eq!(s(&granted["plan"]), "team");
-    assert_eq!(s(&granted["override"]["plan"]), "team");
+    assert_eq!(s(&granted["plan"]), "paid");
+    assert_eq!(granted["seats"], json!(8));
+    assert_eq!(s(&granted["override"]["plan"]), "paid");
+    assert_eq!(granted["override"]["seats"], json!(8));
     assert_eq!(s(&granted["override"]["note"]), "comped for launch");
     assert_eq!(granted["override"]["expires_at"], json!(null));
 
     // Reflected on a fresh admin read…
     let reread = admin_ws(&mut admin, &ws).await;
-    assert_eq!(s(&reread["plan"]), "team");
+    assert_eq!(s(&reread["plan"]), "paid");
+    assert_eq!(reread["seats"], json!(8));
     // …and the override wins over the Free state in the workspace's own billing view.
     let (_, billing) = admin.get(&format!("/api/workspaces/{ws}/billing")).await;
-    assert_eq!(s(&billing["plan"]), "team");
+    assert_eq!(s(&billing["plan"]), "paid");
+    assert_eq!(billing["seats"], json!(8));
+    // 8 seats → 8 members allowed.
+    assert_eq!(billing["limits"]["max_members"], json!(8));
 
     // Null plan clears it → back to free.
     let (status, cleared) = admin
@@ -612,6 +616,41 @@ async fn override_grant_flips_resolved_plan() {
         .await;
     assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{err}");
     assert_eq!(s(&err["error"]["code"]), "invalid_plan");
+
+    // A "paid" comp without seats is rejected.
+    let (status, err) = admin
+        .send(
+            Method::PUT,
+            &format!("/api/admin/workspaces/{ws_id}/override"),
+            Some(json!({ "plan": "paid" })),
+        )
+        .await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{err}");
+    assert_eq!(s(&err["error"]["code"]), "invalid_seats");
+
+    // A "paid" comp with out-of-range seats is rejected.
+    let (status, err) = admin
+        .send(
+            Method::PUT,
+            &format!("/api/admin/workspaces/{ws_id}/override"),
+            Some(json!({ "plan": "paid", "seats": 101 })),
+        )
+        .await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{err}");
+    assert_eq!(s(&err["error"]["code"]), "invalid_seats");
+
+    // An "unlimited" comp needs no seats.
+    let (status, granted) = admin
+        .send(
+            Method::PUT,
+            &format!("/api/admin/workspaces/{ws_id}/override"),
+            Some(json!({ "plan": "unlimited" })),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{granted}");
+    assert_eq!(s(&granted["plan"]), "unlimited");
+    assert_eq!(granted["seats"], json!(null));
+    assert_eq!(granted["override"]["seats"], json!(null));
 }
 
 #[tokio::test]
@@ -627,16 +666,17 @@ async fn expired_override_is_ignored_but_still_listed() {
         .await;
     let ws_id = workspace_id(&ctx.state, &ws).await;
 
-    // Grant with a future expiry → plan flips to team.
+    // Grant with a future expiry → plan flips to paid.
     admin
         .send(
             Method::PUT,
             &format!("/api/admin/workspaces/{ws_id}/override"),
-            Some(json!({ "plan": "team", "expires_in_days": 30 })),
+            Some(json!({ "plan": "paid", "seats": 10, "expires_in_days": 30 })),
         )
         .await;
     let granted = admin_ws(&mut admin, &ws).await;
-    assert_eq!(s(&granted["plan"]), "team");
+    assert_eq!(s(&granted["plan"]), "paid");
+    assert_eq!(granted["seats"], json!(10));
 
     // Push the expiry into the past → the override is ignored for resolution.
     sqlx::query(
@@ -650,7 +690,8 @@ async fn expired_override_is_ignored_but_still_listed() {
     let row = admin_ws(&mut admin, &ws).await;
     assert_eq!(s(&row["plan"]), "free", "expired override must be ignored");
     // …but the raw row is still surfaced on the list.
-    assert_eq!(s(&row["override"]["plan"]), "team");
+    assert_eq!(s(&row["override"]["plan"]), "paid");
+    assert_eq!(row["override"]["seats"], json!(10));
     assert!(row["override"]["expires_at"].is_string());
 
     // The workspace's own billing view agrees (override hook honors expiry).
@@ -669,7 +710,7 @@ async fn override_on_unknown_workspace_is_404() {
         .send(
             Method::PUT,
             &format!("/api/admin/workspaces/{}/override", Uuid::new_v4()),
-            Some(json!({ "plan": "team" })),
+            Some(json!({ "plan": "unlimited" })),
         )
         .await;
     assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
