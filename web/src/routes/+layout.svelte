@@ -6,12 +6,24 @@
   import { session, refreshSession } from '$lib/session.svelte';
   import Nav from '$lib/components/Nav.svelte';
   import Toasts from '$lib/components/Toasts.svelte';
+  import EmailVerifyBanner from '$lib/components/EmailVerifyBanner.svelte';
 
   let { children } = $props();
 
-  /** /login and /invite/* are reachable without a session. Everything else guards. */
+  /**
+   * /login, /invite/*, /reset/* and /verify/* are reachable without a session.
+   * Everything else guards.
+   */
   function isPublic(path: string): boolean {
-    return path === '/login' || path === '/invite' || path.startsWith('/invite/');
+    return (
+      path === '/login' ||
+      path === '/invite' ||
+      path.startsWith('/invite/') ||
+      path === '/reset' ||
+      path.startsWith('/reset/') ||
+      path === '/verify' ||
+      path.startsWith('/verify/')
+    );
   }
 
   onMount(refreshSession);
@@ -33,6 +45,7 @@
 
 {#if showChrome}
   <Nav />
+  <EmailVerifyBanner />
 {/if}
 
 {#if ready}

@@ -60,6 +60,24 @@ pub async fn create(
         ));
     }
 
+    // Soft anti-spam gate: on instances with email configured, a user must have
+    // confirmed their address before spinning up a workspace. (Everything else —
+    // accepting invites, pushing to existing workspaces — stays open, and
+    // self-hosted instances without mail never gate.)
+    if state.config.mail.is_some() {
+        let verified: Option<Option<DateTime<Utc>>> =
+            sqlx::query_scalar("SELECT email_verified_at FROM users WHERE id = $1")
+                .bind(user.user_id)
+                .fetch_optional(&state.pool)
+                .await?;
+        if !matches!(verified, Some(Some(_))) {
+            return Err(ApiError::forbidden(
+                "email_unverified",
+                "please verify your email address before creating a workspace",
+            ));
+        }
+    }
+
     // Trial cap: on a billing-enabled instance a free user gets ONE workspace.
     // A new workspace always starts on the trial, so owning any non-paid
     // (Trial/Expired) workspace blocks creating another — this stops trial

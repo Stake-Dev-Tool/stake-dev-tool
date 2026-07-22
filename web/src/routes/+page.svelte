@@ -74,6 +74,9 @@
         createError = 'That slug is already taken — pick another.';
       } else if (e instanceof ApiError && e.code === 'invalid_slug') {
         createError = 'Invalid slug. Use 3–40 lowercase letters, numbers, or hyphens.';
+      } else if (e instanceof ApiError && e.code === 'email_unverified') {
+        createError =
+          'Verify your email address before creating a workspace — use the “Resend link” banner at the top of the page.';
       } else {
         createError = errorText(e);
       }

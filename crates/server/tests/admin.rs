@@ -76,6 +76,8 @@ async fn setup(admin_emails: Vec<String>, stripe: Option<StripeConfig>) -> Optio
         cookie_secure: false,
         public_url: Some("https://app.example.com".to_string()),
         github: None,
+        discord: None,
+        mail: None,
         stripe,
         web_dir: None,
         storage_max_blob_bytes: 8_589_934_592,

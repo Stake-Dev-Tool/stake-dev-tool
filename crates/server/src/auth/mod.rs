@@ -7,8 +7,11 @@
 //! hash and timing side-channels are a non-issue.
 
 pub mod device;
+pub mod discord;
+pub mod email_verify;
 pub mod extract;
 pub mod github;
+pub mod password_reset;
 pub mod passwords;
 pub mod ratelimit;
 pub mod sessions;
@@ -25,6 +28,8 @@ pub const SESSION_PREFIX: &str = "sdt_ses_";
 pub const API_TOKEN_PREFIX: &str = "sdt_pat_";
 pub const INVITE_PREFIX: &str = "sdt_inv_";
 pub const DEVICE_PREFIX: &str = "sdt_dev_";
+pub const PASSWORD_RESET_PREFIX: &str = "sdt_rst_";
+pub const EMAIL_VERIFY_PREFIX: &str = "sdt_vrf_";
 
 /// Generates `<prefix><base64url(32 random bytes)>`. 256 bits of entropy makes
 /// the value unguessable; only its hash is stored.

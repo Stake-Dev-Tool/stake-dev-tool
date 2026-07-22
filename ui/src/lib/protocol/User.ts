@@ -3,4 +3,10 @@
 /**
  * Public view of an account. Never carries the password hash.
  */
-export type User = { id: string, email: string, display_name: string, created_at: string, };
+export type User = { id: string, email: string, display_name: string, created_at: string, 
+/**
+ * Whether the account's email address has been confirmed. Always `true` on
+ * instances without email configured, and for provider (GitHub/Discord)
+ * logins whose email the provider already verified.
+ */
+email_verified: boolean, };

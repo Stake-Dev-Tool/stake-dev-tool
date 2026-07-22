@@ -43,6 +43,14 @@ pub struct Config {
     /// Present only when GitHub OAuth is fully configured (client id, secret,
     /// and a public URL). Absent → the GitHub routes 404.
     pub github: Option<GithubConfig>,
+    /// Present only when Discord OAuth is fully configured (client id, secret,
+    /// and a public URL). Absent → the Discord routes 404. Mirrors [`GithubConfig`].
+    pub discord: Option<DiscordConfig>,
+    /// Present only when transactional email is configured (Resend API key and a
+    /// `MAIL_FROM` address). Absent → password-reset emails are skipped (the
+    /// forgot-password endpoint still answers 200, logging a warning). See
+    /// [`MailConfig`].
+    pub mail: Option<MailConfig>,
     /// Present only when Stripe billing is fully configured (secret key, webhook
     /// secret, and all five price ids). Absent → billing routes 404, every
     /// workspace resolves to unlimited, and no quota check ever fires (the
@@ -80,6 +88,26 @@ pub struct Config {
 pub struct GithubConfig {
     pub client_id: String,
     pub client_secret: String,
+}
+
+/// Discord OAuth credentials. Constructed only when the client id, the client
+/// secret, and a public URL (for the redirect) are all present — the exact
+/// [`GithubConfig`] pattern, so its mere existence means Discord login is active.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DiscordConfig {
+    pub client_id: String,
+    pub client_secret: String,
+}
+
+/// Transactional-email (Resend) configuration. Constructed only when both the
+/// API key and a `from` address are present, so its existence means email
+/// sending is enabled. Used to send password-reset links.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MailConfig {
+    /// Resend API key (`RESEND_API_KEY`, `re_…`), sent as the Bearer token.
+    pub resend_api_key: String,
+    /// `From` header (`MAIL_FROM`, e.g. `Stake Dev Tool Cloud <no-reply@stakedevtool.com>`).
+    pub from: String,
 }
 
 /// Fully-resolved Stripe billing configuration. Only constructed when the secret
@@ -227,6 +255,32 @@ impl Config {
             _ => None,
         };
 
+        // Discord OAuth follows the same rule: id, secret, and a public URL.
+        let discord = match (
+            non_empty(get("DISCORD_CLIENT_ID")),
+            non_empty(get("DISCORD_CLIENT_SECRET")),
+            public_url.is_some(),
+        ) {
+            (Some(client_id), Some(client_secret), true) => Some(DiscordConfig {
+                client_id,
+                client_secret,
+            }),
+            _ => None,
+        };
+
+        // Email sending stays disabled unless both the Resend API key and a
+        // `from` address are present.
+        let mail = match (
+            non_empty(get("RESEND_API_KEY")),
+            non_empty(get("MAIL_FROM")),
+        ) {
+            (Some(resend_api_key), Some(from)) => Some(MailConfig {
+                resend_api_key,
+                from,
+            }),
+            _ => None,
+        };
+
         // Stripe billing stays disabled unless the secret key, the webhook
         // secret, and all five price ids are present. Any one missing (or blank)
         // leaves the whole block off — self-hosters run unlimited.
@@ -266,6 +320,8 @@ impl Config {
             cookie_secure,
             public_url,
             github,
+            discord,
+            mail,
             stripe,
             web_dir: get("SERVER_WEB_DIR").map(PathBuf::from),
             storage_max_blob_bytes,
@@ -473,6 +529,64 @@ mod tests {
         );
         // The trailing slash is trimmed so appended paths stay clean.
         assert_eq!(cfg.public_base_url(), "https://app.example.com");
+    }
+
+    #[test]
+    fn discord_needs_id_secret_and_public_url() {
+        // Missing the public URL keeps Discord disabled.
+        let cfg = Config::from_source(source(&[
+            ("DISCORD_CLIENT_ID", "id"),
+            ("DISCORD_CLIENT_SECRET", "secret"),
+        ]))
+        .unwrap();
+        assert_eq!(cfg.discord, None);
+
+        let cfg = Config::from_source(source(&[
+            ("DISCORD_CLIENT_ID", "id"),
+            ("DISCORD_CLIENT_SECRET", "secret"),
+            ("SERVER_PUBLIC_URL", "https://app.example.com/"),
+        ]))
+        .unwrap();
+        assert_eq!(
+            cfg.discord,
+            Some(DiscordConfig {
+                client_id: "id".to_string(),
+                client_secret: "secret".to_string(),
+            })
+        );
+    }
+
+    #[test]
+    fn mail_needs_key_and_from() {
+        // Neither set → disabled.
+        let cfg = Config::from_source(|_| None).unwrap();
+        assert_eq!(cfg.mail, None);
+
+        // Only one set → still disabled.
+        let cfg = Config::from_source(source(&[("RESEND_API_KEY", "re_x")])).unwrap();
+        assert_eq!(cfg.mail, None);
+
+        // Both set → enabled.
+        let cfg = Config::from_source(source(&[
+            ("RESEND_API_KEY", "re_x"),
+            ("MAIL_FROM", "Cloud <no-reply@example.com>"),
+        ]))
+        .unwrap();
+        assert_eq!(
+            cfg.mail,
+            Some(MailConfig {
+                resend_api_key: "re_x".to_string(),
+                from: "Cloud <no-reply@example.com>".to_string(),
+            })
+        );
+
+        // A blank value counts as absent.
+        let cfg = Config::from_source(source(&[
+            ("RESEND_API_KEY", "   "),
+            ("MAIL_FROM", "Cloud <no-reply@example.com>"),
+        ]))
+        .unwrap();
+        assert_eq!(cfg.mail, None);
     }
 
     /// The full set of env vars that enable Stripe billing.

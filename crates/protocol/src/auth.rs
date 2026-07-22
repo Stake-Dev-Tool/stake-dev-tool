@@ -14,6 +14,10 @@ pub struct User {
     pub email: String,
     pub display_name: String,
     pub created_at: DateTime<Utc>,
+    /// Whether the account's email address has been confirmed. Always `true` on
+    /// instances without email configured, and for provider (GitHub/Discord)
+    /// logins whose email the provider already verified.
+    pub email_verified: bool,
 }
 
 /// Envelope returned by register / login / me.
@@ -44,6 +48,30 @@ pub struct LoginRequest {
 pub struct ProvidersResponse {
     pub password: bool,
     pub github: bool,
+    pub discord: bool,
+}
+
+/// Body of `POST /api/auth/forgot-password`. Always answered with a uniform 200
+/// (no account enumeration).
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "protocol/")]
+pub struct ForgotPasswordRequest {
+    pub email: String,
+}
+
+/// Body of `POST /api/auth/reset-password`: a reset token plus the new password.
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "protocol/")]
+pub struct ResetPasswordRequest {
+    pub token: String,
+    pub password: String,
+}
+
+/// Body of `POST /api/auth/verify-email`: the verification token from the link.
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "protocol/")]
+pub struct VerifyEmailRequest {
+    pub token: String,
 }
 
 /// A personal API token's metadata. Never carries the secret or its hash.

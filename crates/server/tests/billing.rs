@@ -82,6 +82,8 @@ async fn setup(stripe: Option<StripeConfig>) -> Option<Ctx> {
         cookie_secure: false,
         public_url: Some("https://app.example.com".to_string()),
         github: None,
+        discord: None,
+        mail: None,
         stripe,
         web_dir: None,
         storage_max_blob_bytes: 8_589_934_592,
@@ -563,6 +565,71 @@ async fn expired_trial_blocks_writes_with_upgrade_required() {
 }
 
 // ===========================================================================
+// Trial workspace cap (one free-trial workspace per user)
+// ===========================================================================
+
+#[tokio::test]
+async fn trial_user_is_capped_at_one_workspace() {
+    let Some(ctx) = setup(Some(stripe_config())).await else {
+        return;
+    };
+    let mut owner = register(&ctx.state, &unique_email(), "Owner").await;
+
+    // The one free-trial workspace: allowed.
+    let (status, body) = owner
+        .post(
+            "/api/workspaces",
+            json!({ "name": "First", "slug": unique_slug() }),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+
+    // A second trial workspace for the same user: refused (no trial rotation).
+    let (status, body) = owner
+        .post(
+            "/api/workspaces",
+            json!({ "name": "Second", "slug": unique_slug() }),
+        )
+        .await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
+    assert_eq!(s(&body["error"]["code"]), "trial_workspace_limit");
+}
+
+#[tokio::test]
+async fn paid_workspace_lifts_the_trial_cap() {
+    let Some(ctx) = setup(Some(stripe_config())).await else {
+        return;
+    };
+    let mut owner = register(&ctx.state, &unique_email(), "Owner").await;
+    let ws1 = unique_slug();
+    let (status, _) = owner
+        .post("/api/workspaces", json!({ "name": "Paid", "slug": &ws1 }))
+        .await;
+    assert_eq!(status, StatusCode::OK);
+
+    // Put the first workspace on an active paid plan → the user is no longer a
+    // pure free-trial user, so a second (trial) workspace becomes allowed.
+    let ws1_id = workspace_id(&ctx.state, &ws1).await;
+    insert_subscription(
+        &ctx.state,
+        ws1_id,
+        "solo",
+        "monthly",
+        "active",
+        Some(Utc::now() + Duration::days(30)),
+    )
+    .await;
+
+    let (status, body) = owner
+        .post(
+            "/api/workspaces",
+            json!({ "name": "Second", "slug": unique_slug() }),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+}
+
+// ===========================================================================
 // Enforcement: member cap, storage cap, usage counts
 // ===========================================================================
 
@@ -713,6 +780,55 @@ async fn storage_cap_blocks_upload_via_content_length() {
         s(&parse_json(&body)["error"]["code"]),
         "storage_quota_exceeded"
     );
+}
+
+#[tokio::test]
+async fn storage_cap_blocks_upload_without_content_length() {
+    let Some(ctx) = setup(Some(stripe_config())).await else {
+        return;
+    };
+    let (mut owner, ws, token) = bootstrap(&ctx.state).await; // Trial (2 GiB)
+    let ws_id = workspace_id(&ctx.state, &ws).await;
+
+    // Leave only 3 bytes of headroom under the 2 GiB cap.
+    let cap = 2u64 * 1024 * 1024 * 1024;
+    insert_fake_blob(&ctx.state, ws_id, 0xEF, (cap - 3) as i64).await;
+
+    // A 5-byte upload with NO Content-Length (chunked). The pre-check can't fire,
+    // so only the authoritative post-stream re-check stops it — regression guard
+    // for the quota bypass. Before the fix this returned 201 and stored the blob.
+    let bytes = b"hello";
+    let hash = sha_hex(bytes);
+    let (status, body) = owner
+        .raw(
+            Method::PUT,
+            &format!("/api/workspaces/{ws}/games/demo/blobs/{hash}"),
+            Some("application/octet-stream"),
+            bytes.to_vec(),
+            Some(&token),
+            &[],
+        )
+        .await;
+    assert_eq!(
+        status,
+        StatusCode::PAYLOAD_TOO_LARGE,
+        "{:?}",
+        String::from_utf8_lossy(&body)
+    );
+    assert_eq!(
+        s(&parse_json(&body)["error"]["code"]),
+        "storage_quota_exceeded"
+    );
+
+    // The over-quota blob must NOT have been recorded (the 5-byte upload; the
+    // only other row is the multi-GiB fake blob).
+    let recorded: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM blobs WHERE workspace_id = $1 AND size = 5")
+            .bind(ws_id)
+            .fetch_one(&ctx.state.pool)
+            .await
+            .unwrap();
+    assert_eq!(recorded, 0, "over-quota blob must not be inserted");
 }
 
 #[tokio::test]

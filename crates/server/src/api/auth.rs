@@ -9,9 +9,11 @@ use axum_extra::extract::cookie::{Cookie, CookieJar, SameSite};
 use chrono::{DateTime, Utc};
 use protocol::{
     DeviceApproveRequest, DeviceApproveResponse, DeviceCodeResponse, DeviceTokenRequest,
-    LoginRequest, ProvidersResponse, RegisterRequest, User, UserResponse,
+    ForgotPasswordRequest, LoginRequest, ProvidersResponse, RegisterRequest, ResetPasswordRequest,
+    User, UserResponse, VerifyEmailRequest,
 };
 use serde::Deserialize;
+use serde_json::json;
 use sqlx::PgPool;
 use time::Duration as CookieDuration;
 use uuid::Uuid;
@@ -19,8 +21,12 @@ use uuid::Uuid;
 use crate::AppState;
 use crate::auth::device::{self, DevicePoll};
 use crate::auth::extract::{ClientIp, CurrentUser, SessionUser};
-use crate::auth::{generate_secret, github, passwords, sessions};
+use crate::auth::{
+    discord, email_verify, generate_secret, github, password_reset, passwords, sessions,
+};
+use crate::config::MailConfig;
 use crate::error::{ApiError, ApiResult, is_unique_violation};
+use crate::mail;
 
 const MIN_PASSWORD_LEN: usize = 8;
 
@@ -30,6 +36,7 @@ struct UserRow {
     email: String,
     display_name: String,
     created_at: DateTime<Utc>,
+    email_verified_at: Option<DateTime<Utc>>,
 }
 
 impl From<UserRow> for User {
@@ -39,6 +46,7 @@ impl From<UserRow> for User {
             email: r.email,
             display_name: r.display_name,
             created_at: r.created_at,
+            email_verified: r.email_verified_at.is_some(),
         }
     }
 }
@@ -66,13 +74,19 @@ pub async fn register(
     }
 
     let password_hash = passwords::hash_password(&req.password)?;
+    // With email configured, new password accounts start unverified and must
+    // confirm via the emailed link. Without email (self-host), there is no
+    // verification step at all, so the account is born verified.
+    let verified_now = state.config.mail.is_none();
     let result = sqlx::query_as::<_, UserRow>(
-        "INSERT INTO users (email, password_hash, display_name) VALUES ($1, $2, $3) \
-         RETURNING id, email, display_name, created_at",
+        "INSERT INTO users (email, password_hash, display_name, email_verified_at) \
+         VALUES ($1, $2, $3, CASE WHEN $4 THEN now() ELSE NULL END) \
+         RETURNING id, email, display_name, created_at, email_verified_at",
     )
     .bind(email)
     .bind(&password_hash)
     .bind(display_name)
+    .bind(verified_now)
     .fetch_one(&state.pool)
     .await;
 
@@ -87,9 +101,50 @@ pub async fn register(
         Err(e) => return Err(e.into()),
     };
 
+    // Fire off the verification email (best-effort: a mail failure must not fail
+    // signup — the user is signed in and can resend from the dashboard).
+    if let Some(mail_cfg) = state.config.mail.as_ref() {
+        issue_verification_email(&state, mail_cfg, user.id, &user.email).await;
+    }
+
     let secret = sessions::create_session(&state.pool, user.id).await?;
     let jar = jar.add(sessions::session_cookie(secret, state.config.cookie_secure));
     Ok((jar, Json(UserResponse { user: user.into() })))
+}
+
+/// Mints a verification token (awaited, so the record exists before we return)
+/// and dispatches the confirmation email in the background — signup and resend
+/// must never block on the mail round-trip. Every failure is logged, never
+/// propagated (verification can always be resent).
+async fn issue_verification_email(
+    state: &AppState,
+    mail_cfg: &MailConfig,
+    user_id: Uuid,
+    email: &str,
+) {
+    let token = match email_verify::create_verification(&state.pool, user_id).await {
+        Ok(token) => token,
+        Err(e) => {
+            tracing::error!(error = %e, "failed to mint email verification token");
+            return;
+        }
+    };
+    let url = format!("{}/verify/{}", state.config.public_base_url(), token);
+    let html = mail::action_email(
+        "Verify your email",
+        "Confirm this address to finish setting up your Stake Dev Tool Cloud account.",
+        "Verify email",
+        &url,
+        "If you didn't create this account, you can safely ignore this email.",
+    );
+    let client = state.http_client.clone();
+    let cfg = mail_cfg.clone();
+    let to = email.to_string();
+    tokio::spawn(async move {
+        if let Err(e) = mail::send(&client, &cfg, &to, "Verify your email", &html).await {
+            tracing::error!(error = %e, "failed to send verification email");
+        }
+    });
 }
 
 #[derive(sqlx::FromRow)]
@@ -99,6 +154,7 @@ struct AuthRow {
     display_name: String,
     created_at: DateTime<Utc>,
     password_hash: Option<String>,
+    email_verified_at: Option<DateTime<Utc>>,
 }
 
 /// Password login. Returns one uniform 401 whether the email is unknown or the
@@ -121,7 +177,7 @@ pub async fn login(
     let invalid = || ApiError::unauthorized("invalid_credentials", "invalid email or password");
 
     let row = sqlx::query_as::<_, AuthRow>(
-        "SELECT id, email, display_name, created_at, password_hash FROM users \
+        "SELECT id, email, display_name, created_at, password_hash, email_verified_at FROM users \
          WHERE lower(email) = lower($1)",
     )
     .bind(email)
@@ -152,6 +208,7 @@ pub async fn login(
         email: row.email,
         display_name: row.display_name,
         created_at: row.created_at,
+        email_verified: row.email_verified_at.is_some(),
     };
     let jar = jar.add(sessions::session_cookie(secret, state.config.cookie_secure));
     Ok((jar, Json(UserResponse { user })))
@@ -183,6 +240,7 @@ pub async fn providers(State(state): State<AppState>) -> Json<ProvidersResponse>
     Json(ProvidersResponse {
         password: true,
         github: state.config.github.is_some(),
+        discord: state.config.discord.is_some(),
     })
 }
 
@@ -301,12 +359,16 @@ async fn resolve_github_user(
         .bind(login)
         .execute(pool)
         .await?;
+        // The provider verified this email, so confirm the account if it wasn't.
+        mark_email_verified(pool, user_id).await?;
         return Ok(user_id);
     }
 
     let mut tx = pool.begin().await?;
+    // A provider-created account is verified from birth (the email is confirmed).
     let (user_id,): (Uuid,) = sqlx::query_as(
-        "INSERT INTO users (email, password_hash, display_name) VALUES ($1, NULL, $2) RETURNING id",
+        "INSERT INTO users (email, password_hash, display_name, email_verified_at) \
+         VALUES ($1, NULL, $2, now()) RETURNING id",
     )
     .bind(email)
     .bind(login)
@@ -320,6 +382,325 @@ async fn resolve_github_user(
         .await?;
     tx.commit().await?;
     Ok(user_id)
+}
+
+/// Stamps `email_verified_at` if not already set (a provider login has proven
+/// the address). Idempotent.
+async fn mark_email_verified(pool: &PgPool, user_id: Uuid) -> ApiResult<()> {
+    sqlx::query(
+        "UPDATE users SET email_verified_at = COALESCE(email_verified_at, now()) WHERE id = $1",
+    )
+    .bind(user_id)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+// --- Discord OAuth (mirrors the GitHub flow) --------------------------------
+
+/// Redirects to Discord's consent screen, setting a CSRF state cookie. 404 when
+/// Discord OAuth isn't configured.
+pub async fn discord_start(
+    State(state): State<AppState>,
+    jar: CookieJar,
+) -> ApiResult<(CookieJar, Redirect)> {
+    let cfg = state
+        .config
+        .discord
+        .as_ref()
+        .ok_or_else(discord_not_configured)?;
+    let csrf_state = generate_secret("");
+    let redirect_uri = format!(
+        "{}/api/auth/discord/callback",
+        state.config.public_base_url()
+    );
+    let url = discord::authorize_url(cfg, &redirect_uri, &csrf_state);
+
+    let state_cookie = Cookie::build((discord::DISCORD_STATE_COOKIE, csrf_state))
+        .http_only(true)
+        .same_site(SameSite::Lax)
+        .path("/")
+        .secure(state.config.cookie_secure)
+        .max_age(CookieDuration::minutes(10))
+        .build();
+    Ok((jar.add(state_cookie), Redirect::to(&url)))
+}
+
+#[derive(Debug, Deserialize)]
+pub struct DiscordCallbackQuery {
+    code: Option<String>,
+    state: Option<String>,
+}
+
+/// Verifies state, exchanges the code, requires a verified email, resolves/links/
+/// creates the account, and starts a session before redirecting back to the app.
+pub async fn discord_callback(
+    State(state): State<AppState>,
+    jar: CookieJar,
+    Query(query): Query<DiscordCallbackQuery>,
+) -> ApiResult<(CookieJar, Redirect)> {
+    let cfg = state
+        .config
+        .discord
+        .as_ref()
+        .ok_or_else(discord_not_configured)?;
+
+    let expected = jar
+        .get(discord::DISCORD_STATE_COOKIE)
+        .map(|c| c.value().to_string());
+    let (Some(code), Some(returned), Some(expected)) = (query.code, query.state, expected) else {
+        return Err(ApiError::bad_request(
+            "discord_state_mismatch",
+            "missing or invalid OAuth state",
+        ));
+    };
+    if returned != expected {
+        return Err(ApiError::bad_request(
+            "discord_state_mismatch",
+            "OAuth state mismatch",
+        ));
+    }
+
+    let redirect_uri = format!(
+        "{}/api/auth/discord/callback",
+        state.config.public_base_url()
+    );
+    let access = discord::exchange_code(&state.http_client, cfg, &code, &redirect_uri).await?;
+    let dc_user = discord::fetch_user(&state.http_client, &access).await?;
+
+    // Accounts are keyed on a verified email; reject an unverified or absent one.
+    let email = match (dc_user.email.as_deref(), dc_user.verified) {
+        (Some(email), Some(true)) if !email.is_empty() => email.to_string(),
+        _ => {
+            return Err(ApiError::bad_request(
+                "discord_email_unverified",
+                "your Discord account has no verified email address",
+            ));
+        }
+    };
+
+    let user_id = resolve_discord_user(&state.pool, &dc_user.id, &dc_user.username, &email).await?;
+    let secret = sessions::create_session(&state.pool, user_id).await?;
+
+    let clear_state = Cookie::build((discord::DISCORD_STATE_COOKIE, ""))
+        .path("/")
+        .build();
+    let jar = jar
+        .remove(clear_state)
+        .add(sessions::session_cookie(secret, state.config.cookie_secure));
+    Ok((jar, Redirect::to(&state.config.public_base_url())))
+}
+
+/// Existing Discord identity → log in; else same verified email → link identity;
+/// else create a passwordless (verified) account plus identity.
+async fn resolve_discord_user(
+    pool: &PgPool,
+    discord_id: &str,
+    username: &str,
+    email: &str,
+) -> ApiResult<Uuid> {
+    if let Some((user_id,)) =
+        sqlx::query_as::<_, (Uuid,)>("SELECT user_id FROM discord_identities WHERE discord_id = $1")
+            .bind(discord_id)
+            .fetch_optional(pool)
+            .await?
+    {
+        return Ok(user_id);
+    }
+
+    if let Some((user_id,)) =
+        sqlx::query_as::<_, (Uuid,)>("SELECT id FROM users WHERE lower(email) = lower($1)")
+            .bind(email)
+            .fetch_optional(pool)
+            .await?
+    {
+        sqlx::query(
+            "INSERT INTO discord_identities (discord_id, user_id, username) VALUES ($1, $2, $3) \
+             ON CONFLICT (discord_id) DO NOTHING",
+        )
+        .bind(discord_id)
+        .bind(user_id)
+        .bind(username)
+        .execute(pool)
+        .await?;
+        mark_email_verified(pool, user_id).await?;
+        return Ok(user_id);
+    }
+
+    let mut tx = pool.begin().await?;
+    let (user_id,): (Uuid,) = sqlx::query_as(
+        "INSERT INTO users (email, password_hash, display_name, email_verified_at) \
+         VALUES ($1, NULL, $2, now()) RETURNING id",
+    )
+    .bind(email)
+    .bind(username)
+    .fetch_one(&mut *tx)
+    .await?;
+    sqlx::query(
+        "INSERT INTO discord_identities (discord_id, user_id, username) VALUES ($1, $2, $3)",
+    )
+    .bind(discord_id)
+    .bind(user_id)
+    .bind(username)
+    .execute(&mut *tx)
+    .await?;
+    tx.commit().await?;
+    Ok(user_id)
+}
+
+fn discord_not_configured() -> ApiError {
+    ApiError::not_found(
+        "not_found",
+        "Discord OAuth is not configured on this instance",
+    )
+}
+
+// --- Password reset ---------------------------------------------------------
+
+/// Requests a password-reset email. ALWAYS answers a uniform 200 (regardless of
+/// whether the account exists or mail is configured) so it can't be used to
+/// probe which emails are registered. Rate-limited per `(ip, email)`.
+pub async fn forgot_password(
+    State(state): State<AppState>,
+    ClientIp(ip): ClientIp,
+    Json(req): Json<ForgotPasswordRequest>,
+) -> ApiResult<Json<serde_json::Value>> {
+    let email = req.email.trim();
+
+    if state.email_limiter.is_blocked(&ip, email) {
+        return Err(ApiError::too_many_requests(
+            "rate_limited",
+            "too many requests; please try again later",
+        ));
+    }
+    state.email_limiter.record_failure(&ip, email);
+
+    let account: Option<(Uuid, String)> =
+        sqlx::query_as("SELECT id, email FROM users WHERE lower(email) = lower($1)")
+            .bind(email)
+            .fetch_optional(&state.pool)
+            .await?;
+
+    match (account, state.config.mail.as_ref()) {
+        (Some((user_id, user_email)), Some(mail_cfg)) => {
+            // Best-effort: mint a token and email the link. Any failure is logged,
+            // never surfaced (surfacing would leak that the account exists).
+            match password_reset::create_reset(&state.pool, user_id).await {
+                Ok(token) => {
+                    let url = format!("{}/reset/{}", state.config.public_base_url(), token);
+                    let html = mail::action_email(
+                        "Reset your password",
+                        "We received a request to reset the password for your Stake Dev Tool \
+                         Cloud account. This link expires in one hour.",
+                        "Reset password",
+                        &url,
+                        "If you didn't request a password reset, you can safely ignore this email.",
+                    );
+                    // Send in the background so the response can't be timed to
+                    // reveal whether the account exists.
+                    let client = state.http_client.clone();
+                    let cfg = mail_cfg.clone();
+                    tokio::spawn(async move {
+                        if let Err(e) =
+                            mail::send(&client, &cfg, &user_email, "Reset your password", &html)
+                                .await
+                        {
+                            tracing::error!(error = %e, "failed to send password reset email");
+                        }
+                    });
+                }
+                Err(e) => tracing::error!(error = %e, "failed to mint password reset token"),
+            }
+        }
+        (Some(_), None) => {
+            tracing::warn!("password reset requested but email is not configured; skipping send");
+        }
+        (None, _) => {
+            // No such account — do nothing, but answer identically.
+        }
+    }
+
+    Ok(Json(json!({ "ok": true })))
+}
+
+/// Redeems a reset token and sets a new password. GitHub/Discord-only accounts
+/// (NULL password_hash) gain a usable password this way — intended.
+pub async fn reset_password(
+    State(state): State<AppState>,
+    Json(req): Json<ResetPasswordRequest>,
+) -> ApiResult<Json<serde_json::Value>> {
+    if req.password.len() < MIN_PASSWORD_LEN {
+        return Err(ApiError::unprocessable(
+            "weak_password",
+            format!("password must be at least {MIN_PASSWORD_LEN} characters"),
+        ));
+    }
+    let hash = passwords::hash_password(&req.password)?;
+    let ok = password_reset::consume_reset(&state.pool, req.token.trim(), &hash).await?;
+    if !ok {
+        return Err(ApiError::bad_request(
+            "invalid_token",
+            "this password reset link is invalid or has expired",
+        ));
+    }
+    Ok(Json(json!({ "ok": true })))
+}
+
+// --- Email verification -----------------------------------------------------
+
+/// Redeems a verification token, confirming the account's email. Uniform 400
+/// `invalid_token` for an unknown/expired/used token.
+pub async fn verify_email(
+    State(state): State<AppState>,
+    Json(req): Json<VerifyEmailRequest>,
+) -> ApiResult<Json<serde_json::Value>> {
+    let ok = email_verify::consume_verification(&state.pool, req.token.trim()).await?;
+    if !ok {
+        return Err(ApiError::bad_request(
+            "invalid_token",
+            "this verification link is invalid or has expired",
+        ));
+    }
+    Ok(Json(json!({ "ok": true })))
+}
+
+/// Session-authenticated: resends the verification email. A no-op 200 when the
+/// account is already verified or mail is unconfigured. Rate-limited per
+/// `(ip, email)` like forgot-password.
+pub async fn resend_verification(
+    State(state): State<AppState>,
+    ClientIp(ip): ClientIp,
+    SessionUser(user): SessionUser,
+) -> ApiResult<Json<serde_json::Value>> {
+    let row: Option<(String, Option<DateTime<Utc>>)> =
+        sqlx::query_as("SELECT email, email_verified_at FROM users WHERE id = $1")
+            .bind(user.user_id)
+            .fetch_optional(&state.pool)
+            .await?;
+    let Some((email, verified_at)) = row else {
+        return Err(ApiError::unauthorized(
+            "unauthenticated",
+            "account no longer exists",
+        ));
+    };
+
+    // No-op success when there's nothing to do.
+    let Some(mail_cfg) = state.config.mail.as_ref() else {
+        return Ok(Json(json!({ "ok": true })));
+    };
+    if verified_at.is_some() {
+        return Ok(Json(json!({ "ok": true })));
+    }
+
+    if state.email_limiter.is_blocked(&ip, &email) {
+        return Err(ApiError::too_many_requests(
+            "rate_limited",
+            "too many requests; please try again later",
+        ));
+    }
+    state.email_limiter.record_failure(&ip, &email);
+    issue_verification_email(&state, mail_cfg, user.user_id, &email).await;
+    Ok(Json(json!({ "ok": true })))
 }
 
 /// Starts a device pairing: returns the one-shot device code and human code.
@@ -376,7 +757,7 @@ pub async fn device_approve(
 /// has since vanished is treated as unauthenticated.
 async fn load_user(pool: &PgPool, id: Uuid) -> ApiResult<User> {
     sqlx::query_as::<_, UserRow>(
-        "SELECT id, email, display_name, created_at FROM users WHERE id = $1",
+        "SELECT id, email, display_name, created_at, email_verified_at FROM users WHERE id = $1",
     )
     .bind(id)
     .fetch_optional(pool)

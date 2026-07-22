@@ -64,6 +64,8 @@ async fn setup() -> Option<Ctx> {
         cookie_secure: false,
         public_url: None,
         github: None,
+        discord: None,
+        mail: None,
         stripe: None,
         web_dir: None,
         storage_max_blob_bytes: 8_589_934_592,

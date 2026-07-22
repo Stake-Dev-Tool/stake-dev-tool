@@ -8,7 +8,7 @@ use std::collections::HashMap;
 use axum::body::Body;
 use axum::http::{Method, Request, StatusCode};
 use serde_json::{Value, json};
-use server::config::{Config, StorageConfig};
+use server::config::{Config, DiscordConfig, MailConfig, StorageConfig};
 use server::{AppState, db, http, storage};
 use tower::ServiceExt; // brings `oneshot` onto Router
 use uuid::Uuid;
@@ -23,9 +23,15 @@ struct Ctx {
 /// Builds real state against `TEST_DATABASE_URL` and applies migrations, or
 /// returns `None` to skip.
 async fn setup() -> Option<Ctx> {
+    setup_with(|_| {}).await
+}
+
+/// Like `setup`, but lets a test tweak the `Config` before state is built (e.g.
+/// to enable Discord OAuth or email sending).
+async fn setup_with(configure: impl FnOnce(&mut Config)) -> Option<Ctx> {
     let database_url = std::env::var("TEST_DATABASE_URL").ok()?;
     let tmp = tempfile::tempdir().unwrap();
-    let config = Config {
+    let mut config = Config {
         bind_addr: "127.0.0.1:0".to_string(),
         database_url: database_url.clone(),
         storage: StorageConfig::Fs {
@@ -34,6 +40,8 @@ async fn setup() -> Option<Ctx> {
         cookie_secure: false,
         public_url: None,
         github: None,
+        discord: None,
+        mail: None,
         stripe: None,
         web_dir: None,
         storage_max_blob_bytes: 8_589_934_592,
@@ -42,11 +50,29 @@ async fn setup() -> Option<Ctx> {
         play_domain: None,
         admin_emails: Vec::new(),
     };
+    configure(&mut config);
     let pool = db::connect_lazy(&database_url).expect("lazy pool");
     let store = storage::build_object_store(&config).expect("fs store");
     let state = AppState::new(config, pool, store);
     db::migrate(&state.pool).await.expect("migrations apply");
     Some(Ctx { state, _tmp: tmp })
+}
+
+/// A `MailConfig` for tests: enables the "email configured" code paths. Register
+/// dispatches the actual send in the background (best-effort), so a bogus key
+/// never blocks or fails a test.
+fn test_mail() -> MailConfig {
+    MailConfig {
+        resend_api_key: "re_test_key".to_string(),
+        from: "Test <no-reply@example.com>".to_string(),
+    }
+}
+
+fn test_discord() -> DiscordConfig {
+    DiscordConfig {
+        client_id: "test-client-id".to_string(),
+        client_secret: "test-client-secret".to_string(),
+    }
 }
 
 /// A browser-like client: shares the app state and carries a cookie jar so
@@ -755,4 +781,394 @@ async fn last_owner_cannot_leave_and_promotion_frees_them() {
         )
         .await;
     assert_eq!(status, StatusCode::NO_CONTENT);
+}
+
+// --- Password reset ---------------------------------------------------------
+
+#[tokio::test]
+async fn forgot_password_is_uniform_200_known_unknown_and_without_mail() {
+    // Default setup has NO mail configured — forgot-password must still 200.
+    let Some(ctx) = setup().await else {
+        return;
+    };
+    let email = unique_email();
+    register(&ctx.state, &email, "Reset Me").await;
+
+    let mut anon = Client::new(&ctx.state);
+    let (status, known) = anon
+        .post("/api/auth/forgot-password", json!({ "email": &email }))
+        .await;
+    assert_eq!(status, StatusCode::OK);
+
+    let (status, unknown) = anon
+        .post(
+            "/api/auth/forgot-password",
+            json!({ "email": unique_email() }),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    // Known and unknown emails are indistinguishable (no account enumeration).
+    assert_eq!(known, unknown);
+}
+
+#[tokio::test]
+async fn password_reset_roundtrip_revokes_sessions() {
+    let Some(ctx) = setup().await else {
+        return;
+    };
+    let email = unique_email();
+    let (mut user, user_obj) = register(&ctx.state, &email, "Resetter").await;
+    let user_id = Uuid::parse_str(s(&user_obj["id"])).unwrap();
+
+    // The existing session works before the reset.
+    let (status, _) = user.get("/api/auth/me").await;
+    assert_eq!(status, StatusCode::OK);
+
+    // Mint a reset token directly (the email can't be read in tests).
+    let token = server::auth::password_reset::create_reset(&ctx.state.pool, user_id)
+        .await
+        .unwrap();
+    assert!(token.starts_with("sdt_rst_"));
+
+    let mut anon = Client::new(&ctx.state);
+    let (status, _) = anon
+        .post(
+            "/api/auth/reset-password",
+            json!({ "token": &token, "password": "new-password-123" }),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK);
+
+    // The old session cookie is now revoked everywhere.
+    let (status, _) = user.get("/api/auth/me").await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+
+    // The old password no longer authenticates; the new one does.
+    let mut login = Client::new(&ctx.state);
+    let (status, _) = login
+        .post(
+            "/api/auth/login",
+            json!({ "email": &email, "password": "password123" }),
+        )
+        .await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    let (status, _) = login
+        .post(
+            "/api/auth/login",
+            json!({ "email": &email, "password": "new-password-123" }),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK);
+
+    // Reusing the (now-consumed) token is rejected.
+    let (status, body) = anon
+        .post(
+            "/api/auth/reset-password",
+            json!({ "token": &token, "password": "yet-another-pass" }),
+        )
+        .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(s(&body["error"]["code"]), "invalid_token");
+}
+
+#[tokio::test]
+async fn reset_password_rejects_short_and_expired() {
+    let Some(ctx) = setup().await else {
+        return;
+    };
+    let email = unique_email();
+    let (_, user_obj) = register(&ctx.state, &email, "Expiry").await;
+    let user_id = Uuid::parse_str(s(&user_obj["id"])).unwrap();
+
+    let token = server::auth::password_reset::create_reset(&ctx.state.pool, user_id)
+        .await
+        .unwrap();
+    let mut anon = Client::new(&ctx.state);
+
+    // A short password is rejected before the token is consulted (422), leaving
+    // the token unused.
+    let (status, body) = anon
+        .post(
+            "/api/auth/reset-password",
+            json!({ "token": &token, "password": "short" }),
+        )
+        .await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+    assert_eq!(s(&body["error"]["code"]), "weak_password");
+
+    // Force the still-unused token into the past → invalid.
+    sqlx::query(
+        "UPDATE password_resets SET expires_at = now() - INTERVAL '1 hour' WHERE user_id = $1",
+    )
+    .bind(user_id)
+    .execute(&ctx.state.pool)
+    .await
+    .unwrap();
+    let (status, body) = anon
+        .post(
+            "/api/auth/reset-password",
+            json!({ "token": &token, "password": "new-password-123" }),
+        )
+        .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(s(&body["error"]["code"]), "invalid_token");
+}
+
+#[tokio::test]
+async fn forgot_password_rate_limits_per_email() {
+    let Some(ctx) = setup().await else {
+        return;
+    };
+    let email = unique_email();
+    register(&ctx.state, &email, "Flood").await;
+
+    let mut anon = Client::new(&ctx.state);
+    // Five requests per hour are allowed.
+    for attempt in 1..=5 {
+        let (status, _) = anon
+            .post("/api/auth/forgot-password", json!({ "email": &email }))
+            .await;
+        assert_eq!(status, StatusCode::OK, "attempt {attempt} should be 200");
+    }
+    // The sixth is throttled.
+    let (status, body) = anon
+        .post("/api/auth/forgot-password", json!({ "email": &email }))
+        .await;
+    assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
+    assert_eq!(s(&body["error"]["code"]), "rate_limited");
+}
+
+// --- Discord OAuth ----------------------------------------------------------
+
+#[tokio::test]
+async fn discord_routes_404_and_providers_false_when_unconfigured() {
+    let Some(ctx) = setup().await else {
+        return;
+    };
+    let mut anon = Client::new(&ctx.state);
+    let (status, _) = anon.get("/api/auth/discord/start").await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    let (status, _) = anon.get("/api/auth/discord/callback?code=x&state=y").await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+
+    let (status, body) = anon.get("/api/auth/providers").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["discord"], json!(false));
+}
+
+#[tokio::test]
+async fn discord_providers_true_and_state_mismatch_rejected() {
+    let Some(ctx) = setup_with(|c| {
+        c.public_url = Some("https://app.example.com".to_string());
+        c.discord = Some(test_discord());
+    })
+    .await
+    else {
+        return;
+    };
+
+    let mut client = Client::new(&ctx.state);
+    let (status, body) = client.get("/api/auth/providers").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["discord"], json!(true));
+
+    // Start sets the CSRF state cookie and redirects to Discord.
+    let (status, _) = client.get("/api/auth/discord/start").await;
+    assert!(
+        status.is_redirection(),
+        "start should redirect, got {status}"
+    );
+    assert!(
+        client.cookies.contains_key("sdt_dc_state"),
+        "start must set the state cookie"
+    );
+
+    // A callback whose state doesn't match the cookie is rejected before any
+    // token exchange, and no session is created.
+    let (status, body) = client
+        .get("/api/auth/discord/callback?code=abc&state=WRONG")
+        .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(s(&body["error"]["code"]), "discord_state_mismatch");
+    assert!(
+        !client.cookies.contains_key("sdt_session"),
+        "a rejected callback must not create a session"
+    );
+}
+
+// --- Email verification -----------------------------------------------------
+
+#[tokio::test]
+async fn register_with_mail_is_unverified_then_verifies() {
+    let Some(ctx) = setup_with(|c| {
+        c.public_url = Some("https://app.example.com".to_string());
+        c.mail = Some(test_mail());
+    })
+    .await
+    else {
+        return;
+    };
+
+    let email = unique_email();
+    let (mut user, user_obj) = register(&ctx.state, &email, "Newbie").await;
+    let user_id = Uuid::parse_str(s(&user_obj["id"])).unwrap();
+
+    // Registered but not yet verified.
+    assert_eq!(user_obj["email_verified"], json!(false));
+    let (status, me) = user.get("/api/auth/me").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(me["user"]["email_verified"], json!(false));
+
+    // Register created a verification token row.
+    let count: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM email_verifications WHERE user_id = $1")
+            .bind(user_id)
+            .fetch_one(&ctx.state.pool)
+            .await
+            .unwrap();
+    assert!(count >= 1, "register should mint a verification token");
+
+    // Mint a known token and redeem it.
+    let token = server::auth::email_verify::create_verification(&ctx.state.pool, user_id)
+        .await
+        .unwrap();
+    assert!(token.starts_with("sdt_vrf_"));
+    let mut anon = Client::new(&ctx.state);
+    let (status, _) = anon
+        .post("/api/auth/verify-email", json!({ "token": &token }))
+        .await;
+    assert_eq!(status, StatusCode::OK);
+
+    // Now verified.
+    let (status, me) = user.get("/api/auth/me").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(me["user"]["email_verified"], json!(true));
+
+    // Reusing the verification token is rejected.
+    let (status, body) = anon
+        .post("/api/auth/verify-email", json!({ "token": &token }))
+        .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(s(&body["error"]["code"]), "invalid_token");
+}
+
+#[tokio::test]
+async fn register_without_mail_is_verified_immediately() {
+    let Some(ctx) = setup().await else {
+        return;
+    };
+    let (_, user_obj) = register(&ctx.state, &unique_email(), "SelfHost").await;
+    assert_eq!(user_obj["email_verified"], json!(true));
+}
+
+#[tokio::test]
+async fn resend_verification_rate_limited() {
+    let Some(ctx) = setup_with(|c| {
+        c.public_url = Some("https://app.example.com".to_string());
+        c.mail = Some(test_mail());
+    })
+    .await
+    else {
+        return;
+    };
+    let (mut user, _) = register(&ctx.state, &unique_email(), "Resend").await;
+
+    for attempt in 1..=5 {
+        let (status, _) = user.post("/api/auth/resend-verification", json!({})).await;
+        assert_eq!(status, StatusCode::OK, "resend {attempt} should be 200");
+    }
+    let (status, body) = user.post("/api/auth/resend-verification", json!({})).await;
+    assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
+    assert_eq!(s(&body["error"]["code"]), "rate_limited");
+}
+
+#[tokio::test]
+async fn resend_verification_is_noop_when_verified_or_unconfigured() {
+    // Mail unconfigured: resend is a no-op 200, never throttled.
+    let Some(ctx) = setup().await else {
+        return;
+    };
+    let (mut user, _) = register(&ctx.state, &unique_email(), "NoMail").await;
+    for _ in 0..8 {
+        let (status, _) = user.post("/api/auth/resend-verification", json!({})).await;
+        assert_eq!(status, StatusCode::OK);
+    }
+
+    // Mail configured but already verified (self-registered accounts under a
+    // verify-token redeem): also a no-op 200, never throttled.
+    let Some(ctx2) = setup_with(|c| {
+        c.public_url = Some("https://app.example.com".to_string());
+        c.mail = Some(test_mail());
+    })
+    .await
+    else {
+        return;
+    };
+    let (mut vuser, vuser_obj) = register(&ctx2.state, &unique_email(), "Verified").await;
+    let vid = Uuid::parse_str(s(&vuser_obj["id"])).unwrap();
+    let token = server::auth::email_verify::create_verification(&ctx2.state.pool, vid)
+        .await
+        .unwrap();
+    let mut anon = Client::new(&ctx2.state);
+    anon.post("/api/auth/verify-email", json!({ "token": &token }))
+        .await;
+    for _ in 0..8 {
+        let (status, _) = vuser.post("/api/auth/resend-verification", json!({})).await;
+        assert_eq!(status, StatusCode::OK);
+    }
+}
+
+#[tokio::test]
+async fn workspace_create_requires_verified_email_with_mail() {
+    let Some(ctx) = setup_with(|c| {
+        c.public_url = Some("https://app.example.com".to_string());
+        c.mail = Some(test_mail());
+    })
+    .await
+    else {
+        return;
+    };
+    let (mut user, user_obj) = register(&ctx.state, &unique_email(), "Unverified").await;
+    let user_id = Uuid::parse_str(s(&user_obj["id"])).unwrap();
+    let slug = unique_slug();
+
+    // Unverified → 403 email_unverified.
+    let (status, body) = user
+        .post(
+            "/api/workspaces",
+            json!({ "name": "Blocked", "slug": &slug }),
+        )
+        .await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    assert_eq!(s(&body["error"]["code"]), "email_unverified");
+
+    // After verifying, creation succeeds.
+    let token = server::auth::email_verify::create_verification(&ctx.state.pool, user_id)
+        .await
+        .unwrap();
+    let mut anon = Client::new(&ctx.state);
+    anon.post("/api/auth/verify-email", json!({ "token": &token }))
+        .await;
+    let (status, _) = user
+        .post(
+            "/api/workspaces",
+            json!({ "name": "Allowed", "slug": &slug }),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK);
+}
+
+#[tokio::test]
+async fn workspace_create_allowed_without_mail_even_if_unverified() {
+    let Some(ctx) = setup().await else {
+        return;
+    };
+    let (mut user, _) = register(&ctx.state, &unique_email(), "SelfHostWs").await;
+    let (status, _) = user
+        .post(
+            "/api/workspaces",
+            json!({ "name": "Fine", "slug": &unique_slug() }),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK);
 }

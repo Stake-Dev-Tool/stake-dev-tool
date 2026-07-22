@@ -3,4 +3,4 @@
 /**
  * Which sign-in methods this instance offers, for the login page to render.
  */
-export type ProvidersResponse = { password: boolean, github: boolean, };
+export type ProvidersResponse = { password: boolean, github: boolean, discord: boolean, };

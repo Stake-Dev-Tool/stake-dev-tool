@@ -32,6 +32,8 @@ export interface User {
   id: string;
   email: string;
   display_name: string;
+  /** Whether the account's email address has been confirmed. */
+  email_verified: boolean;
 }
 
 export interface Workspace {
@@ -93,6 +95,7 @@ export interface InvitePreview {
 export interface AuthProviders {
   password: boolean;
   github: boolean;
+  discord: boolean;
 }
 
 export type TokenScope = 'full' | 'push:math';
@@ -702,7 +705,10 @@ function normalizeUser(raw: unknown): User {
   return {
     id: String(u.id ?? ''),
     email: String(u.email ?? ''),
-    display_name: String(u.display_name ?? u.name ?? '')
+    display_name: String(u.display_name ?? u.name ?? ''),
+    // Default to verified when the field is absent so an older server (or a
+    // shape surprise) never shows a false "verify your email" nag.
+    email_verified: Boolean(u.email_verified ?? true)
   };
 }
 
@@ -1202,11 +1208,46 @@ export const api = {
     },
     async providers(): Promise<AuthProviders> {
       const r = await request<Partial<AuthProviders>>('GET', '/auth/providers');
-      return { password: r.password ?? true, github: r.github ?? false };
+      return {
+        password: r.password ?? true,
+        github: r.github ?? false,
+        discord: r.discord ?? false
+      };
     },
     /** Full-page navigation target for GitHub OAuth (never fetched). */
     githubStartUrl(): string {
       return `${BASE}/auth/github/start`;
+    },
+    /** Full-page navigation target for Discord OAuth (never fetched). */
+    discordStartUrl(): string {
+      return `${BASE}/auth/discord/start`;
+    },
+    /**
+     * Request a password-reset email. Always resolves (the server returns a
+     * uniform 200 whether or not the account exists), so callers show the same
+     * "check your inbox" confirmation regardless.
+     */
+    async forgotPassword(email: string): Promise<void> {
+      await request<void>('POST', '/auth/forgot-password', { email });
+    },
+    /**
+     * Redeem a reset token and set a new password. Throws ApiError with code
+     * `invalid_token` (400) for an expired/used/unknown token, or `weak_password`
+     * (422) for a password under 8 characters.
+     */
+    async resetPassword(token: string, password: string): Promise<void> {
+      await request<void>('POST', '/auth/reset-password', { token, password });
+    },
+    /**
+     * Redeem an email-verification token. Throws ApiError `invalid_token` (400)
+     * for an expired/used/unknown token.
+     */
+    async verifyEmail(token: string): Promise<void> {
+      await request<void>('POST', '/auth/verify-email', { token });
+    },
+    /** Session-auth: resend the verification email. No-op 200 when already verified. */
+    async resendVerification(): Promise<void> {
+      await request<void>('POST', '/auth/resend-verification');
     }
   },
 

@@ -50,6 +50,8 @@ async fn setup_with_cap(max_blob_bytes: u64) -> Option<Ctx> {
         cookie_secure: false,
         public_url: None,
         github: None,
+        discord: None,
+        mail: None,
         stripe: None,
         web_dir: None,
         storage_max_blob_bytes: max_blob_bytes,

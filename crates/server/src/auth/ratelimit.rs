@@ -26,10 +26,17 @@ struct Window {
 
 impl LoginRateLimiter {
     pub fn new() -> Self {
+        Self::with_limits(MAX_FAILURES, WINDOW)
+    }
+
+    /// Same fixed-window limiter with an explicit budget and window — used for
+    /// the email flows (forgot-password / resend-verification: 5 per hour per
+    /// `(ip, email)`), which reuse this module's pattern with different limits.
+    pub fn with_limits(max_failures: u32, window: Duration) -> Self {
         Self {
             windows: DashMap::new(),
-            max_failures: MAX_FAILURES,
-            window: WINDOW,
+            max_failures,
+            window,
         }
     }
 
