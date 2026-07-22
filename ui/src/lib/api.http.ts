@@ -247,6 +247,79 @@ export function createDevtoolClient(apiBase = '') {
 
 export type DevtoolClient = ReturnType<typeof createDevtoolClient>;
 
+// ===== Cloud workbench client (test view "Versions" + push notifications) =====
+//
+// Unlike `createDevtoolClient`, these endpoints do NOT live under the tenant
+// `apiBase` prefix — the dashboard API and the workspace SSE stream are mounted
+// at the origin root: `/api/workspaces/:ws/…`. Same-origin, cookie auth. Only
+// the cloud test view (when `ctx.auth.workspace` is set) reaches this; the
+// desktop context never constructs the client at all.
+
+/** A revision as listed under `GET .../revisions` (newest first). Mirrors the
+ *  server's `RevisionSummary`; every field past `number` is treated optional so
+ *  the picker degrades if the shape narrows. (Distinct from the desktop
+ *  `CloudRevisionSummary` in `api.tauri.ts` — this is the Tauri-free subset the
+ *  test view needs.) */
+export type WorkbenchRevision = {
+  number: number;
+  message?: string;
+  created_at?: string;
+  stats_status?: string | null;
+};
+
+/** A front bundle as listed under `GET .../front-bundles` (newest first). */
+export type WorkbenchFrontBundle = {
+  id: string;
+  created_at?: string;
+  files_count?: number;
+  total_size?: number;
+};
+
+/** Error carrying the HTTP status so callers can special-case a 404 (the new
+ *  endpoint is not deployed yet) and leave the feature dormant. */
+export class CloudHttpError extends Error {
+  status: number;
+  constructor(status: number, message: string) {
+    super(message);
+    this.name = 'CloudHttpError';
+    this.status = status;
+  }
+}
+
+export function createCloudWorkbenchClient(workspaceSlug: string) {
+  // `workspaceSlug` is already a URL path segment (extracted from the tenant
+  // prefix) so it is used verbatim; the game slug arrives decoded and is
+  // encoded here.
+  const ws = workspaceSlug;
+  return {
+    /** `GET /api/workspaces/:ws/games/:game/revisions` — newest first (exists today). */
+    listRevisions: async (game: string): Promise<WorkbenchRevision[]> => {
+      const r = await fetch(`/api/workspaces/${ws}/games/${encodeURIComponent(game)}/revisions`, {
+        credentials: 'same-origin'
+      });
+      if (!r.ok) throw new CloudHttpError(r.status, `list revisions: ${r.status}`);
+      const j = (await r.json()) as { revisions: WorkbenchRevision[] };
+      return j.revisions ?? [];
+    },
+    /** `GET /api/workspaces/:ws/games/:game/front-bundles` — newest first (NEW;
+     *  may 404 until deployed → the caller then hides the bundle options). */
+    listFrontBundles: async (game: string): Promise<WorkbenchFrontBundle[]> => {
+      const r = await fetch(
+        `/api/workspaces/${ws}/games/${encodeURIComponent(game)}/front-bundles`,
+        { credentials: 'same-origin' }
+      );
+      if (!r.ok) throw new CloudHttpError(r.status, `list front-bundles: ${r.status}`);
+      const j = (await r.json()) as { bundles: WorkbenchFrontBundle[] };
+      return j.bundles ?? [];
+    },
+    /** Workspace SSE stream URL — carries named `revision_pushed` / `front_pushed`
+     *  events. Consumed via `EventSource` (same-origin cookie). */
+    eventsUrl: (): string => `/api/workspaces/${ws}/events`
+  };
+}
+
+export type CloudWorkbenchClient = ReturnType<typeof createCloudWorkbenchClient>;
+
 export function replayUrl(
   gameUrl: string,
   gameSlug: string,

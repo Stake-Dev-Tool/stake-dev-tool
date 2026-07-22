@@ -6,12 +6,15 @@
     CURRENCIES,
     API_MULTIPLIER,
     createDevtoolClient,
+    createCloudWorkbenchClient,
     replayUrl,
     type ResolutionPreset,
     type EventEntry,
     type SavedRound,
     type ModeBetStats,
-    type NotableBucket
+    type NotableBucket,
+    type WorkbenchRevision,
+    type WorkbenchFrontBundle
   } from '$lib/api.http';
   import type { TestViewContext } from './context';
 
@@ -61,6 +64,25 @@
     betStats: betStatsHttp,
     gameModes: gameModesHttp
   } = http;
+
+  // ===== Cloud workbench (Versions picker + live team-push notifications) =====
+  //
+  // Everything below is dormant on desktop: `ctx.auth?.workspace` is unset there,
+  // so `workbench` is `null`, the "Versions" card is not rendered, and the SSE
+  // subscription is never opened. It only activates in the cloud test view, where
+  // `ctx.auth` carries the workspace slug + current revision number.
+  const workbench = untrack(() =>
+    ctx.auth?.workspace ? createCloudWorkbenchClient(ctx.auth.workspace) : null
+  );
+  const isCloud = untrack(() => !!ctx.auth?.workspace);
+  const currentRevisionNumber = untrack(() => Number(ctx.auth?.revision));
+
+  let revisions = $state<WorkbenchRevision[]>([]);
+  let frontBundles = $state<WorkbenchFrontBundle[]>([]);
+
+  // Live push banners — one slot per kind; a newer push replaces the older one.
+  let revisionBanner = $state<{ number: number } | null>(null);
+  let frontBanner = $state<{ bundleId: string } | null>(null);
 
   // Stake social-mode currencies only make sense when social=true; hide them
   // otherwise. XSC and XEC both use the SC display symbol.
@@ -433,6 +455,306 @@
     for (const es of eventSources.values()) es.close();
     eventSources.clear();
   });
+
+  // ===========================================================================
+  // Cloud workbench: Versions pickers + live team-push notifications.
+  // All of the below is inert on desktop (`isCloud` false → no render, no fetch,
+  // no SSE). No auto-switching: a push only surfaces a banner the user opts into.
+  // ===========================================================================
+
+  // `/api/ws/<ws>/g/<game>` — the front-serving base, derived by stripping the
+  // trailing `/r/<n>` off the tenant apiBase. The latest bundle is served at
+  // `<base>/front/`; a specific bundle at `<base>/fronts/<id>/`.
+  function gameApiBase(): string | null {
+    if (!isCloud) return null;
+    const base = ctx.apiBase.replace(/\/r\/\d+$/, '');
+    return base || null;
+  }
+
+  type FrontSelection =
+    | { kind: 'latest' }
+    | { kind: 'bundle'; id: string }
+    | { kind: 'custom'; url: string };
+
+  // Split a front URL into origin + prefix (up to and including `/g/<game>/`) +
+  // remainder (`front/…` | `fronts/<id>/…`) + search/hash. Returns null when the
+  // URL is not under this game's front base (i.e. a custom dev/deploy URL).
+  function frontRootInfo(raw: string): {
+    origin: string;
+    prefixPath: string;
+    rest: string;
+    search: string;
+    hash: string;
+  } | null {
+    const base = gameApiBase();
+    if (!base) return null;
+    let u: URL;
+    try {
+      u = new URL(raw);
+    } catch {
+      return null;
+    }
+    const marker = `${base}/`;
+    const idx = u.pathname.indexOf(marker);
+    if (idx === -1) return null;
+    const cut = idx + marker.length;
+    return {
+      origin: u.origin,
+      prefixPath: u.pathname.slice(0, cut),
+      rest: u.pathname.slice(cut),
+      search: u.search,
+      hash: u.hash
+    };
+  }
+
+  function classifyFront(raw: string): FrontSelection {
+    const info = frontRootInfo(raw);
+    if (!info) return { kind: 'custom', url: raw };
+    if (info.rest.startsWith('fronts/')) {
+      const id = info.rest.slice('fronts/'.length).split('/')[0];
+      return id ? { kind: 'bundle', id } : { kind: 'custom', url: raw };
+    }
+    if (info.rest === 'front' || info.rest.startsWith('front/')) return { kind: 'latest' };
+    return { kind: 'custom', url: raw };
+  }
+
+  // Rebuild a front URL for `target`, reusing the current gameUrl's origin,
+  // prefix, sub-path (e.g. `index.html`), and query/hash where possible.
+  function buildFrontUrl(target: FrontSelection): string | null {
+    if (target.kind === 'custom') return gameUrl || null;
+    let origin: string;
+    let prefixPath: string;
+    let subRest = '';
+    let search = '';
+    let hash = '';
+    const info = frontRootInfo(gameUrl);
+    if (info) {
+      origin = info.origin;
+      prefixPath = info.prefixPath;
+      search = info.search;
+      hash = info.hash;
+      if (info.rest.startsWith('fronts/')) {
+        const after = info.rest.slice('fronts/'.length);
+        const id = after.split('/')[0];
+        subRest = after.slice(id.length + 1);
+      } else if (info.rest.startsWith('front/')) {
+        subRest = info.rest.slice('front/'.length);
+      }
+    } else {
+      // Current front is a custom URL: build the hosted path against this origin.
+      const base = gameApiBase();
+      if (!base) return null;
+      origin = window.location.origin;
+      prefixPath = `${base}/`;
+    }
+    const root = target.kind === 'latest' ? 'front/' : `fronts/${target.id}/`;
+    return `${origin}${prefixPath}${root}${subRest}${search}${hash}`;
+  }
+
+  const frontSelection = $derived(
+    isCloud ? classifyFront(gameUrl) : ({ kind: 'custom', url: gameUrl } as FrontSelection)
+  );
+  const frontIsCustom = $derived(frontSelection.kind === 'custom');
+  const frontSelectValue = $derived(
+    frontSelection.kind === 'latest'
+      ? 'latest'
+      : frontSelection.kind === 'bundle'
+        ? frontSelection.id
+        : '__custom__'
+  );
+  // The select always keeps an option for the current bundle even if the list
+  // 404'd or hasn't yet caught up with a just-pushed bundle.
+  const bundleOptions = $derived.by(() => {
+    const list = [...frontBundles];
+    if (frontSelection.kind === 'bundle' && !list.some((b) => b.id === frontSelection.id)) {
+      list.unshift({ id: frontSelection.id });
+    }
+    return list;
+  });
+
+  // Revision options always include the pinned revision so the select is never
+  // empty or mis-selected, even when the list call failed.
+  const revisionOptions = $derived.by(() => {
+    const list = [...revisions];
+    if (
+      Number.isFinite(currentRevisionNumber) &&
+      !list.some((r) => r.number === currentRevisionNumber)
+    ) {
+      list.push({ number: currentRevisionNumber, message: '(current)' });
+      list.sort((a, b) => b.number - a.number);
+    }
+    return list;
+  });
+
+  function truncateMsg(msg: string | undefined, max = 32): string {
+    const m = (msg ?? '').trim();
+    if (!m) return '(no message)';
+    return m.length > max ? `${m.slice(0, max - 1)}…` : m;
+  }
+
+  function shortBundleId(id: string): string {
+    return id.length > 8 ? id.slice(0, 8) : id;
+  }
+
+  function fmtBundleDate(iso: string | undefined): string {
+    if (!iso) return '';
+    const d = new Date(iso);
+    return Number.isNaN(d.getTime())
+      ? ''
+      : d.toLocaleString(undefined, { dateStyle: 'medium', timeStyle: 'short' });
+  }
+
+  // --- Math revision: full page reload under the swapped /r/<n>/ prefix. ---
+  function navigateToRevision(n: number) {
+    const url = new URL(window.location.href);
+    url.pathname = url.pathname.replace(
+      /(\/api\/ws\/[^/]+\/g\/[^/]+\/r\/)\d+(\/)/,
+      `$1${n}$2`
+    );
+    window.location.assign(url.toString());
+  }
+
+  function onRevisionSelectChange(e: Event) {
+    const n = Number((e.currentTarget as HTMLSelectElement).value);
+    if (!Number.isFinite(n) || n === currentRevisionNumber) return;
+    navigateToRevision(n);
+  }
+
+  // --- Front: swap in place (no reload), update iframes + the gameUrl param. ---
+  function switchFront(newBase: string) {
+    if (!newBase || newBase === gameUrl) return;
+    gameUrl = newBase;
+    // Rebuild every mounted frame's src against the new front (same session).
+    for (const f of frames) {
+      if (f.src !== null) f.src = buildGameUrlFor(f.sessionId);
+    }
+    // Reflect the change in the address bar without reloading (query param only).
+    try {
+      const pageUrl = new URL(window.location.href);
+      pageUrl.searchParams.set('gameUrl', newBase);
+      history.replaceState(history.state, '', pageUrl.toString());
+    } catch {
+      // replaceState can throw in exotic embeddings; the in-place switch still works.
+    }
+  }
+
+  function onFrontSelectChange(e: Event) {
+    const v = (e.currentTarget as HTMLSelectElement).value;
+    if (v === '__custom__') return; // read-only display of the current custom URL
+    const target: FrontSelection = v === 'latest' ? { kind: 'latest' } : { kind: 'bundle', id: v };
+    const url = buildFrontUrl(target);
+    if (url) switchFront(url);
+  }
+
+  function useFrontBanner() {
+    if (!frontBanner) return;
+    const url = buildFrontUrl({ kind: 'bundle', id: frontBanner.bundleId });
+    if (url) switchFront(url);
+    frontBanner = null;
+  }
+
+  // --- Data loads (silent; degrade to empty / current-only when a call fails). ---
+  async function loadRevisions() {
+    if (!workbench) return;
+    try {
+      revisions = await workbench.listRevisions(ctx.gameSlug);
+    } catch {
+      // Endpoint exists today; keep the picker usable (current-only) otherwise.
+    }
+  }
+
+  async function loadFrontBundles() {
+    if (!workbench) return;
+    try {
+      frontBundles = await workbench.listFrontBundles(ctx.gameSlug);
+    } catch {
+      // 404 (not deployed) or any failure → only Latest/Custom in the picker.
+    }
+  }
+
+  // --- Workspace SSE: connect / capped-backoff reconnect / teardown. ---
+  const SSE_BACKOFF_BASE_MS = 1000;
+  const SSE_BACKOFF_CAP_MS = 30000;
+  let workspaceEs: EventSource | null = null;
+  let sseReconnectTimer: ReturnType<typeof setTimeout> | null = null;
+  let sseAttempt = 0;
+  let sseTornDown = false;
+
+  function onRevisionPushed(ev: Event) {
+    try {
+      const d = JSON.parse((ev as MessageEvent).data) as { game?: string; number?: number };
+      if (d.game !== ctx.gameSlug || typeof d.number !== 'number') return;
+      // Only surface pushes newer than what we're pinned to; keep the newest.
+      if (Number.isFinite(currentRevisionNumber) && d.number <= currentRevisionNumber) return;
+      if (!revisionBanner || d.number > revisionBanner.number) revisionBanner = { number: d.number };
+      void loadRevisions(); // keep the picker in sync so "Open" has the option
+    } catch {
+      // ignore malformed event
+    }
+  }
+
+  function onFrontPushed(ev: Event) {
+    try {
+      const d = JSON.parse((ev as MessageEvent).data) as { game?: string; bundle_id?: string };
+      if (d.game !== ctx.gameSlug || !d.bundle_id) return;
+      frontBanner = { bundleId: d.bundle_id }; // newest replaces
+      void loadFrontBundles(); // surface the new bundle in the picker
+    } catch {
+      // ignore malformed event
+    }
+  }
+
+  function connectWorkspaceSse() {
+    if (!workbench || sseTornDown) return;
+    const es = new EventSource(workbench.eventsUrl(), { withCredentials: true });
+    workspaceEs = es;
+    es.onopen = () => {
+      sseAttempt = 0; // a healthy connection resets the backoff
+    };
+    es.addEventListener('revision_pushed', onRevisionPushed);
+    es.addEventListener('front_pushed', onFrontPushed);
+    es.onerror = () => {
+      // Transient blips leave readyState CONNECTING — let EventSource auto-retry.
+      // A hard failure (server closed, 404/handshake reject) goes to CLOSED; then
+      // we own the retry cadence with capped exponential backoff.
+      if (es.readyState === EventSource.CLOSED) {
+        es.close();
+        if (workspaceEs === es) workspaceEs = null;
+        scheduleSseReconnect();
+      }
+    };
+  }
+
+  function scheduleSseReconnect() {
+    if (sseTornDown || sseReconnectTimer) return;
+    const delay = Math.min(SSE_BACKOFF_CAP_MS, SSE_BACKOFF_BASE_MS * 2 ** sseAttempt);
+    sseAttempt = Math.min(sseAttempt + 1, 8);
+    sseReconnectTimer = setTimeout(() => {
+      sseReconnectTimer = null;
+      connectWorkspaceSse();
+    }, delay + Math.random() * 400);
+  }
+
+  function teardownWorkspaceSse() {
+    sseTornDown = true;
+    if (sseReconnectTimer) {
+      clearTimeout(sseReconnectTimer);
+      sseReconnectTimer = null;
+    }
+    if (workspaceEs) {
+      workspaceEs.close();
+      workspaceEs = null;
+    }
+  }
+
+  onMount(() => {
+    if (!isCloud) return; // desktop context: never subscribe, never fetch.
+    void loadRevisions();
+    void loadFrontBundles();
+    connectWorkspaceSse();
+  });
+
+  onDestroy(teardownWorkspaceSse);
 
   function formatAmount(microUnits: number): string {
     return (microUnits / API_MULTIPLIER).toFixed(2);
@@ -842,6 +1164,65 @@
     {:else}
       <!-- Scrollable sections -->
       <div class="flex-1 space-y-5 overflow-y-auto px-5 py-4">
+      <!-- ========== VERSIONS (cloud only) ========== -->
+      {#if isCloud}
+      <Card.Root>
+        <Card.Header class="pb-3">
+          <Card.Title class="text-sm font-semibold uppercase tracking-wider text-muted-foreground">
+            Versions
+          </Card.Title>
+        </Card.Header>
+        <Card.Content class="space-y-3">
+          <!-- Math revision -->
+          <div class="space-y-1.5">
+            <Label for="revision-select" class="text-xs uppercase tracking-wider text-muted-foreground">
+              Math revision
+            </Label>
+            <select
+              id="revision-select"
+              value={String(currentRevisionNumber)}
+              onchange={onRevisionSelectChange}
+              class="border-input bg-background ring-offset-background focus-visible:ring-ring flex h-9 w-full rounded-md border px-2 py-1 font-mono text-sm focus-visible:ring-2 focus-visible:ring-offset-2 focus-visible:outline-none"
+            >
+              {#each revisionOptions as r (r.number)}
+                <option value={String(r.number)}>rev {r.number} — {truncateMsg(r.message)}</option>
+              {/each}
+            </select>
+            <p class="text-xs text-muted-foreground">Switching reloads the page for that revision.</p>
+          </div>
+
+          <!-- Front bundle -->
+          <div class="space-y-1.5">
+            <Label for="front-select" class="text-xs uppercase tracking-wider text-muted-foreground">
+              Front
+            </Label>
+            <select
+              id="front-select"
+              value={frontSelectValue}
+              onchange={onFrontSelectChange}
+              class="border-input bg-background ring-offset-background focus-visible:ring-ring flex h-9 w-full rounded-md border px-2 py-1 font-mono text-sm focus-visible:ring-2 focus-visible:ring-offset-2 focus-visible:outline-none"
+            >
+              <option value="latest">Latest bundle</option>
+              {#each bundleOptions as b (b.id)}
+                <option value={b.id}>
+                  {shortBundleId(b.id)}{b.created_at ? ` — ${fmtBundleDate(b.created_at)}` : ''}
+                </option>
+              {/each}
+              {#if frontIsCustom}
+                <option value="__custom__">Custom URL…</option>
+              {/if}
+            </select>
+            {#if frontIsCustom}
+              <div class="rounded-md border bg-card/50 px-2 py-1.5">
+                <p class="text-xs uppercase tracking-wider text-muted-foreground">Custom URL</p>
+                <p class="mt-0.5 break-all font-mono text-xs text-foreground">{gameUrl}</p>
+              </div>
+            {/if}
+          </div>
+        </Card.Content>
+      </Card.Root>
+      {/if}
+
       <!-- ========== SESSION ========== -->
       <Card.Root>
         <Card.Header class="pb-3">
@@ -1347,6 +1728,59 @@
 
   <!-- Frames area -->
   <main class="flex-1 overflow-auto p-6">
+    <!-- Live team-push banners: pinned above the frames, never auto-switching. -->
+    {#if isCloud && (revisionBanner || frontBanner)}
+      <div class="pointer-events-none sticky top-0 z-20 mb-4 flex flex-col gap-2">
+        {#if revisionBanner}
+          <div class="pointer-events-auto flex items-center gap-3 rounded-md border border-sky-500/40 bg-sky-500/10 px-3 py-2 text-sm shadow-sm backdrop-blur">
+            <Badge variant="secondary" class="bg-sky-500/20 text-sky-200">New</Badge>
+            <span class="font-medium">Revision {revisionBanner.number} pushed</span>
+            <div class="ml-auto flex items-center gap-1.5">
+              <Button
+                size="sm"
+                class="h-7 bg-sky-500 text-zinc-950 hover:bg-sky-400"
+                onclick={() => revisionBanner && navigateToRevision(revisionBanner.number)}
+              >
+                Open
+              </Button>
+              <Button
+                variant="ghost"
+                size="icon"
+                class="h-7 w-7"
+                onclick={() => (revisionBanner = null)}
+                aria-label="Dismiss revision notification"
+              >
+                <XIcon class="h-4 w-4" />
+              </Button>
+            </div>
+          </div>
+        {/if}
+        {#if frontBanner}
+          <div class="pointer-events-auto flex items-center gap-3 rounded-md border border-emerald-500/40 bg-emerald-500/10 px-3 py-2 text-sm shadow-sm backdrop-blur">
+            <Badge variant="secondary" class="bg-emerald-500/20 text-emerald-200">New</Badge>
+            <span class="font-medium">New front bundle pushed</span>
+            <div class="ml-auto flex items-center gap-1.5">
+              <Button
+                size="sm"
+                class="h-7 bg-emerald-500 text-zinc-950 hover:bg-emerald-400"
+                onclick={useFrontBanner}
+              >
+                Use it
+              </Button>
+              <Button
+                variant="ghost"
+                size="icon"
+                class="h-7 w-7"
+                onclick={() => (frontBanner = null)}
+                aria-label="Dismiss front bundle notification"
+              >
+                <XIcon class="h-4 w-4" />
+              </Button>
+            </div>
+          </div>
+        {/if}
+      </div>
+    {/if}
     <div class="flex flex-wrap gap-6">
       {#each frames as frame (frame.res.id)}
         <div class="flex flex-col">
