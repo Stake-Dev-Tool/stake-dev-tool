@@ -19,8 +19,8 @@ use chrono::{DateTime, Utc};
 use futures_util::StreamExt;
 use object_store::{ObjectStoreExt, WriteMultipart};
 use protocol::{
-    BlobUploaded, ChangedFile, CheckRequest, CheckResponse, CreateRevisionRequest, ErrorBody,
-    FileDiff, FileEntry, GameSummary, GamesResponse, MissingBlobsResponse, ModeStats,
+    BlobUploaded, ChangedFile, CheckRequest, CheckResponse, CreateRevisionRequest, DeletionResult,
+    ErrorBody, FileDiff, FileEntry, GameSummary, GamesResponse, MissingBlobsResponse, ModeStats,
     ModeStatsDiff, RevisionAnalysis, RevisionDetail, RevisionDiff, RevisionStats, RevisionSummary,
     RevisionsResponse, StatsDiff, StatsStatus,
 };
@@ -30,7 +30,7 @@ use sqlx::PgPool;
 use uuid::Uuid;
 
 use crate::AppState;
-use crate::api::workspaces::{WorkspaceRow, require_membership, workspace_by_slug};
+use crate::api::workspaces::{WorkspaceRow, require_admin, require_membership, workspace_by_slug};
 use crate::auth::extract::CurrentUser;
 use crate::blobs;
 use crate::error::{ApiError, ApiResult};
@@ -161,6 +161,20 @@ async fn authorize_write(
 ) -> ApiResult<WorkspaceRow> {
     let workspace = authorize_read(state, user, slug).await?;
     user.require_scope("push:math")?;
+    Ok(workspace)
+}
+
+/// Resolve the workspace, require membership, then require owner/admin (revision
+/// deletion). Role is checked after membership so a non-member 404s rather than
+/// leaking existence via a 403.
+async fn authorize_admin(
+    state: &AppState,
+    user: &CurrentUser,
+    slug: &str,
+) -> ApiResult<WorkspaceRow> {
+    let workspace = workspace_by_slug(&state.pool, slug).await?;
+    let role = require_membership(&state.pool, workspace.id, user.user_id).await?;
+    require_admin(role)?;
     Ok(workspace)
 }
 
@@ -330,6 +344,25 @@ pub async fn put_blob(
         ));
     }
     writer.finish().await.map_err(ApiError::internal)?;
+
+    // Storage quota (authoritative): the pre-check above only fires when the
+    // client declared a Content-Length. Re-check against the bytes actually read
+    // so a chunked upload (no header) or an under-declared length can't slip a
+    // blob past the cap. On overflow, delete the object we just wrote — it is not
+    // yet recorded in `blobs`, so leaving it would be an unreferenced orphan the
+    // GC never reaches — and reject with 413.
+    if let Some(max) = limits.max_storage_bytes {
+        let current =
+            crate::billing::plan::storage_bytes_live(&state.pool, workspace.id).await? as u64;
+        if current.saturating_add(total) > max {
+            state.store.delete(&key).await.ok();
+            return Err(ApiError::new(
+                StatusCode::PAYLOAD_TOO_LARGE,
+                "storage_quota_exceeded",
+                "this upload would exceed the workspace storage quota; upgrade the plan",
+            ));
+        }
+    }
 
     // Record the blob only after the store write fully succeeds. ON CONFLICT
     // makes concurrent identical uploads idempotent.
@@ -679,6 +712,76 @@ pub async fn revision_detail(
     let game_id = game_id_by_slug(&state.pool, workspace.id, &game_slug).await?;
     let revision_id = revision_id_by_number(&state.pool, game_id, number).await?;
     Ok(Json(load_revision_detail(&state.pool, revision_id).await?))
+}
+
+// ---------------------------------------------------------------------------
+// deletion (content lifecycle)
+// ---------------------------------------------------------------------------
+
+/// `DELETE .../revisions/:number` — owner/admin only. Deleting any revision is
+/// allowed, including the head (the head simply becomes the next-highest number
+/// via `MAX(number)`); the only guard is that no share link may pin this exact
+/// revision number. On success the revision and its files/stats are dropped in a
+/// transaction, then the workspace's now-unreferenced blobs are GC'd (bytes
+/// deduped with another revision or a front bundle survive), and the freed store
+/// objects + the materialized cache dir are removed best-effort.
+pub async fn delete_revision(
+    State(state): State<AppState>,
+    user: CurrentUser,
+    Path((slug, game_slug, number)): Path<(String, String, i32)>,
+) -> ApiResult<Json<DeletionResult>> {
+    let workspace = authorize_admin(&state, &user, &slug).await?;
+    let game_id = game_id_by_slug(&state.pool, workspace.id, &game_slug).await?;
+    let revision_id = revision_id_by_number(&state.pool, game_id, number).await?;
+
+    // Guard: a share link pinning this exact revision number would break.
+    let pinned: Vec<String> = sqlx::query_scalar(
+        "SELECT slug FROM share_links WHERE game_id = $1 AND revision_number = $2 ORDER BY slug",
+    )
+    .bind(game_id)
+    .bind(number)
+    .fetch_all(&state.pool)
+    .await?;
+    if !pinned.is_empty() {
+        return Err(ApiError::conflict(
+            "revision_pinned",
+            format!(
+                "revision {number} is pinned by {} share link(s): {}",
+                pinned.len(),
+                pinned.join(", ")
+            ),
+        ));
+    }
+
+    // Delete the revision (cascades revision_files + revision_stats), then GC the
+    // workspace's orphaned blobs within the same tx so the orphan set reflects it.
+    let mut tx = state.pool.begin().await?;
+    sqlx::query("DELETE FROM revisions WHERE id = $1")
+        .bind(revision_id)
+        .execute(&mut *tx)
+        .await?;
+    let freed = blobs::gc_orphaned_blobs(&mut tx, workspace.id).await?;
+    tx.commit().await?;
+
+    // Post-commit best-effort cleanup: store bytes + the materialized cache dir.
+    blobs::delete_blob_objects(&state.store, workspace.id, &freed).await;
+    let cache_dir =
+        crate::lgs_host::revision_cache_dir(&state.config, workspace.id, game_id, number);
+    if let Err(e) = tokio::fs::remove_dir_all(&cache_dir).await
+        && e.kind() != std::io::ErrorKind::NotFound
+    {
+        tracing::warn!(
+            error = %e,
+            dir = %cache_dir.display(),
+            "revision delete: cache dir cleanup failed (LRU will evict it)"
+        );
+    }
+
+    let freed_bytes = freed.iter().map(|(_, size)| *size).sum();
+    Ok(Json(DeletionResult {
+        freed_bytes,
+        freed_blobs: freed.len() as i64,
+    }))
 }
 
 #[derive(sqlx::FromRow)]

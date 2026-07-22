@@ -20,6 +20,7 @@
     isUpgradeError,
     isValidShareSlug,
     type CreateShareInput,
+    type FrontBundleSummary,
     type Role,
     type RevisionSummary,
     type ShareLink
@@ -106,6 +107,89 @@
       sharesError = errorText(e);
     } finally {
       loadingShares = false;
+    }
+  }
+
+  // --- Manage bundles (owner/admin) -------------------------------------------
+  // A compact, lazily-loaded expandable: the game's front bundles with a Delete
+  // that frees storage. Loaded on first expand; reloads when the game changes.
+  let showBundles = $state(false);
+  let bundles = $state<FrontBundleSummary[]>([]);
+  let loadingBundles = $state(false);
+  let bundlesError = $state('');
+  let bundlesLoaded = $state(false);
+  let bundleBusyId = $state<string | null>(null);
+
+  // Collapse + drop the cache when the game/workspace changes so a stale list
+  // never flashes for a different game.
+  $effect(() => {
+    void slug;
+    void game;
+    showBundles = false;
+    bundlesLoaded = false;
+    bundles = [];
+    bundlesError = '';
+  });
+
+  async function toggleBundles() {
+    showBundles = !showBundles;
+    if (showBundles && !bundlesLoaded) await loadBundles();
+  }
+
+  async function loadBundles() {
+    loadingBundles = true;
+    bundlesError = '';
+    try {
+      bundles = await api.games.frontBundles(slug, game);
+      bundlesLoaded = true;
+    } catch (e) {
+      bundlesError = errorText(e);
+    } finally {
+      loadingBundles = false;
+    }
+  }
+
+  /** Friendly copy for a bundle-delete failure (guards surface their own text). */
+  function bundleErrorMessage(e: unknown): string {
+    if (e instanceof ApiError) {
+      switch (e.code) {
+        case 'bundle_pinned':
+        case 'last_bundle':
+          return e.message; // lists the pinning share slugs / explains the guard
+        case 'bundle_not_found':
+          return 'That bundle no longer exists — refresh the list.';
+        case 'network_error':
+          return 'Could not reach the server. Check your connection and try again.';
+      }
+      return e.message || 'The bundle could not be deleted.';
+    }
+    return errorText(e);
+  }
+
+  async function deleteBundle(b: FrontBundleSummary) {
+    if (
+      !confirm(
+        `Delete this front bundle? This is permanent and frees ${humanSize(b.total_size)} of storage that no share or revision still shares.`
+      )
+    ) {
+      return;
+    }
+    bundlesError = '';
+    bundleBusyId = b.id;
+    try {
+      const res = await api.games.deleteFrontBundle(slug, game, b.id);
+      bundles = bundles.filter((x) => x.id !== b.id);
+      // The next bundle in the (newest-first) list is now the latest one served.
+      if (b.is_latest && bundles.length > 0) bundles[0] = { ...bundles[0], is_latest: true };
+      toast.success(
+        res.freed_blobs > 0
+          ? `Bundle deleted · freed ${humanSize(res.freed_bytes)}.`
+          : 'Bundle deleted · no storage freed (its files are still shared).'
+      );
+    } catch (e) {
+      bundlesError = bundleErrorMessage(e);
+    } finally {
+      bundleBusyId = null;
     }
   }
 
@@ -279,6 +363,62 @@
       Push or update it from the Revisions tab with the Push button. Shares serve the latest bundle.
     </span>
   </Card>
+
+  <!-- Manage bundles (owner/admin): compact, lazily-loaded expandable -------->
+  {#if canManage}
+    <div class="mb-4">
+      <button
+        type="button"
+        class="flex w-full items-center gap-2 text-left text-sm text-muted transition hover:text-text"
+        aria-expanded={showBundles}
+        onclick={toggleBundles}
+      >
+        <span class="text-xs text-faint">{showBundles ? '▾' : '▸'}</span>
+        Manage bundles
+        <span class="text-xs text-faint">— delete old builds to free storage</span>
+      </button>
+
+      {#if showBundles}
+        <div class="mt-2">
+          {#if loadingBundles && bundles.length === 0}
+            <Card class="p-4"><Skeleton /></Card>
+          {:else if bundlesError}
+            <Card class="p-4">
+              <p class="text-sm text-danger">{bundlesError}</p>
+              <Button variant="outline" size="sm" class="mt-3" onclick={loadBundles}>Retry</Button>
+            </Card>
+          {:else if bundles.length === 0}
+            <Card class="p-4">
+              <p class="text-sm text-muted">No front bundles uploaded for this game yet.</p>
+            </Card>
+          {:else}
+            <Card class="divide-y divide-border/60 p-0">
+              {#each bundles as b (b.id)}
+                <div class="flex flex-wrap items-center gap-x-3 gap-y-1.5 px-4 py-3">
+                  <span class="font-mono-tab text-xs text-muted">{shortId(b.id)}</span>
+                  {#if b.is_latest}
+                    <Badge tone="accent">latest</Badge>
+                  {/if}
+                  <span class="text-xs text-faint">created <Time iso={b.created_at} /></span>
+                  <span class="text-xs text-muted">{b.files_count} files · {humanSize(b.total_size)}</span>
+                  <div class="ml-auto">
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      disabled={bundleBusyId === b.id}
+                      onclick={() => deleteBundle(b)}
+                    >
+                      Delete
+                    </Button>
+                  </div>
+                </div>
+              {/each}
+            </Card>
+          {/if}
+        </div>
+      {/if}
+    </div>
+  {/if}
 
   <!-- 2) Create share (owner/admin) ----------------------------------------->
   {#if canManage}

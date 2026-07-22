@@ -15,7 +15,7 @@ use std::sync::LazyLock;
 use axum::body::Body;
 use axum::http::{Method, Request, StatusCode};
 use serde_json::{Value, json};
-use server::config::{Config, PolarConfig, PolarServer, StorageConfig};
+use server::config::{Config, StorageConfig, StripeConfig};
 use server::{AppState, db, http, storage};
 use sha2::{Digest, Sha256};
 use tokio::sync::Mutex;
@@ -51,20 +51,20 @@ struct Ctx {
 }
 
 /// Billing-enabled config so plan resolution runs (trial/override) instead of
-/// short-circuiting to unlimited. The secret is a placeholder — no webhook is hit.
-fn polar_config() -> PolarConfig {
-    PolarConfig {
-        access_token: "polar_pat_test".to_string(),
+/// short-circuiting to unlimited. The keys are placeholders — no Stripe call is hit.
+fn stripe_config() -> StripeConfig {
+    StripeConfig {
+        secret_key: "sk_test_admin".to_string(),
         webhook_secret: "whsec_test".to_string(),
-        product_solo_monthly: "prod_solo_m".to_string(),
-        product_solo_yearly: "prod_solo_y".to_string(),
-        product_team_monthly: "prod_team_m".to_string(),
-        product_team_yearly: "prod_team_y".to_string(),
-        server: PolarServer::Production,
+        price_solo_monthly: "price_solo_m".to_string(),
+        price_solo_yearly: "price_solo_y".to_string(),
+        price_team_monthly: "price_team_m".to_string(),
+        price_team_yearly: "price_team_y".to_string(),
+        price_storage: "price_storage".to_string(),
     }
 }
 
-async fn setup(admin_emails: Vec<String>, polar: Option<PolarConfig>) -> Option<Ctx> {
+async fn setup(admin_emails: Vec<String>, stripe: Option<StripeConfig>) -> Option<Ctx> {
     let database_url = std::env::var("TEST_DATABASE_URL").ok()?;
     let tmp = tempfile::tempdir().unwrap();
     let config = Config {
@@ -76,7 +76,7 @@ async fn setup(admin_emails: Vec<String>, polar: Option<PolarConfig>) -> Option<
         cookie_secure: false,
         public_url: Some("https://app.example.com".to_string()),
         github: None,
-        polar,
+        stripe,
         web_dir: None,
         storage_max_blob_bytes: 8_589_934_592,
         server_math_cache_bytes: 21_474_836_480,
@@ -525,7 +525,7 @@ async fn overview_counts_move_with_new_data() {
 #[tokio::test]
 async fn workspace_list_shows_storage_and_resolved_plan() {
     let email = unique_email();
-    // No Polar → every plan resolves to "unlimited".
+    // No Stripe → every plan resolves to "unlimited".
     let Some(ctx) = setup(vec![email.clone()], None).await else {
         return;
     };
@@ -552,7 +552,7 @@ async fn workspace_list_shows_storage_and_resolved_plan() {
 #[tokio::test]
 async fn override_grant_flips_resolved_plan() {
     let email = unique_email();
-    let Some(ctx) = setup(vec![email.clone()], Some(polar_config())).await else {
+    let Some(ctx) = setup(vec![email.clone()], Some(stripe_config())).await else {
         return;
     };
     let mut admin = register(&ctx.state, &email, "Admin").await;
@@ -615,7 +615,7 @@ async fn override_grant_flips_resolved_plan() {
 #[tokio::test]
 async fn expired_override_is_ignored_but_still_listed() {
     let email = unique_email();
-    let Some(ctx) = setup(vec![email.clone()], Some(polar_config())).await else {
+    let Some(ctx) = setup(vec![email.clone()], Some(stripe_config())).await else {
         return;
     };
     let mut admin = register(&ctx.state, &email, "Admin").await;
@@ -659,7 +659,7 @@ async fn expired_override_is_ignored_but_still_listed() {
 #[tokio::test]
 async fn override_on_unknown_workspace_is_404() {
     let email = unique_email();
-    let Some(ctx) = setup(vec![email.clone()], Some(polar_config())).await else {
+    let Some(ctx) = setup(vec![email.clone()], Some(stripe_config())).await else {
         return;
     };
     let mut admin = register(&ctx.state, &email, "Admin").await;

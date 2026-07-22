@@ -11,6 +11,7 @@
 
 use serde::{Deserialize, Serialize};
 use ts_rs::TS;
+use uuid::Uuid;
 
 /// The two document kinds. Serialized in `snake_case` to match the database
 /// `CHECK` constraint values and the `?kind=` query parameter.
@@ -138,4 +139,14 @@ pub struct DocumentEvent {
 pub struct RevisionPushedEvent {
     pub game: String,
     pub number: i32,
+}
+
+/// SSE `front_pushed` event: a new front bundle committed for a game (hooked into
+/// the M5 front-bundle commit path). The client re-probes the game's front /
+/// bundle listing after the nudge.
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "protocol/")]
+pub struct FrontPushedEvent {
+    pub game: String,
+    pub bundle_id: Uuid,
 }

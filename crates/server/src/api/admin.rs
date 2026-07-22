@@ -156,9 +156,44 @@ async fn overview(
         storage_bytes: totals.5,
         sessions_total: totals.6,
         spins_total: totals.7,
+        host: host_stats(&state),
         signups_30d,
         pushes_30d,
     }))
+}
+
+/// Probe the host's capacity: the disk backing the blob storage (longest
+/// mount-point prefix match; falls back to the largest disk) and memory.
+/// Best-effort — `None` on any failure so the overview never breaks.
+fn host_stats(state: &AppState) -> Option<protocol::HostStats> {
+    use sysinfo::{Disks, System};
+
+    let storage_root = match &state.config.storage {
+        crate::config::StorageConfig::Fs { root } => {
+            root.canonicalize().unwrap_or_else(|_| root.clone())
+        }
+        // S3-backed instances still report the local disk (the revision cache
+        // lives there); probe the current dir's filesystem.
+        crate::config::StorageConfig::S3 { .. } => std::env::current_dir().ok()?,
+    };
+
+    let disks = Disks::new_with_refreshed_list();
+    let disk = disks
+        .list()
+        .iter()
+        .filter(|d| storage_root.starts_with(d.mount_point()))
+        .max_by_key(|d| d.mount_point().as_os_str().len())
+        .or_else(|| disks.list().iter().max_by_key(|d| d.total_space()))?;
+
+    let mut sys = System::new();
+    sys.refresh_memory();
+
+    Some(protocol::HostStats {
+        disk_total_bytes: disk.total_space(),
+        disk_free_bytes: disk.available_space(),
+        mem_total_bytes: sys.total_memory(),
+        mem_used_bytes: sys.used_memory(),
+    })
 }
 
 /// Per-day `count(*)` over the last 30 days from `<table>.created_at`, with

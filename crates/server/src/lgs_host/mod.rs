@@ -95,6 +95,27 @@ fn host_for(state: &AppState) -> Arc<LgsHost> {
         .clone()
 }
 
+/// The on-disk materialized cache directory for a revision, laid out exactly the
+/// way [`materialize`] writes it (`<cache_root>/rev/<workspace>/<game>/<number>`).
+///
+/// Content-lifecycle deletion uses this to best-effort evict a just-deleted
+/// revision's cache. If the directory is momentarily held open (a concurrent
+/// decompression on Windows) the delete is skipped — harmless, since the LRU
+/// evicts it eventually and a request for the deleted revision 404s before it can
+/// ever be re-materialized.
+pub fn revision_cache_dir(
+    config: &Config,
+    workspace_id: Uuid,
+    game_id: Uuid,
+    number: i32,
+) -> PathBuf {
+    cache_root_for(config)
+        .join("rev")
+        .join(workspace_id.to_string())
+        .join(game_id.to_string())
+        .join(number.to_string())
+}
+
 /// `<STORAGE_FS_ROOT>/../cache` for the fs backend; `./data/cache` for s3 (no
 /// local blob root to hang the cache off).
 fn cache_root_for(config: &Config) -> PathBuf {

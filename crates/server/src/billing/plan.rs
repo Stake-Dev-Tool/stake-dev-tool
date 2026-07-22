@@ -82,17 +82,28 @@ impl Plan {
     pub fn writes_allowed(self) -> bool {
         !matches!(self, Plan::Expired)
     }
+
+    /// Whether this is a paid (or comped) tier. The free trial tiers (`Trial`,
+    /// `Expired`) are not paid; `Unlimited` — self-host, or an instance-admin
+    /// comp on a billing-enabled instance — counts as paid. Used to cap free
+    /// users to a single workspace (a fresh workspace always starts on `Trial`,
+    /// so owning one already blocks creating another).
+    pub fn is_paid(self) -> bool {
+        matches!(self, Plan::Unlimited | Plan::Solo | Plan::Team)
+    }
 }
 
 /// A workspace's subscription row, as stored by the webhook.
 #[derive(Debug, Clone, sqlx::FromRow)]
 pub struct SubscriptionRow {
-    pub polar_subscription_id: String,
-    pub polar_customer_id: Option<String>,
+    pub provider_subscription_id: String,
+    pub provider_customer_id: Option<String>,
     pub plan: String,
     pub interval: String,
     pub status: String,
     pub current_period_end: Option<DateTime<Utc>>,
+    /// Storage add-on units (one unit = +10 GiB). `0` when no add-on is active.
+    pub extra_storage_units: i64,
 }
 
 impl SubscriptionRow {
@@ -113,13 +124,28 @@ pub async fn load_subscription(
     workspace_id: Uuid,
 ) -> ApiResult<Option<SubscriptionRow>> {
     Ok(sqlx::query_as::<_, SubscriptionRow>(
-        "SELECT polar_subscription_id, polar_customer_id, plan, \"interval\", status, \
-                current_period_end \
+        // `extra_storage_units` is an INTEGER column; cast to bigint so it decodes
+        // into the row's `i64` (sqlx will not coerce int4 → i64 on its own).
+        "SELECT provider_subscription_id, provider_customer_id, plan, \"interval\", status, \
+                current_period_end, extra_storage_units::bigint AS extra_storage_units \
          FROM subscriptions WHERE workspace_id = $1",
     )
     .bind(workspace_id)
     .fetch_optional(pool)
     .await?)
+}
+
+/// The workspace's active storage add-on units (one unit = +10 GiB), or `0` when
+/// there is no subscription row. Read on the enforcement path, so it queries the
+/// column directly rather than materializing the whole [`SubscriptionRow`].
+pub async fn extra_storage_units(pool: &PgPool, workspace_id: Uuid) -> ApiResult<i64> {
+    Ok(sqlx::query_scalar::<_, i64>(
+        "SELECT COALESCE(extra_storage_units, 0)::bigint FROM subscriptions WHERE workspace_id = $1",
+    )
+    .bind(workspace_id)
+    .fetch_optional(pool)
+    .await?
+    .unwrap_or(0))
 }
 
 /// Resolves a workspace's effective plan. Billing disabled → `Unlimited` (the
@@ -129,7 +155,7 @@ pub async fn load_subscription(
 /// grants its plan; failing that, the workspace is on the trial (`Trial` while
 /// within 14 days of creation, else `Expired`).
 pub async fn plan_for(state: &AppState, workspace_id: Uuid) -> ApiResult<Plan> {
-    if state.config.polar.is_none() {
+    if state.config.stripe.is_none() {
         return Ok(Plan::Unlimited);
     }
     // An instance operator can comp a workspace a plan via `plan_overrides`; a
@@ -192,9 +218,16 @@ fn resolve_plan(
     }
 }
 
-/// The plan a subscription currently grants, or `None` if it grants nothing
-/// (canceled/revoked/incomplete, or `past_due` past its 7-day grace).
+/// The plan a subscription currently grants, or `None` if it grants nothing.
+/// `storage_only` is the sentinel for a storage-add-on row with no plan (its
+/// `plan` column is a placeholder `'solo'`), so it never grants a plan; likewise
+/// Stripe's terminal statuses (canceled/unpaid/incomplete_expired/incomplete) and
+/// a `past_due` past its 7-day grace fall through to the trial/expired resolution.
 fn active_plan(sub: &SubscriptionRow, now: DateTime<Utc>) -> Option<Plan> {
+    // A storage-only row carries a placeholder plan; it must not grant a plan.
+    if sub.status == "storage_only" {
+        return None;
+    }
     let plan = match sub.plan.as_str() {
         "solo" => Plan::Solo,
         "team" => Plan::Team,
@@ -309,12 +342,13 @@ mod tests {
 
     fn sub(plan: &str, status: &str, period_end: Option<DateTime<Utc>>) -> SubscriptionRow {
         SubscriptionRow {
-            polar_subscription_id: "sub_x".into(),
-            polar_customer_id: None,
+            provider_subscription_id: "sub_x".into(),
+            provider_customer_id: None,
             plan: plan.into(),
             interval: "monthly".into(),
             status: status.into(),
             current_period_end: period_end,
+            extra_storage_units: 0,
         }
     }
 
@@ -391,5 +425,46 @@ mod tests {
         // past_due with no known period end gets no grace.
         let unknown = sub("solo", "past_due", None);
         assert_eq!(resolve_plan(Some(&unknown), old, now), Plan::Expired);
+    }
+
+    #[test]
+    fn storage_only_never_grants_a_plan() {
+        let now = Utc::now();
+        let fresh = now - Duration::days(1);
+        let old = now - Duration::days(30);
+        // Placeholder plan='solo' with the storage_only sentinel status: the
+        // workspace falls through to the trial window, not Solo.
+        let storage = sub("solo", "storage_only", None);
+        assert_eq!(resolve_plan(Some(&storage), fresh, now), Plan::Trial);
+        assert_eq!(resolve_plan(Some(&storage), old, now), Plan::Expired);
+    }
+
+    #[test]
+    fn extra_storage_units_add_ten_gib_each_to_a_capped_plan() {
+        // Solo's 10 GiB cap + 3 units (30 GiB) = 40 GiB.
+        let limits = Plan::Solo.limits().with_extra_storage_units(3);
+        assert_eq!(limits.max_storage_bytes, Some(40 * GIB));
+        // Other caps are untouched by the storage add-on.
+        assert_eq!(limits.max_members, Some(1));
+
+        // Unlimited storage stays unlimited (None), even with units.
+        let unlimited = Plan::Unlimited.limits().with_extra_storage_units(5);
+        assert_eq!(unlimited.max_storage_bytes, None);
+
+        // Zero / negative unit counts are a no-op.
+        assert_eq!(
+            Plan::Team
+                .limits()
+                .with_extra_storage_units(0)
+                .max_storage_bytes,
+            Some(50 * GIB)
+        );
+        assert_eq!(
+            Plan::Team
+                .limits()
+                .with_extra_storage_units(-2)
+                .max_storage_bytes,
+            Some(50 * GIB)
+        );
     }
 }

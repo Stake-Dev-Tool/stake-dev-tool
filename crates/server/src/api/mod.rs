@@ -92,7 +92,7 @@ pub fn router(max_blob_bytes: usize) -> Router<AppState> {
         )
         .route(
             "/workspaces/:slug/games/:game/revisions/:number",
-            get(math::revision_detail),
+            get(math::revision_detail).delete(math::delete_revision),
         )
         .route(
             "/workspaces/:slug/games/:game/revisions/:number/diff/:other",

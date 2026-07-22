@@ -331,3 +331,14 @@ pub struct RevisionDiff {
     pub files: FileDiff,
     pub stats: StatsDiff,
 }
+
+/// Result of a content-lifecycle deletion (a revision or a front bundle): how
+/// much storage the blob GC actually reclaimed. `freed_blobs` counts the blob
+/// rows removed; `freed_bytes` sums their sizes. Both are 0 when every referenced
+/// blob is still shared by another revision or bundle.
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "protocol/")]
+pub struct DeletionResult {
+    pub freed_bytes: i64,
+    pub freed_blobs: i64,
+}

@@ -23,6 +23,17 @@ pub struct AdminMe {
 }
 
 /// One day's bucket in a 30-day series (`signups_30d`, `pushes_30d`). `date` is a
+/// Host machine capacity for the admin overview (scale planning): the disk
+/// backing the blob storage and the box's memory.
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "protocol/")]
+pub struct HostStats {
+    pub disk_total_bytes: u64,
+    pub disk_free_bytes: u64,
+    pub mem_total_bytes: u64,
+    pub mem_used_bytes: u64,
+}
+
 /// `YYYY-MM-DD` calendar day; empty days are present with `count: 0`.
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
 #[ts(export, export_to = "protocol/")]
@@ -46,6 +57,10 @@ pub struct AdminOverview {
     pub sessions_total: i64,
     /// Lifetime spins summed over every share link's counter.
     pub spins_total: i64,
+    /// Host machine capacity, for scale planning. `None` when the probe fails
+    /// (unsupported platform, restricted container) — the UI hides the card.
+    #[serde(default)]
+    pub host: Option<HostStats>,
     /// Per-day new-account counts over the last 30 days (from `users.created_at`).
     pub signups_30d: Vec<DayCount>,
     /// Per-day revision-push counts over the last 30 days (`revisions.created_at`).

@@ -21,10 +21,12 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use chrono::{DateTime, Duration, Utc};
 use protocol::shares::{
-    CreateFrontBundleRequest, CreateShareRequest, FrontBundleCreated, ShareLinkView,
-    ShareLinksResponse, UpdateShareRequest,
+    CreateFrontBundleRequest, CreateShareRequest, FrontBundleCreated, FrontBundleSummary,
+    FrontBundlesResponse, ShareLinkView, ShareLinksResponse, UpdateShareRequest,
 };
-use protocol::{CheckRequest, CheckResponse, ErrorBody, FileEntry, MissingBlobsResponse};
+use protocol::{
+    CheckRequest, CheckResponse, DeletionResult, ErrorBody, FileEntry, MissingBlobsResponse,
+};
 use serde_json::{Map, Value};
 use sqlx::PgPool;
 use uuid::Uuid;
@@ -52,7 +54,11 @@ pub fn router() -> Router<AppState> {
         )
         .route(
             "/workspaces/:slug/games/:game/front-bundles",
-            post(create_front_bundle),
+            get(list_front_bundles).post(create_front_bundle),
+        )
+        .route(
+            "/workspaces/:slug/games/:game/front-bundles/:id",
+            axum::routing::delete(delete_front_bundle),
         )
         .route(
             "/workspaces/:slug/games/:game/shares",
@@ -141,6 +147,8 @@ async fn create_front_bundle(
     Json(req): Json<CreateFrontBundleRequest>,
 ) -> ApiResult<Response> {
     let workspace = authorize_push(&state, &user, &slug).await?;
+    // M7: committing a front bundle is a write — refuse it on a lapsed trial.
+    billing::write_allowed(&state, workspace.id).await?;
     validate_bundle_manifest(&req.files)?;
     let game_id = game_id_by_slug(&state.pool, workspace.id, &game_slug).await?;
 
@@ -170,6 +178,16 @@ async fn create_front_bundle(
     .fetch_one(&state.pool)
     .await?;
 
+    // Nudge the workspace's SSE subscribers that a front bundle landed (mirrors
+    // the M2 `revision_pushed` hook), so the test view's version picker refreshes.
+    state.events.publish(
+        workspace.id,
+        crate::documents::WorkspaceEvent::FrontPushed(protocol::FrontPushedEvent {
+            game: game_slug.clone(),
+            bundle_id: row.0,
+        }),
+    );
+
     Ok((
         StatusCode::CREATED,
         Json(FrontBundleCreated {
@@ -178,6 +196,138 @@ async fn create_front_bundle(
         }),
     )
         .into_response())
+}
+
+/// Row backing [`FrontBundleSummary`]; the counts are derived from the manifest
+/// JSONB (one `jsonb_each` scan aggregated per bundle).
+#[derive(sqlx::FromRow)]
+struct FrontBundleRow {
+    id: Uuid,
+    created_at: DateTime<Utc>,
+    files_count: i64,
+    total_size: i64,
+}
+
+/// `GET .../front-bundles` — a game's front bundles, newest first (cap 50).
+/// `files_count`/`total_size` come from the stored manifest; the newest bundle is
+/// flagged `is_latest` (the one a latest-tracking share serves).
+async fn list_front_bundles(
+    State(state): State<AppState>,
+    user: CurrentUser,
+    Path((slug, game_slug)): Path<(String, String)>,
+) -> ApiResult<Json<FrontBundlesResponse>> {
+    let workspace = authorize_read(&state, &user, &slug).await?;
+    let game_id = game_id_by_slug(&state.pool, workspace.id, &game_slug).await?;
+    let rows = sqlx::query_as::<_, FrontBundleRow>(
+        "SELECT fb.id, fb.created_at, \
+                count(*)::bigint AS files_count, \
+                COALESCE(sum((m.val ->> 'size')::bigint), 0)::bigint AS total_size \
+         FROM front_bundles fb \
+         CROSS JOIN LATERAL jsonb_each(fb.manifest) AS m(key, val) \
+         WHERE fb.game_id = $1 \
+         GROUP BY fb.id \
+         ORDER BY fb.created_at DESC \
+         LIMIT 50",
+    )
+    .bind(game_id)
+    .fetch_all(&state.pool)
+    .await?;
+    let bundles = rows
+        .into_iter()
+        .enumerate()
+        .map(|(i, r)| FrontBundleSummary {
+            id: r.id,
+            created_at: r.created_at,
+            files_count: r.files_count,
+            total_size: r.total_size,
+            // Newest-first, so index 0 is the latest bundle a share serves.
+            is_latest: i == 0,
+        })
+        .collect();
+    Ok(Json(FrontBundlesResponse { bundles }))
+}
+
+/// `DELETE .../front-bundles/:id` — owner/admin only. Guards: `409 bundle_pinned`
+/// when a share pins this exact bundle (message lists the slugs); `409
+/// last_bundle` when it is the game's only bundle AND any share for the game
+/// exists (they would serve nothing). Otherwise delete it and GC the workspace's
+/// now-unreferenced blobs, returning the freed storage. 404 for an unknown or
+/// foreign id.
+async fn delete_front_bundle(
+    State(state): State<AppState>,
+    user: CurrentUser,
+    Path((slug, game_slug, id)): Path<(String, String, Uuid)>,
+) -> ApiResult<Json<DeletionResult>> {
+    let workspace = authorize_admin(&state, &user, &slug).await?;
+    let game_id = game_id_by_slug(&state.pool, workspace.id, &game_slug).await?;
+
+    let belongs: Option<Uuid> =
+        sqlx::query_scalar("SELECT id FROM front_bundles WHERE id = $1 AND game_id = $2")
+            .bind(id)
+            .bind(game_id)
+            .fetch_optional(&state.pool)
+            .await?;
+    if belongs.is_none() {
+        return Err(ApiError::not_found(
+            "bundle_not_found",
+            "no such front bundle in this game",
+        ));
+    }
+
+    // Guard: a share pinning this exact bundle would lose its build.
+    let pinned: Vec<String> =
+        sqlx::query_scalar("SELECT slug FROM share_links WHERE front_bundle_id = $1 ORDER BY slug")
+            .bind(id)
+            .fetch_all(&state.pool)
+            .await?;
+    if !pinned.is_empty() {
+        return Err(ApiError::conflict(
+            "bundle_pinned",
+            format!(
+                "this bundle is pinned by {} share link(s): {}",
+                pinned.len(),
+                pinned.join(", ")
+            ),
+        ));
+    }
+
+    // Guard: deleting the game's only bundle while a share exists leaves every
+    // latest-tracking share with nothing to serve.
+    let bundle_count: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM front_bundles WHERE game_id = $1")
+            .bind(game_id)
+            .fetch_one(&state.pool)
+            .await?;
+    if bundle_count <= 1 {
+        let share_count: i64 =
+            sqlx::query_scalar("SELECT count(*) FROM share_links WHERE game_id = $1")
+                .bind(game_id)
+                .fetch_one(&state.pool)
+                .await?;
+        if share_count > 0 {
+            return Err(ApiError::conflict(
+                "last_bundle",
+                "this is the game's only front bundle and a share link depends on it — \
+                 push a newer bundle or delete the share(s) first",
+            ));
+        }
+    }
+
+    let mut tx = state.pool.begin().await?;
+    sqlx::query("DELETE FROM front_bundles WHERE id = $1")
+        .bind(id)
+        .execute(&mut *tx)
+        .await?;
+    let freed = blobs::gc_orphaned_blobs(&mut tx, workspace.id).await?;
+    tx.commit().await?;
+
+    blobs::delete_blob_objects(&state.store, workspace.id, &freed).await;
+
+    let freed_bytes = freed.iter().map(|(_, size)| *size).sum();
+    Ok(Json(DeletionResult {
+        freed_bytes,
+        freed_blobs: freed.len() as i64,
+    }))
 }
 
 /// Build the stored `{ "<path>": { "hash", "size" } }` manifest object.
@@ -311,6 +461,8 @@ async fn create_share(
     Json(req): Json<CreateShareRequest>,
 ) -> ApiResult<Response> {
     let workspace = authorize_admin(&state, &user, &slug).await?;
+    // M7: a new share is a write — refuse it on a lapsed trial (see plan.rs).
+    billing::write_allowed(&state, workspace.id).await?;
     let game_id = game_id_by_slug(&state.pool, workspace.id, &game_slug).await?;
     let limits = billing::limits_for(&state, workspace.id).await?;
 

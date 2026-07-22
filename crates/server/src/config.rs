@@ -26,8 +26,6 @@ pub enum ConfigError {
     InvalidBool { key: &'static str, value: String },
     #[error("{key} must be a non-negative integer, got \"{value}\"")]
     InvalidU64 { key: &'static str, value: String },
-    #[error("POLAR_SERVER must be \"production\" or \"sandbox\", got \"{0}\"")]
-    InvalidPolarServer(String),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -45,11 +43,11 @@ pub struct Config {
     /// Present only when GitHub OAuth is fully configured (client id, secret,
     /// and a public URL). Absent → the GitHub routes 404.
     pub github: Option<GithubConfig>,
-    /// Present only when Polar billing is fully configured (access token, webhook
-    /// secret, and all four product ids). Absent → billing routes 404, every
+    /// Present only when Stripe billing is fully configured (secret key, webhook
+    /// secret, and all five price ids). Absent → billing routes 404, every
     /// workspace resolves to unlimited, and no quota check ever fires (the
-    /// permanent state on self-hosted instances). See [`PolarConfig`].
-    pub polar: Option<PolarConfig>,
+    /// permanent state on self-hosted instances). See [`StripeConfig`].
+    pub stripe: Option<StripeConfig>,
     /// Explicit dashboard build directory (`SERVER_WEB_DIR`). When unset,
     /// [`Config::resolve_web_dir`] probes the standard locations.
     pub web_dir: Option<PathBuf>,
@@ -84,39 +82,26 @@ pub struct GithubConfig {
     pub client_secret: String,
 }
 
-/// Which Polar environment the instance talks to. Selects the API base URL.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum PolarServer {
-    Production,
-    Sandbox,
-}
-
-/// Fully-resolved Polar billing configuration. Only constructed when the access
-/// token, webhook secret, and all four product ids are present (the GitHub
-/// optional-block pattern), so its mere existence means billing is active.
+/// Fully-resolved Stripe billing configuration. Only constructed when the secret
+/// key, webhook secret, and all five price ids are present (the GitHub
+/// optional-block pattern), so its mere existence means billing is active. Test
+/// vs live is chosen purely by which `STRIPE_SECRET_KEY`/price ids are supplied —
+/// the API host is always `api.stripe.com`, so there is no server/env selector.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct PolarConfig {
-    /// Bearer token for the Polar API (`POLAR_ACCESS_TOKEN`).
-    pub access_token: String,
-    /// Standard-Webhooks signing secret (`POLAR_WEBHOOK_SECRET`); base64, with an
-    /// optional `whsec_` prefix, decoded at verification time.
+pub struct StripeConfig {
+    /// Secret API key for Stripe (`STRIPE_SECRET_KEY`, `sk_test_…`/`sk_live_…`),
+    /// sent as the Bearer token on the checkout call.
+    pub secret_key: String,
+    /// Webhook signing secret (`STRIPE_WEBHOOK_SECRET`, `whsec_…`). Used verbatim
+    /// as the raw-ASCII HMAC key when verifying the `Stripe-Signature` header
+    /// (Stripe does NOT base64-decode it, unlike Standard Webhooks).
     pub webhook_secret: String,
-    pub product_solo_monthly: String,
-    pub product_solo_yearly: String,
-    pub product_team_monthly: String,
-    pub product_team_yearly: String,
-    /// `production` (default) or `sandbox` (`POLAR_SERVER`).
-    pub server: PolarServer,
-}
-
-impl PolarConfig {
-    /// The Polar REST API base for the configured environment.
-    pub fn api_base(&self) -> &'static str {
-        match self.server {
-            PolarServer::Production => "https://api.polar.sh",
-            PolarServer::Sandbox => "https://sandbox-api.polar.sh",
-        }
-    }
+    pub price_solo_monthly: String,
+    pub price_solo_yearly: String,
+    pub price_team_monthly: String,
+    pub price_team_yearly: String,
+    /// Quantity-based price for the storage add-on (one unit = +10 GiB).
+    pub price_storage: String,
 }
 
 impl Config {
@@ -242,33 +227,34 @@ impl Config {
             _ => None,
         };
 
-        // Polar billing stays disabled unless the access token, the webhook
-        // secret, and all four product ids are present. `POLAR_SERVER` is parsed
-        // unconditionally so a typo surfaces even on an otherwise-disabled setup.
-        let polar_server = parse_polar_server(get("POLAR_SERVER"))?;
-        let polar = match (
-            non_empty(get("POLAR_ACCESS_TOKEN")),
-            non_empty(get("POLAR_WEBHOOK_SECRET")),
-            non_empty(get("POLAR_PRODUCT_SOLO_MONTHLY")),
-            non_empty(get("POLAR_PRODUCT_SOLO_YEARLY")),
-            non_empty(get("POLAR_PRODUCT_TEAM_MONTHLY")),
-            non_empty(get("POLAR_PRODUCT_TEAM_YEARLY")),
+        // Stripe billing stays disabled unless the secret key, the webhook
+        // secret, and all five price ids are present. Any one missing (or blank)
+        // leaves the whole block off — self-hosters run unlimited.
+        let stripe = match (
+            non_empty(get("STRIPE_SECRET_KEY")),
+            non_empty(get("STRIPE_WEBHOOK_SECRET")),
+            non_empty(get("STRIPE_PRICE_SOLO_MONTHLY")),
+            non_empty(get("STRIPE_PRICE_SOLO_YEARLY")),
+            non_empty(get("STRIPE_PRICE_TEAM_MONTHLY")),
+            non_empty(get("STRIPE_PRICE_TEAM_YEARLY")),
+            non_empty(get("STRIPE_PRICE_STORAGE")),
         ) {
             (
-                Some(access_token),
+                Some(secret_key),
                 Some(webhook_secret),
-                Some(product_solo_monthly),
-                Some(product_solo_yearly),
-                Some(product_team_monthly),
-                Some(product_team_yearly),
-            ) => Some(PolarConfig {
-                access_token,
+                Some(price_solo_monthly),
+                Some(price_solo_yearly),
+                Some(price_team_monthly),
+                Some(price_team_yearly),
+                Some(price_storage),
+            ) => Some(StripeConfig {
+                secret_key,
                 webhook_secret,
-                product_solo_monthly,
-                product_solo_yearly,
-                product_team_monthly,
-                product_team_yearly,
-                server: polar_server,
+                price_solo_monthly,
+                price_solo_yearly,
+                price_team_monthly,
+                price_team_yearly,
+                price_storage,
             }),
             _ => None,
         };
@@ -280,7 +266,7 @@ impl Config {
             cookie_secure,
             public_url,
             github,
-            polar,
+            stripe,
             web_dir: get("SERVER_WEB_DIR").map(PathBuf::from),
             storage_max_blob_bytes,
             server_math_cache_bytes,
@@ -321,19 +307,6 @@ fn parse_bool(value: Option<String>, key: &'static str) -> Result<bool, ConfigEr
 /// never half-enables an optional block.
 fn non_empty(value: Option<String>) -> Option<String> {
     value.filter(|v| !v.trim().is_empty())
-}
-
-/// Parses `POLAR_SERVER`. Unset/empty defaults to production; `production` and
-/// `sandbox` (case-insensitive) are accepted; anything else is a hard error.
-fn parse_polar_server(value: Option<String>) -> Result<PolarServer, ConfigError> {
-    match non_empty(value).as_deref().map(str::trim) {
-        None => Ok(PolarServer::Production),
-        Some(v) => match v.to_ascii_lowercase().as_str() {
-            "production" => Ok(PolarServer::Production),
-            "sandbox" => Ok(PolarServer::Sandbox),
-            _ => Err(ConfigError::InvalidPolarServer(v.to_string())),
-        },
-    }
 }
 
 /// Parses an optional unsigned integer env var. `None`/empty → `Ok(None)` so the
@@ -502,37 +475,37 @@ mod tests {
         assert_eq!(cfg.public_base_url(), "https://app.example.com");
     }
 
-    /// The full set of env vars that enable Polar billing.
-    const POLAR_ENV: [(&str, &str); 6] = [
-        ("POLAR_ACCESS_TOKEN", "polar_pat_xxx"),
-        ("POLAR_WEBHOOK_SECRET", "whsec_abc"),
-        ("POLAR_PRODUCT_SOLO_MONTHLY", "prod_solo_m"),
-        ("POLAR_PRODUCT_SOLO_YEARLY", "prod_solo_y"),
-        ("POLAR_PRODUCT_TEAM_MONTHLY", "prod_team_m"),
-        ("POLAR_PRODUCT_TEAM_YEARLY", "prod_team_y"),
+    /// The full set of env vars that enable Stripe billing.
+    const STRIPE_ENV: [(&str, &str); 7] = [
+        ("STRIPE_SECRET_KEY", "sk_test_xxx"),
+        ("STRIPE_WEBHOOK_SECRET", "whsec_abc"),
+        ("STRIPE_PRICE_SOLO_MONTHLY", "price_solo_m"),
+        ("STRIPE_PRICE_SOLO_YEARLY", "price_solo_y"),
+        ("STRIPE_PRICE_TEAM_MONTHLY", "price_team_m"),
+        ("STRIPE_PRICE_TEAM_YEARLY", "price_team_y"),
+        ("STRIPE_PRICE_STORAGE", "price_storage"),
     ];
 
     #[test]
-    fn polar_disabled_by_default_and_unlimited() {
+    fn stripe_disabled_by_default_and_unlimited() {
         let cfg = Config::from_source(|_| None).unwrap();
-        assert_eq!(cfg.polar, None);
+        assert_eq!(cfg.stripe, None);
     }
 
     #[test]
-    fn polar_enables_only_when_every_var_is_present() {
-        // The full set enables it, defaulting to the production API base.
-        let cfg = Config::from_source(source(&POLAR_ENV)).unwrap();
-        let polar = cfg.polar.expect("billing enabled");
-        assert_eq!(polar.access_token, "polar_pat_xxx");
-        assert_eq!(polar.webhook_secret, "whsec_abc");
-        assert_eq!(polar.product_solo_monthly, "prod_solo_m");
-        assert_eq!(polar.product_team_yearly, "prod_team_y");
-        assert_eq!(polar.server, PolarServer::Production);
-        assert_eq!(polar.api_base(), "https://api.polar.sh");
+    fn stripe_enables_only_when_every_var_is_present() {
+        // The full set enables it.
+        let cfg = Config::from_source(source(&STRIPE_ENV)).unwrap();
+        let stripe = cfg.stripe.expect("billing enabled");
+        assert_eq!(stripe.secret_key, "sk_test_xxx");
+        assert_eq!(stripe.webhook_secret, "whsec_abc");
+        assert_eq!(stripe.price_solo_monthly, "price_solo_m");
+        assert_eq!(stripe.price_team_yearly, "price_team_y");
+        assert_eq!(stripe.price_storage, "price_storage");
 
         // Dropping any single required var disables the whole block.
-        for (i, missing) in POLAR_ENV.iter().enumerate() {
-            let subset: Vec<(&str, &str)> = POLAR_ENV
+        for (i, missing) in STRIPE_ENV.iter().enumerate() {
+            let subset: Vec<(&str, &str)> = STRIPE_ENV
                 .iter()
                 .enumerate()
                 .filter(|(j, _)| *j != i)
@@ -540,28 +513,19 @@ mod tests {
                 .collect();
             let cfg = Config::from_source(source(&subset)).unwrap();
             assert_eq!(
-                cfg.polar, None,
+                cfg.stripe, None,
                 "missing {} should disable billing",
                 missing.0
             );
         }
 
         // A present-but-empty var counts as absent.
-        let mut with_blank = POLAR_ENV.to_vec();
-        with_blank[0] = ("POLAR_ACCESS_TOKEN", "   ");
+        let mut with_blank = STRIPE_ENV.to_vec();
+        with_blank[0] = ("STRIPE_SECRET_KEY", "   ");
         assert_eq!(
-            Config::from_source(source(&with_blank)).unwrap().polar,
+            Config::from_source(source(&with_blank)).unwrap().stripe,
             None
         );
-    }
-
-    #[test]
-    fn polar_server_selects_sandbox_base() {
-        let mut env = POLAR_ENV.to_vec();
-        env.push(("POLAR_SERVER", "sandbox"));
-        let polar = Config::from_source(source(&env)).unwrap().polar.unwrap();
-        assert_eq!(polar.server, PolarServer::Sandbox);
-        assert_eq!(polar.api_base(), "https://sandbox-api.polar.sh");
     }
 
     #[test]
@@ -604,12 +568,5 @@ mod tests {
         // A whitespace-only value grants no one.
         let cfg = Config::from_source(source(&[("SERVER_ADMIN_EMAILS", "   ")])).unwrap();
         assert!(cfg.admin_emails.is_empty());
-    }
-
-    #[test]
-    fn polar_server_is_validated_even_when_disabled() {
-        // Invalid value is a hard error regardless of whether the rest is set.
-        let err = Config::from_source(source(&[("POLAR_SERVER", "staging")])).unwrap_err();
-        assert_eq!(err, ConfigError::InvalidPolarServer("staging".to_string()));
     }
 }

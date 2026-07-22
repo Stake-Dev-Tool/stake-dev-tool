@@ -1,8 +1,11 @@
 <script lang="ts">
   import { page } from '$app/state';
-  import { api, ApiError, type RevisionDetail } from '$lib/api';
+  import { goto } from '$app/navigation';
+  import { api, ApiError, type RevisionDetail, type Role } from '$lib/api';
   import { errorText, humanSize, formatCost, formatRtp, formatMultiplier } from '$lib/format';
   import { workspaceName } from '$lib/workspaces.svelte';
+  import { session } from '$lib/session.svelte';
+  import { toast } from '$lib/toasts.svelte';
   import { copyText } from '$lib/clipboard';
   import Button from '$lib/components/Button.svelte';
   import Card from '$lib/components/Card.svelte';
@@ -29,6 +32,12 @@
   let statsStatus = $derived(detail?.stats?.status ?? null);
   let totalSize = $derived(detail ? detail.files.reduce((a, f) => a + f.size, 0) : 0);
 
+  // Owner/admin gate for the Delete affordance (fetched alongside the detail).
+  let role = $state<Role | null>(null);
+  let canManage = $derived(role === 'owner' || role === 'admin');
+  let deleting = $state(false);
+  let deleteError = $state('');
+
   // Reload whenever the route params change (the component is reused across
   // /r/:number navigations).
   $effect(() => {
@@ -36,7 +45,47 @@
     void game;
     void numParam;
     void load(true);
+    void loadRole();
   });
+
+  async function loadRole() {
+    try {
+      const detail = await api.workspaces.get(slug);
+      role =
+        detail.role ??
+        detail.members.find((m) => m.user_id === (session.user?.id ?? ''))?.role ??
+        null;
+    } catch {
+      role = null;
+    }
+  }
+
+  async function deleteRevision() {
+    if (!detail || deleting) return;
+    if (
+      !confirm(
+        `Delete revision ${detail.number}? This is permanent and frees any storage its files no longer share with another revision or bundle.`
+      )
+    ) {
+      return;
+    }
+    deleting = true;
+    deleteError = '';
+    try {
+      const res = await api.games.deleteRevision(slug, game, detail.number);
+      toast.success(
+        res.freed_blobs > 0
+          ? `Revision ${detail.number} deleted · freed ${humanSize(res.freed_bytes)}.`
+          : `Revision ${detail.number} deleted · no storage freed (its files are still shared).`
+      );
+      void goto(`/w/${slug}/g/${game}`);
+    } catch (e) {
+      // 409 revision_pinned carries a message listing the share slugs.
+      deleteError = e instanceof ApiError ? e.message : errorText(e);
+    } finally {
+      deleting = false;
+    }
+  }
 
   // Poll the detail endpoint while stats are pending; stop on ok/error, on a
   // status change, and on unmount (effect teardown clears the interval).
@@ -148,8 +197,18 @@
               Compare with previous
             </Button>
           {/if}
+          {#if canManage}
+            <Button variant="danger" size="sm" loading={deleting} onclick={deleteRevision}>
+              Delete
+            </Button>
+          {/if}
         </div>
       </div>
+      {#if deleteError}
+        <p class="mt-3 rounded-md border border-danger/30 bg-danger/10 px-3 py-2 text-sm text-danger">
+          {deleteError}
+        </p>
+      {/if}
     </header>
 
     <FrontUrlDialog bind:open={testOpen} {slug} {game} number={revNum} />

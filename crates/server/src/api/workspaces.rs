@@ -60,6 +60,29 @@ pub async fn create(
         ));
     }
 
+    // Trial cap: on a billing-enabled instance a free user gets ONE workspace.
+    // A new workspace always starts on the trial, so owning any non-paid
+    // (Trial/Expired) workspace blocks creating another — this stops trial
+    // rotation (spin up a fresh 14-day trial every fortnight). Paid/comped
+    // workspaces don't count, and self-hosted (billing disabled) is never capped.
+    if state.config.stripe.is_some() {
+        let owned = sqlx::query_scalar::<_, Uuid>(
+            "SELECT workspace_id FROM memberships WHERE user_id = $1 AND role = 'owner'",
+        )
+        .bind(user.user_id)
+        .fetch_all(&state.pool)
+        .await?;
+        for ws in owned {
+            if !crate::billing::plan_for(&state, ws).await?.is_paid() {
+                return Err(ApiError::forbidden(
+                    "trial_workspace_limit",
+                    "the free trial is limited to one workspace; upgrade an existing \
+                     workspace to a paid plan to create more",
+                ));
+            }
+        }
+    }
+
     let mut tx = state.pool.begin().await?;
     let result = sqlx::query_as::<_, WorkspaceRow>(
         "INSERT INTO workspaces (slug, name, created_by) VALUES ($1, $2, $3) \

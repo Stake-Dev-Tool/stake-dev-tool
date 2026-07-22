@@ -378,6 +378,45 @@
             <Sparkline data={overview.pushes_30d} label="pushes" />
           </Card>
         </div>
+
+        {#if overview.host}
+          {@const h = overview.host}
+          {@const diskUsed = h.disk_total_bytes - h.disk_free_bytes}
+          {@const diskPct = h.disk_total_bytes > 0 ? diskUsed / h.disk_total_bytes : 0}
+          {@const memPct = h.mem_total_bytes > 0 ? h.mem_used_bytes / h.mem_total_bytes : 0}
+          <Card class="mt-4 p-4">
+            <div class="mb-3 flex items-baseline justify-between gap-2">
+              <span class="text-xs font-medium uppercase tracking-wide text-faint">
+                Machine
+              </span>
+              <span class="text-xs text-muted">scale signal — disk backing the blob store</span>
+            </div>
+            <div class="grid gap-4 sm:grid-cols-2">
+              {#each [{ label: 'Disk', used: diskUsed, total: h.disk_total_bytes, pct: diskPct, hint: `${humanSize(h.disk_free_bytes)} free` }, { label: 'Memory', used: h.mem_used_bytes, total: h.mem_total_bytes, pct: memPct, hint: `${humanSize(h.mem_total_bytes - h.mem_used_bytes)} free` }] as g (g.label)}
+                <div>
+                  <div class="mb-1 flex items-baseline justify-between text-sm">
+                    <span class="text-muted">{g.label}</span>
+                    <span class="font-mono-tab text-text">
+                      {humanSize(g.used)} / {humanSize(g.total)}
+                      <span class="text-faint">· {Math.round(g.pct * 100)}%</span>
+                    </span>
+                  </div>
+                  <div class="h-1.5 w-full overflow-hidden rounded-full bg-surface-2">
+                    <div
+                      class="h-full rounded-full transition-all {g.pct >= 0.9
+                        ? 'bg-danger'
+                        : g.pct >= 0.75
+                          ? 'bg-warn'
+                          : 'bg-accent'}"
+                      style="width: {Math.min(100, Math.round(g.pct * 100))}%"
+                    ></div>
+                  </div>
+                  <p class="mt-1 text-xs text-faint">{g.hint}</p>
+                </div>
+              {/each}
+            </div>
+          </Card>
+        {/if}
       {/if}
     </section>
 

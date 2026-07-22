@@ -6,7 +6,7 @@
 
 use axum::response::sse::Event;
 use dashmap::DashMap;
-use protocol::{DocumentEvent, RevisionPushedEvent};
+use protocol::{DocumentEvent, FrontPushedEvent, RevisionPushedEvent};
 use tokio::sync::broadcast;
 use uuid::Uuid;
 
@@ -27,6 +27,7 @@ const CHANNEL_CAPACITY: usize = 256;
 pub enum WorkspaceEvent {
     Document(DocumentEvent),
     RevisionPushed(RevisionPushedEvent),
+    FrontPushed(FrontPushedEvent),
 }
 
 impl WorkspaceEvent {
@@ -39,6 +40,7 @@ impl WorkspaceEvent {
             WorkspaceEvent::RevisionPushed(r) => {
                 Event::default().event("revision_pushed").json_data(r)
             }
+            WorkspaceEvent::FrontPushed(f) => Event::default().event("front_pushed").json_data(f),
         };
         named.unwrap_or_else(|_| Event::default().comment(""))
     }

@@ -73,7 +73,7 @@ export function planLabel(plan: string): string {
   }
 }
 
-/** Humanize Polar's verbatim subscription status ("past_due" → "Past due"). */
+/** Humanize Stripe's verbatim subscription status ("past_due" → "Past due"). */
 export function statusLabel(status: string | null | undefined): string {
   if (!status) return '—';
   return status
@@ -109,4 +109,27 @@ export function meter(
 /** Tailwind background class for a meter tone. */
 export function meterFill(tone: MeterTone): string {
   return tone === 'danger' ? 'bg-danger' : tone === 'warn' ? 'bg-warn' : 'bg-accent';
+}
+
+// ---------------------------------------------------------------------------
+// Storage add-on (one unit = +10 GiB for €1/mo, quantity-based)
+// ---------------------------------------------------------------------------
+
+/** GiB granted per storage add-on unit. */
+export const STORAGE_UNIT_GIB = 10;
+/** Monthly price (EUR) of one storage add-on unit. */
+export const STORAGE_UNIT_PRICE_EUR = 1;
+/** Inclusive bounds on a single storage purchase (mirrors the server's 1..=100). */
+export const STORAGE_UNITS_MIN = 1;
+export const STORAGE_UNITS_MAX = 100;
+
+/** Clamp a unit count into the purchasable range. */
+export function clampStorageUnits(units: number): number {
+  if (!Number.isFinite(units)) return STORAGE_UNITS_MIN;
+  return Math.min(STORAGE_UNITS_MAX, Math.max(STORAGE_UNITS_MIN, Math.round(units)));
+}
+
+/** Monthly price (EUR) for `units` storage add-on units. */
+export function storageMonthlyEur(units: number): number {
+  return Math.max(0, units) * STORAGE_UNIT_PRICE_EUR;
 }

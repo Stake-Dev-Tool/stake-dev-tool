@@ -36,6 +36,26 @@ pub struct FrontBundleCreated {
     pub created_at: DateTime<Utc>,
 }
 
+/// One front bundle as listed under `GET .../front-bundles` (newest first).
+/// `files_count`/`total_size` are derived from the stored manifest JSONB;
+/// `is_latest` marks the newest bundle (the one a latest-tracking share serves).
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "protocol/")]
+pub struct FrontBundleSummary {
+    pub id: Uuid,
+    pub created_at: DateTime<Utc>,
+    pub files_count: i64,
+    pub total_size: i64,
+    pub is_latest: bool,
+}
+
+/// `GET /workspaces/:slug/games/:game/front-bundles` response (newest first).
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "protocol/")]
+pub struct FrontBundlesResponse {
+    pub bundles: Vec<FrontBundleSummary>,
+}
+
 /// `POST /workspaces/:slug/games/:game/shares` request body. Every field is
 /// optional; omitted fields take their default (generated slug, latest revision,
 /// latest bundle, public, never expires, 25 concurrent sessions).

@@ -61,72 +61,72 @@
    Components reference these semantic tokens — no hex lives in the markup.
    ========================================================================== */
 :root {
-  --background: #0a100d; /* pit */
-  --foreground: #e9f0eb; /* ink */
-  --card: #131c17; /* panel — lifted surface above the pit */
-  --card-foreground: #e9f0eb;
-  --popover: #141e18; /* panel2 — dialogs/menus sit a touch higher */
-  --popover-foreground: #e9f0eb;
-  --primary: #34d399; /* mint — the emerald accent */
-  --primary-foreground: #06231a; /* dark ink on an accent fill */
-  --secondary: #1b2820;
-  --secondary-foreground: #dbe6df;
-  --muted: #16211b; /* subtle hover/rail fill */
-  --muted-foreground: #8aa295; /* moss */
-  --accent: #1c2a22; /* neutral hover surface (shadcn accent, not the brand accent) */
-  --accent-foreground: #e9f0eb;
-  --destructive: #fb7185; /* rose-400 — reads on dark as text + /10 fill */
-  --border: #22302a; /* line */
-  --input: #2c3e34; /* line2 — input outlines a shade stronger */
-  --ring: #34d399; /* emerald focus ring */
-  --chart-1: #34d399;
-  --chart-2: #0fa97a;
-  --chart-3: #f2b94b;
-  --chart-4: #60a5fa;
-  --chart-5: #8aa295;
+  --background: oklch(1 0 0);
+  --foreground: oklch(0.145 0 0);
+  --card: oklch(1 0 0);
+  --card-foreground: oklch(0.145 0 0);
+  --popover: oklch(1 0 0);
+  --popover-foreground: oklch(0.145 0 0);
+  --primary: oklch(0.205 0 0);
+  --primary-foreground: oklch(0.985 0 0);
+  --secondary: oklch(0.97 0 0);
+  --secondary-foreground: oklch(0.205 0 0);
+  --muted: oklch(0.97 0 0);
+  --muted-foreground: oklch(0.556 0 0);
+  --accent: oklch(0.97 0 0);
+  --accent-foreground: oklch(0.205 0 0);
+  --destructive: oklch(0.577 0.245 27.325);
+  --border: oklch(0.922 0 0);
+  --input: oklch(0.922 0 0);
+  --ring: oklch(0.708 0 0);
+  --chart-1: oklch(0.87 0 0);
+  --chart-2: oklch(0.556 0 0);
+  --chart-3: oklch(0.439 0 0);
+  --chart-4: oklch(0.371 0 0);
+  --chart-5: oklch(0.269 0 0);
   --radius: 0.625rem;
-  --sidebar: #0f1713;
-  --sidebar-foreground: #e9f0eb;
-  --sidebar-primary: #34d399;
-  --sidebar-primary-foreground: #06231a;
-  --sidebar-accent: #1c2a22;
-  --sidebar-accent-foreground: #e9f0eb;
-  --sidebar-border: #22302a;
-  --sidebar-ring: #34d399;
+  --sidebar: oklch(0.985 0 0);
+  --sidebar-foreground: oklch(0.145 0 0);
+  --sidebar-primary: oklch(0.205 0 0);
+  --sidebar-primary-foreground: oklch(0.985 0 0);
+  --sidebar-accent: oklch(0.97 0 0);
+  --sidebar-accent-foreground: oklch(0.205 0 0);
+  --sidebar-border: oklch(0.922 0 0);
+  --sidebar-ring: oklch(0.708 0 0);
 }
 
 .dark {
-  --background: #0a100d;
-  --foreground: #e9f0eb;
-  --card: #131c17;
-  --card-foreground: #e9f0eb;
-  --popover: #141e18;
-  --popover-foreground: #e9f0eb;
-  --primary: #34d399;
-  --primary-foreground: #06231a;
-  --secondary: #1b2820;
-  --secondary-foreground: #dbe6df;
-  --muted: #16211b;
-  --muted-foreground: #8aa295;
-  --accent: #1c2a22;
-  --accent-foreground: #e9f0eb;
-  --destructive: #fb7185;
-  --border: #22302a;
-  --input: #2c3e34;
-  --ring: #34d399;
-  --chart-1: #34d399;
-  --chart-2: #0fa97a;
-  --chart-3: #f2b94b;
-  --chart-4: #60a5fa;
-  --chart-5: #8aa295;
-  --sidebar: #0f1713;
-  --sidebar-foreground: #e9f0eb;
-  --sidebar-primary: #34d399;
-  --sidebar-primary-foreground: #06231a;
-  --sidebar-accent: #1c2a22;
-  --sidebar-accent-foreground: #e9f0eb;
-  --sidebar-border: #22302a;
-  --sidebar-ring: #34d399;
+  --background: oklch(0.145 0 0);
+  --foreground: oklch(0.985 0 0);
+  --card: oklch(0.205 0 0);
+  --card-foreground: oklch(0.985 0 0);
+  --popover: oklch(0.205 0 0);
+  --popover-foreground: oklch(0.985 0 0);
+  --primary: oklch(0.922 0 0);
+  --primary-foreground: oklch(0.205 0 0);
+  --secondary: oklch(0.269 0 0);
+  --secondary-foreground: oklch(0.985 0 0);
+  --muted: oklch(0.269 0 0);
+  --muted-foreground: oklch(0.708 0 0);
+  --accent: oklch(0.269 0 0);
+  --accent-foreground: oklch(0.985 0 0);
+  --destructive: oklch(0.704 0.191 22.216);
+  --border: oklch(1 0 0 / 10%);
+  --input: oklch(1 0 0 / 15%);
+  --ring: oklch(0.556 0 0);
+  --chart-1: oklch(0.87 0 0);
+  --chart-2: oklch(0.556 0 0);
+  --chart-3: oklch(0.439 0 0);
+  --chart-4: oklch(0.371 0 0);
+  --chart-5: oklch(0.269 0 0);
+  --sidebar: oklch(0.205 0 0);
+  --sidebar-foreground: oklch(0.985 0 0);
+  --sidebar-primary: oklch(0.488 0.243 264.376);
+  --sidebar-primary-foreground: oklch(0.985 0 0);
+  --sidebar-accent: oklch(0.269 0 0);
+  --sidebar-accent-foreground: oklch(0.985 0 0);
+  --sidebar-border: oklch(1 0 0 / 10%);
+  --sidebar-ring: oklch(0.556 0 0);
 }
 
 @layer base {
@@ -145,6 +145,9 @@
     text-rendering: optimizeLegibility;
   }
   ::selection {
+    @apply bg-foreground text-background;
+  }
+  .brand ::selection {
     background: rgba(52, 211, 153, 0.28);
     color: var(--foreground);
   }
@@ -189,6 +192,10 @@
   flex-shrink: 0;
 }
 .status-dot-live {
+  background: #22c55e;
+  box-shadow: 0 0 0 3px color-mix(in oklch, #22c55e 20%, transparent);
+}
+.brand .status-dot-live {
   background: #34d399;
   box-shadow: 0 0 0 3px color-mix(in oklch, #34d399 20%, transparent);
 }
@@ -238,4 +245,42 @@
 ::-webkit-scrollbar-thumb:hover {
   background: var(--muted-foreground);
   background-clip: padding-box;
+}
+
+/* Brand palette for the desktop chrome (launcher/Teams/Cloud). Applied by
+   the (desktop) layout via a 'brand' class on <html>, so the test view - the
+   same page the cloud serves - keeps the original neutral look everywhere. */
+.brand,
+.brand.dark {
+  --background: #0a100d;
+  --foreground: #e9f0eb;
+  --card: #131c17;
+  --card-foreground: #e9f0eb;
+  --popover: #141e18;
+  --popover-foreground: #e9f0eb;
+  --primary: #34d399;
+  --primary-foreground: #06231a;
+  --secondary: #1b2820;
+  --secondary-foreground: #dbe6df;
+  --muted: #16211b;
+  --muted-foreground: #8aa295;
+  --accent: #1c2a22;
+  --accent-foreground: #e9f0eb;
+  --destructive: #fb7185;
+  --border: #22302a;
+  --input: #2c3e34;
+  --ring: #34d399;
+  --chart-1: #34d399;
+  --chart-2: #0fa97a;
+  --chart-3: #f2b94b;
+  --chart-4: #60a5fa;
+  --chart-5: #8aa295;
+  --sidebar: #0f1713;
+  --sidebar-foreground: #e9f0eb;
+  --sidebar-primary: #34d399;
+  --sidebar-primary-foreground: #06231a;
+  --sidebar-accent: #1c2a22;
+  --sidebar-accent-foreground: #e9f0eb;
+  --sidebar-border: #22302a;
+  --sidebar-ring: #34d399;
 }

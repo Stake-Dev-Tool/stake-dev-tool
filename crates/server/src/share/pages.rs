@@ -3,11 +3,27 @@
 //! capacity) and the password interstitial. No external assets, no redirects back
 //! to the app — a share host must never leak the dashboard.
 
+use std::sync::OnceLock;
+
 use axum::http::{StatusCode, header};
 use axum::response::{Html, IntoResponse, Response};
+use base64::Engine;
+use base64::engine::general_purpose::STANDARD as BASE64;
 
-/// Shared page chrome: a centered card on a dark background.
+/// The repo logo, embedded so the branded share pages stay fully self-contained
+/// (no external asset — a share host must never fetch from the dashboard origin).
+const LOGO_PNG: &[u8] = include_bytes!("../../assets/icon-128.png");
+
+/// The logo as a `data:` PNG URI, base64-encoded once on first use.
+fn logo_data_uri() -> &'static str {
+    static URI: OnceLock<String> = OnceLock::new();
+    URI.get_or_init(|| format!("data:image/png;base64,{}", BASE64.encode(LOGO_PNG)))
+}
+
+/// Shared page chrome: a centered card on a dark background, the repo logo
+/// centered above the heading.
 fn shell(title: &str, heading: &str, body: &str) -> String {
+    let logo = logo_data_uri();
     format!(
         r#"<!doctype html>
 <html lang="en">
@@ -30,6 +46,7 @@ body {{
   border-radius: 14px; padding: 32px; text-align: center;
   box-shadow: 0 10px 40px rgba(0,0,0,.4);
 }}
+.logo {{ width: 56px; height: 56px; margin: 0 auto 16px; display: block; border-radius: 12px; }}
 h1 {{ margin: 0 0 8px; font-size: 1.25rem; }}
 p {{ margin: 0 0 8px; color: #9aa4b8; }}
 form {{ margin-top: 20px; display: flex; flex-direction: column; gap: 12px; }}
@@ -49,6 +66,7 @@ button:hover {{ background: #3d68ef; }}
 </head>
 <body>
 <div class="card">
+<img class="logo" src="{logo}" alt="Stake Dev Tool" width="56" height="56">
 <h1>{heading}</h1>
 {body}
 <div class="brand">Stake Dev Tool</div>

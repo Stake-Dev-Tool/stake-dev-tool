@@ -341,14 +341,19 @@ export interface BillingLimits {
 
 /** `GET /workspaces/:slug/billing` — member-visible, always reachable. */
 export interface BillingStatus {
-  /** Whether Polar billing is configured on this instance. `false` → unlimited. */
+  /** Whether Stripe billing is configured on this instance. `false` → unlimited. */
   enabled: boolean;
   plan: PlanLabel | string;
-  /** Polar's status verbatim ("active", "trialing", "past_due", …) or null. */
+  /** Stripe's status verbatim ("active", "trialing", "past_due", …) or null. */
   status: string | null;
   interval: BillingInterval | null;
   /** Period end (subscription) or trial expiry (trial); null when neither applies. */
   current_period_end: string | null;
+  /**
+   * Extra storage granted by the add-on, in GiB (already folded into
+   * `limits.max_storage_bytes`). `0` when no storage add-on is active.
+   */
+  extra_storage_gib: number;
   usage: BillingUsage;
   limits: BillingLimits;
 }
@@ -427,6 +432,30 @@ export interface FrontBundleCreated {
   created_at: string;
 }
 
+/**
+ * One front bundle in a game's bundle list (newest first). `files_count`/
+ * `total_size` are `bigint` on the wire; coerced to plain numbers here (a bundle
+ * is far under `Number.MAX_SAFE_INTEGER`). `is_latest` flags the newest bundle —
+ * the one a latest-tracking share serves.
+ */
+export interface FrontBundleSummary {
+  id: string;
+  created_at: string;
+  files_count: number;
+  total_size: number;
+  is_latest: boolean;
+}
+
+/**
+ * Result of a content-lifecycle deletion (a revision or a front bundle): the
+ * storage the blob GC reclaimed. Both fields are `bigint` on the wire; coerced to
+ * plain numbers. Both are 0 when every referenced blob is still shared elsewhere.
+ */
+export interface DeletionResult {
+  freed_bytes: number;
+  freed_blobs: number;
+}
+
 // ---------------------------------------------------------------------------
 // Admin console (instance operator — M-admin)
 // ---------------------------------------------------------------------------
@@ -446,6 +475,14 @@ export interface AdminDayCount {
  * `bigint` on the wire; coerced to plain numbers (well under
  * `Number.MAX_SAFE_INTEGER`) so formatting/arithmetic just work.
  */
+/** Host machine capacity (disk backing storage + memory); null when unprobed. */
+export interface AdminHostStats {
+  disk_total_bytes: number;
+  disk_free_bytes: number;
+  mem_total_bytes: number;
+  mem_used_bytes: number;
+}
+
 export interface AdminOverview {
   users: number;
   workspaces: number;
@@ -455,6 +492,7 @@ export interface AdminOverview {
   storage_bytes: number;
   sessions_total: number;
   spins_total: number;
+  host: AdminHostStats | null;
   signups_30d: AdminDayCount[];
   pushes_30d: AdminDayCount[];
 }
@@ -937,6 +975,7 @@ function normalizeBillingStatus(raw: unknown): BillingStatus {
     status: strOrNull(b.status),
     interval: asInterval(b.interval),
     current_period_end: strOrNull(b.current_period_end),
+    extra_storage_gib: num(b.extra_storage_gib),
     usage: normalizeBillingUsage(b.usage),
     limits: normalizeBillingLimits(b.limits)
   };
@@ -967,6 +1006,22 @@ function normalizeShareLink(raw: unknown): ShareLink {
   };
 }
 
+function normalizeFrontBundleSummary(raw: unknown): FrontBundleSummary {
+  const b = (raw ?? {}) as Record<string, unknown>;
+  return {
+    id: String(b.id ?? ''),
+    created_at: String(b.created_at ?? ''),
+    files_count: num(b.files_count),
+    total_size: num(b.total_size),
+    is_latest: Boolean(b.is_latest)
+  };
+}
+
+function normalizeDeletionResult(raw: unknown): DeletionResult {
+  const r = (raw ?? {}) as Record<string, unknown>;
+  return { freed_bytes: num(r.freed_bytes), freed_blobs: num(r.freed_blobs) };
+}
+
 // ---- Admin console ---------------------------------------------------------
 
 function normalizeAdminDayCount(raw: unknown): AdminDayCount {
@@ -985,8 +1040,20 @@ function normalizeAdminOverview(raw: unknown): AdminOverview {
     storage_bytes: num(o.storage_bytes),
     sessions_total: num(o.sessions_total),
     spins_total: num(o.spins_total),
+    host: normalizeAdminHost(o.host),
     signups_30d: Array.isArray(o.signups_30d) ? o.signups_30d.map(normalizeAdminDayCount) : [],
     pushes_30d: Array.isArray(o.pushes_30d) ? o.pushes_30d.map(normalizeAdminDayCount) : []
+  };
+}
+
+function normalizeAdminHost(raw: unknown): AdminHostStats | null {
+  if (raw == null || typeof raw !== 'object') return null;
+  const h = raw as Record<string, unknown>;
+  return {
+    disk_total_bytes: num(h.disk_total_bytes),
+    disk_free_bytes: num(h.disk_free_bytes),
+    mem_total_bytes: num(h.mem_total_bytes),
+    mem_used_bytes: num(h.mem_used_bytes)
   };
 }
 
@@ -1359,6 +1426,50 @@ export const api = {
       );
       const r = (raw ?? {}) as Record<string, unknown>;
       return { id: String(r.id ?? ''), created_at: String(r.created_at ?? '') };
+    },
+
+    // ---- Content lifecycle (delete to free storage) -----------------------
+
+    /** List a game's front bundles (newest first, cap 50) with derived sizes. */
+    async frontBundles(slug: string, game: string): Promise<FrontBundleSummary[]> {
+      const raw = await request<unknown>(
+        'GET',
+        `/workspaces/${encodeURIComponent(slug)}/games/${encodeURIComponent(game)}/front-bundles`
+      );
+      const arr = Array.isArray(raw)
+        ? raw
+        : ((raw as { bundles?: unknown[] } | undefined)?.bundles ?? []);
+      return arr.map(normalizeFrontBundleSummary);
+    },
+
+    /**
+     * Delete a revision (owner/admin) and GC its now-unreferenced blobs. Returns
+     * the freed storage. Throws ApiError on 409 `revision_pinned` (its `.message`
+     * lists the pinning share slugs) — surface that to the user.
+     */
+    async deleteRevision(
+      slug: string,
+      game: string,
+      number: number | string
+    ): Promise<DeletionResult> {
+      const raw = await request<unknown>(
+        'DELETE',
+        `/workspaces/${encodeURIComponent(slug)}/games/${encodeURIComponent(game)}/revisions/${encodeURIComponent(String(number))}`
+      );
+      return normalizeDeletionResult(raw);
+    },
+
+    /**
+     * Delete a front bundle (owner/admin) and GC its now-unreferenced blobs.
+     * Returns the freed storage. Throws ApiError on 409 `bundle_pinned` (message
+     * lists the pinning share slugs) or `last_bundle`.
+     */
+    async deleteFrontBundle(slug: string, game: string, id: string): Promise<DeletionResult> {
+      const raw = await request<unknown>(
+        'DELETE',
+        `/workspaces/${encodeURIComponent(slug)}/games/${encodeURIComponent(game)}/front-bundles/${encodeURIComponent(id)}`
+      );
+      return normalizeDeletionResult(raw);
     }
   },
 
@@ -1551,7 +1662,7 @@ export const api = {
       return normalizeBillingStatus(raw);
     },
     /**
-     * Owner-only: start a Polar checkout for `plan`/`interval`. Returns the
+     * Owner-only: start a Stripe checkout for `plan`/`interval`. Returns the
      * hosted checkout URL to navigate to (`window.location.href = url`). The
      * endpoint 404s when billing is disabled on the instance.
      */
@@ -1560,6 +1671,21 @@ export const api = {
         'POST',
         `/workspaces/${encodeURIComponent(slug)}/billing/checkout`,
         { plan, interval }
+      );
+      const r = (raw ?? {}) as Record<string, unknown>;
+      return String(r.checkout_url ?? '');
+    },
+    /**
+     * Owner-only: start a Stripe checkout for the storage add-on. `units` (1..=100)
+     * is the line-item quantity, each unit granting +10 GiB for €1/mo. Returns the
+     * hosted checkout URL to navigate to. 404s when billing is disabled; throws an
+     * ApiError with code `invalid_units` when `units` is out of range.
+     */
+    async buyStorage(slug: string, units: number): Promise<string> {
+      const raw = await request<unknown>(
+        'POST',
+        `/workspaces/${encodeURIComponent(slug)}/billing/storage`,
+        { units }
       );
       const r = (raw ?? {}) as Record<string, unknown>;
       return String(r.checkout_url ?? '');

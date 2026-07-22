@@ -1,19 +1,17 @@
-//! M7 integration tests: plan resolution, quota enforcement, the Polar webhook
-//! (Standard-Webhooks signature over the hand-rolled HMAC), and the billing
-//! status/checkout endpoints. DB-backed tests self-skip when `TEST_DATABASE_URL`
-//! is unset; the HMAC vector tests always run. The dev database persists, so
-//! every email/slug is suffixed with a fresh UUID.
+//! M7 integration tests: plan resolution, quota enforcement, the Stripe webhook
+//! (Stripe-Signature over the hand-rolled HMAC), the storage add-on, and the
+//! billing status/checkout endpoints. DB-backed tests self-skip when
+//! `TEST_DATABASE_URL` is unset; the HMAC vector tests always run. The dev
+//! database persists, so every email/slug is suffixed with a fresh UUID.
 
 use std::collections::HashMap;
 
 use axum::body::Body;
 use axum::http::{Method, Request, StatusCode};
-use base64::Engine;
-use base64::engine::general_purpose::STANDARD;
 use chrono::{DateTime, Duration, Utc};
 use serde_json::{Value, json};
 use server::billing::webhook::hmac_sha256;
-use server::config::{Config, PolarConfig, PolarServer, StorageConfig};
+use server::config::{Config, StorageConfig, StripeConfig};
 use server::{AppState, db, http, storage};
 use sha2::{Digest, Sha256};
 use tower::ServiceExt;
@@ -50,19 +48,20 @@ fn hmac_sha256_rfc4231_vectors() {
 
 // --- setup -----------------------------------------------------------------
 
-/// The synthetic webhook signing key. `webhook_secret` is its `whsec_`+base64
-/// form, so the server's `decode_secret` recovers exactly these bytes.
-const WEBHOOK_KEY: &[u8] = b"m7-test-signing-key-0123456789ab";
+/// The synthetic webhook signing secret. Stripe uses it VERBATIM as the raw-ASCII
+/// HMAC key (no `whsec_` stripping, no base64 decode), so the tests sign with
+/// exactly these bytes.
+const WEBHOOK_SECRET: &str = "whsec_m7_stripe_test_secret_0123456789ab";
 
-fn polar_config() -> PolarConfig {
-    PolarConfig {
-        access_token: "polar_pat_test".to_string(),
-        webhook_secret: format!("whsec_{}", STANDARD.encode(WEBHOOK_KEY)),
-        product_solo_monthly: "prod_solo_m".to_string(),
-        product_solo_yearly: "prod_solo_y".to_string(),
-        product_team_monthly: "prod_team_m".to_string(),
-        product_team_yearly: "prod_team_y".to_string(),
-        server: PolarServer::Production,
+fn stripe_config() -> StripeConfig {
+    StripeConfig {
+        secret_key: "sk_test_m7".to_string(),
+        webhook_secret: WEBHOOK_SECRET.to_string(),
+        price_solo_monthly: "price_solo_m".to_string(),
+        price_solo_yearly: "price_solo_y".to_string(),
+        price_team_monthly: "price_team_m".to_string(),
+        price_team_yearly: "price_team_y".to_string(),
+        price_storage: "price_storage".to_string(),
     }
 }
 
@@ -71,7 +70,7 @@ struct Ctx {
     _tmp: tempfile::TempDir,
 }
 
-async fn setup(polar: Option<PolarConfig>) -> Option<Ctx> {
+async fn setup(stripe: Option<StripeConfig>) -> Option<Ctx> {
     let database_url = std::env::var("TEST_DATABASE_URL").ok()?;
     let tmp = tempfile::tempdir().unwrap();
     let config = Config {
@@ -83,7 +82,7 @@ async fn setup(polar: Option<PolarConfig>) -> Option<Ctx> {
         cookie_secure: false,
         public_url: Some("https://app.example.com".to_string()),
         github: None,
-        polar,
+        stripe,
         web_dir: None,
         storage_max_blob_bytes: 8_589_934_592,
         server_math_cache_bytes: 21_474_836_480,
@@ -292,7 +291,7 @@ async fn insert_subscription(
 ) {
     sqlx::query(
         "INSERT INTO subscriptions \
-           (workspace_id, polar_subscription_id, polar_customer_id, plan, \"interval\", status, current_period_end) \
+           (workspace_id, provider_subscription_id, provider_customer_id, plan, \"interval\", status, current_period_end) \
          VALUES ($1, $2, $3, $4, $5, $6, $7)",
     )
     .bind(ws_id)
@@ -330,44 +329,64 @@ async fn set_created_at(state: &AppState, slug: &str, when: DateTime<Utc>) {
 
 // --- webhook signing -------------------------------------------------------
 
-/// Standard-Webhooks headers for a body, signed with `WEBHOOK_KEY` at `ts`.
-fn signed_headers(id: &str, ts: i64, body: &[u8]) -> Vec<(&'static str, String)> {
+/// The `Stripe-Signature` header for a body, signed with `WEBHOOK_SECRET` (used
+/// verbatim as the raw-ASCII key) over `{ts}.{body}`, hex-encoded, at `ts`.
+fn signed_headers(ts: i64, body: &[u8]) -> Vec<(&'static str, String)> {
     let mut signed = Vec::new();
-    signed.extend_from_slice(id.as_bytes());
-    signed.push(b'.');
     signed.extend_from_slice(ts.to_string().as_bytes());
     signed.push(b'.');
     signed.extend_from_slice(body);
-    let sig = STANDARD.encode(hmac_sha256(WEBHOOK_KEY, &signed));
-    vec![
-        ("webhook-id", id.to_string()),
-        ("webhook-timestamp", ts.to_string()),
-        ("webhook-signature", format!("v1,{sig}")),
-    ]
+    let sig = hex(&hmac_sha256(WEBHOOK_SECRET.as_bytes(), &signed));
+    vec![("stripe-signature", format!("t={ts},v1={sig}"))]
 }
 
-/// A realistic Polar subscription event with workspace metadata.
+/// The Unix seconds for a fixed future instant used as `current_period_end`.
+const PERIOD_END_UNIX: i64 = 1_893_456_000; // 2030-01-01T00:00:00Z
+
+/// A realistic Stripe `customer.subscription.*` event whose subscription carries
+/// a single plan-price line item, with the workspace id in `metadata`. `evt_id`
+/// is the Stripe event id (the `billing_events` idempotency key).
 fn subscription_event(
+    evt_id: &str,
     event_type: &str,
     ws_id: Uuid,
-    product_id: &str,
+    price_id: &str,
     status: &str,
     sub_id: &str,
 ) -> Value {
+    subscription_event_items(
+        evt_id,
+        event_type,
+        ws_id,
+        status,
+        sub_id,
+        json!([{ "price": { "id": price_id }, "quantity": 1 }]),
+    )
+}
+
+/// Like [`subscription_event`] but with an explicit `items.data` array, so a
+/// storage-only or mixed subscription can be constructed.
+fn subscription_event_items(
+    evt_id: &str,
+    event_type: &str,
+    ws_id: Uuid,
+    status: &str,
+    sub_id: &str,
+    items: Value,
+) -> Value {
     json!({
+        "id": evt_id,
         "type": event_type,
         "data": {
-            "id": sub_id,
-            "status": status,
-            "amount": 900,
-            "currency": "usd",
-            "recurring_interval": "month",
-            "current_period_start": "2030-01-01T00:00:00Z",
-            "current_period_end": "2030-02-01T00:00:00Z",
-            "customer_id": "cus_test_123",
-            "product_id": product_id,
-            "product": { "id": product_id, "name": "Test plan" },
-            "metadata": { "workspace_id": ws_id.to_string() }
+            "object": {
+                "id": sub_id,
+                "object": "subscription",
+                "status": status,
+                "customer": "cus_test_123",
+                "current_period_end": PERIOD_END_UNIX,
+                "items": { "object": "list", "data": items },
+                "metadata": { "workspace_id": ws_id.to_string() }
+            }
         }
     })
 }
@@ -428,7 +447,7 @@ async fn billing_disabled_is_unlimited_and_routes_404() {
 
 #[tokio::test]
 async fn plan_matrix_resolves_expected_limits() {
-    let Some(ctx) = setup(Some(polar_config())).await else {
+    let Some(ctx) = setup(Some(stripe_config())).await else {
         return;
     };
 
@@ -511,7 +530,7 @@ async fn plan_matrix_resolves_expected_limits() {
 
 #[tokio::test]
 async fn expired_trial_blocks_writes_with_upgrade_required() {
-    let Some(ctx) = setup(Some(polar_config())).await else {
+    let Some(ctx) = setup(Some(stripe_config())).await else {
         return;
     };
     let (mut owner, ws, token) = bootstrap(&ctx.state).await;
@@ -549,7 +568,7 @@ async fn expired_trial_blocks_writes_with_upgrade_required() {
 
 #[tokio::test]
 async fn member_cap_blocks_second_accept_on_solo() {
-    let Some(ctx) = setup(Some(polar_config())).await else {
+    let Some(ctx) = setup(Some(stripe_config())).await else {
         return;
     };
     let (mut owner, ws, _t) = bootstrap(&ctx.state).await;
@@ -583,7 +602,7 @@ async fn member_cap_blocks_second_accept_on_solo() {
 
 #[tokio::test]
 async fn team_plan_allows_second_member_and_idempotent_reaccept() {
-    let Some(ctx) = setup(Some(polar_config())).await else {
+    let Some(ctx) = setup(Some(stripe_config())).await else {
         return;
     };
     let (mut owner, ws, _t) = bootstrap(&ctx.state).await;
@@ -621,7 +640,7 @@ async fn team_plan_allows_second_member_and_idempotent_reaccept() {
 
 #[tokio::test]
 async fn storage_cap_blocks_commit_over_quota() {
-    let Some(ctx) = setup(Some(polar_config())).await else {
+    let Some(ctx) = setup(Some(stripe_config())).await else {
         return;
     };
     let (mut owner, ws, token) = bootstrap(&ctx.state).await; // fresh → Trial (2 GiB)
@@ -661,7 +680,7 @@ async fn storage_cap_blocks_commit_over_quota() {
 
 #[tokio::test]
 async fn storage_cap_blocks_upload_via_content_length() {
-    let Some(ctx) = setup(Some(polar_config())).await else {
+    let Some(ctx) = setup(Some(stripe_config())).await else {
         return;
     };
     let (mut owner, ws, token) = bootstrap(&ctx.state).await; // Trial (2 GiB)
@@ -698,7 +717,7 @@ async fn storage_cap_blocks_upload_via_content_length() {
 
 #[tokio::test]
 async fn usage_endpoint_counts_members_and_storage() {
-    let Some(ctx) = setup(Some(polar_config())).await else {
+    let Some(ctx) = setup(Some(stripe_config())).await else {
         return;
     };
     let (mut owner, ws, token) = bootstrap(&ctx.state).await;
@@ -733,7 +752,7 @@ async fn usage_endpoint_counts_members_and_storage() {
 
 #[tokio::test]
 async fn checkout_is_owner_only() {
-    let Some(ctx) = setup(Some(polar_config())).await else {
+    let Some(ctx) = setup(Some(stripe_config())).await else {
         return;
     };
     let (mut owner, ws, _t) = bootstrap(&ctx.state).await;
@@ -780,32 +799,33 @@ async fn checkout_is_owner_only() {
 
 #[tokio::test]
 async fn webhook_verifies_and_upserts_subscription() {
-    let Some(ctx) = setup(Some(polar_config())).await else {
+    let Some(ctx) = setup(Some(stripe_config())).await else {
         return;
     };
     let (mut owner, ws, _t) = bootstrap(&ctx.state).await;
     let ws_id = workspace_id(&ctx.state, &ws).await;
 
-    // polar_subscription_id is UNIQUE, so make it unique per run too.
+    // provider_subscription_id is UNIQUE, so make it unique per run too.
     let sub_id = format!("sub-{}", Uuid::new_v4());
+    let id = evt_id();
     let event = subscription_event(
-        "subscription.created",
+        &id,
+        "customer.subscription.created",
         ws_id,
-        "prod_solo_m",
+        "price_solo_m",
         "active",
         &sub_id,
     );
     let body = serde_json::to_vec(&event).unwrap();
     let ts = Utc::now().timestamp();
-    let id = evt_id();
-    let headers = signed_headers(&id, ts, &body);
+    let headers = signed_headers(ts, &body);
 
     let (status, _) = post_webhook(&mut owner, &headers, &body).await;
     assert_eq!(status, StatusCode::OK);
 
-    // Subscription upserted from the payload (product → solo/monthly).
+    // Subscription upserted from the payload (price → solo/monthly).
     let row: (String, String, String, String) = sqlx::query_as(
-        "SELECT plan, \"interval\", status, polar_subscription_id FROM subscriptions WHERE workspace_id = $1",
+        "SELECT plan, \"interval\", status, provider_subscription_id FROM subscriptions WHERE workspace_id = $1",
     )
     .bind(ws_id)
     .fetch_one(&ctx.state.pool)
@@ -830,10 +850,11 @@ async fn webhook_verifies_and_upserts_subscription() {
             .unwrap();
     assert!(processed.is_some());
 
-    // The status endpoint now reflects the plan.
+    // The status endpoint now reflects the plan (and no storage add-on).
     let (_, view) = owner.get(&format!("/api/workspaces/{ws}/billing")).await;
     assert_eq!(s(&view["plan"]), "solo");
     assert_eq!(s(&view["status"]), "active");
+    assert_eq!(view["extra_storage_gib"], json!(0));
 
     // Replaying the same event id is an idempotent no-op (still 200).
     let (status, _) = post_webhook(&mut owner, &headers, &body).await;
@@ -848,16 +869,17 @@ async fn webhook_verifies_and_upserts_subscription() {
 
 #[tokio::test]
 async fn webhook_rejects_tampered_and_stale() {
-    let Some(ctx) = setup(Some(polar_config())).await else {
+    let Some(ctx) = setup(Some(stripe_config())).await else {
         return;
     };
     let (mut owner, ws, _t) = bootstrap(&ctx.state).await;
     let ws_id = workspace_id(&ctx.state, &ws).await;
 
     let event = subscription_event(
-        "subscription.active",
+        &evt_id(),
+        "customer.subscription.updated",
         ws_id,
-        "prod_team_y",
+        "price_team_y",
         "active",
         "sub_tamper",
     );
@@ -865,11 +887,12 @@ async fn webhook_rejects_tampered_and_stale() {
     let ts = Utc::now().timestamp();
 
     // Signature computed over `body`, but a different body is sent → 401.
-    let headers = signed_headers(&evt_id(), ts, &body);
+    let headers = signed_headers(ts, &body);
     let tampered = serde_json::to_vec(&subscription_event(
-        "subscription.active",
+        &evt_id(),
+        "customer.subscription.updated",
         ws_id,
-        "prod_team_y",
+        "price_team_y",
         "canceled",
         "sub_tamper",
     ))
@@ -879,11 +902,11 @@ async fn webhook_rejects_tampered_and_stale() {
 
     // A correctly-signed but stale (10 min old) timestamp → 401.
     let stale_ts = ts - 600;
-    let stale_headers = signed_headers(&evt_id(), stale_ts, &body);
+    let stale_headers = signed_headers(stale_ts, &body);
     let (status, _) = post_webhook(&mut owner, &stale_headers, &body).await;
     assert_eq!(status, StatusCode::UNAUTHORIZED);
 
-    // Missing signature headers → 401.
+    // Missing signature header → 401.
     let (status, _) = post_webhook(&mut owner, &[], &body).await;
     assert_eq!(status, StatusCode::UNAUTHORIZED);
 
@@ -899,23 +922,24 @@ async fn webhook_rejects_tampered_and_stale() {
 
 #[tokio::test]
 async fn webhook_unknown_workspace_is_recorded_error_but_200() {
-    let Some(ctx) = setup(Some(polar_config())).await else {
+    let Some(ctx) = setup(Some(stripe_config())).await else {
         return;
     };
     let mut client = Client::new(&ctx.state);
 
     // Metadata points at a workspace that does not exist.
+    let id = evt_id();
     let event = subscription_event(
-        "subscription.created",
+        &id,
+        "customer.subscription.created",
         Uuid::new_v4(),
-        "prod_solo_m",
+        "price_solo_m",
         "active",
         "sub_orphan",
     );
     let body = serde_json::to_vec(&event).unwrap();
     let ts = Utc::now().timestamp();
-    let id = evt_id();
-    let headers = signed_headers(&id, ts, &body);
+    let headers = signed_headers(ts, &body);
 
     // Authentic but unprocessable → 200 (no poison-pill retry), error recorded.
     let (status, _) = post_webhook(&mut client, &headers, &body).await;
@@ -931,4 +955,180 @@ async fn webhook_unknown_workspace_is_recorded_error_but_200() {
         error.is_some(),
         "unknown workspace should be recorded as an error"
     );
+}
+
+// ===========================================================================
+// Storage add-on
+// ===========================================================================
+
+#[tokio::test]
+async fn webhook_storage_only_adds_storage_without_granting_a_plan() {
+    let Some(ctx) = setup(Some(stripe_config())).await else {
+        return;
+    };
+    let (mut owner, ws, _t) = bootstrap(&ctx.state).await; // fresh → Trial (2 GiB)
+    let ws_id = workspace_id(&ctx.state, &ws).await;
+
+    // A storage-only subscription: two units (+20 GiB), no plan price.
+    let id = evt_id();
+    let event = subscription_event_items(
+        &id,
+        "customer.subscription.created",
+        ws_id,
+        "active",
+        &format!("sub-{}", Uuid::new_v4()),
+        json!([{ "price": { "id": "price_storage" }, "quantity": 2 }]),
+    );
+    let body = serde_json::to_vec(&event).unwrap();
+    let ts = Utc::now().timestamp();
+    let (status, _) = post_webhook(&mut owner, &signed_headers(ts, &body), &body).await;
+    assert_eq!(status, StatusCode::OK);
+
+    // The plan stays Trial (storage_only never grants a plan), but the trial's
+    // 2 GiB cap is lifted to 2 + 20 = 22 GiB and the add-on is surfaced.
+    let (_, view) = owner.get(&format!("/api/workspaces/{ws}/billing")).await;
+    assert_eq!(s(&view["plan"]), "trial", "{view}");
+    assert_eq!(view["extra_storage_gib"], json!(20));
+    assert_eq!(
+        view["limits"]["max_storage_bytes"],
+        json!(22u64 * 1024 * 1024 * 1024)
+    );
+}
+
+#[tokio::test]
+async fn storage_add_on_stacks_on_a_plan_and_is_removed_on_cancel() {
+    let Some(ctx) = setup(Some(stripe_config())).await else {
+        return;
+    };
+    let (mut owner, ws, _t) = bootstrap(&ctx.state).await;
+    let ws_id = workspace_id(&ctx.state, &ws).await;
+
+    // Plan subscription first (Solo, 10 GiB).
+    let plan_evt = subscription_event(
+        &evt_id(),
+        "customer.subscription.created",
+        ws_id,
+        "price_solo_m",
+        "active",
+        &format!("sub-plan-{}", Uuid::new_v4()),
+    );
+    let plan_body = serde_json::to_vec(&plan_evt).unwrap();
+    let ts = Utc::now().timestamp();
+    let (status, _) = post_webhook(&mut owner, &signed_headers(ts, &plan_body), &plan_body).await;
+    assert_eq!(status, StatusCode::OK);
+
+    // A SEPARATE storage subscription (3 units = +30 GiB) upserts only the
+    // storage column, leaving the plan row's plan/status intact.
+    let storage_sub = format!("sub-stor-{}", Uuid::new_v4());
+    let stor_evt = subscription_event_items(
+        &evt_id(),
+        "customer.subscription.created",
+        ws_id,
+        "active",
+        &storage_sub,
+        json!([{ "price": { "id": "price_storage" }, "quantity": 3 }]),
+    );
+    let stor_body = serde_json::to_vec(&stor_evt).unwrap();
+    let (status, _) = post_webhook(&mut owner, &signed_headers(ts, &stor_body), &stor_body).await;
+    assert_eq!(status, StatusCode::OK);
+
+    // Solo (10 GiB) + 30 GiB = 40 GiB; plan still Solo.
+    let (_, view) = owner.get(&format!("/api/workspaces/{ws}/billing")).await;
+    assert_eq!(s(&view["plan"]), "solo", "{view}");
+    assert_eq!(s(&view["status"]), "active");
+    assert_eq!(view["extra_storage_gib"], json!(30));
+    assert_eq!(
+        view["limits"]["max_storage_bytes"],
+        json!(40u64 * 1024 * 1024 * 1024)
+    );
+
+    // Canceling the storage subscription drops the add-on to 0 but keeps Solo.
+    let cancel_evt = subscription_event_items(
+        &evt_id(),
+        "customer.subscription.deleted",
+        ws_id,
+        "canceled",
+        &storage_sub,
+        json!([{ "price": { "id": "price_storage" }, "quantity": 3 }]),
+    );
+    let cancel_body = serde_json::to_vec(&cancel_evt).unwrap();
+    let (status, _) =
+        post_webhook(&mut owner, &signed_headers(ts, &cancel_body), &cancel_body).await;
+    assert_eq!(status, StatusCode::OK);
+
+    let (_, view) = owner.get(&format!("/api/workspaces/{ws}/billing")).await;
+    assert_eq!(s(&view["plan"]), "solo");
+    assert_eq!(view["extra_storage_gib"], json!(0));
+    assert_eq!(
+        view["limits"]["max_storage_bytes"],
+        json!(10u64 * 1024 * 1024 * 1024)
+    );
+}
+
+#[tokio::test]
+async fn storage_checkout_validates_bounds_and_owner() {
+    let Some(ctx) = setup(Some(stripe_config())).await else {
+        return;
+    };
+    let (mut owner, ws, _t) = bootstrap(&ctx.state).await;
+
+    // Out-of-range unit counts are rejected before any Stripe call (owner path).
+    for units in [0, 101, -5] {
+        let (status, body) = owner
+            .post(
+                &format!("/api/workspaces/{ws}/billing/storage"),
+                json!({ "units": units }),
+            )
+            .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "units={units}: {body}");
+        assert_eq!(s(&body["error"]["code"]), "invalid_units");
+    }
+
+    // A non-owner member cannot start a storage checkout even with valid units.
+    let ws_id = workspace_id(&ctx.state, &ws).await;
+    insert_subscription(
+        &ctx.state,
+        ws_id,
+        "team",
+        "monthly",
+        "active",
+        Some(Utc::now() + Duration::days(30)),
+    )
+    .await;
+    let (_, invite) = owner
+        .post(
+            &format!("/api/workspaces/{ws}/invites"),
+            json!({ "role": "member" }),
+        )
+        .await;
+    let invite_token = s(&invite["token"]).to_string();
+    let mut member = register(&ctx.state, &unique_email(), "Member").await;
+    let (status, _) = member
+        .post(&format!("/api/invites/{invite_token}/accept"), json!({}))
+        .await;
+    assert_eq!(status, StatusCode::OK);
+
+    let (status, body) = member
+        .post(
+            &format!("/api/workspaces/{ws}/billing/storage"),
+            json!({ "units": 2 }),
+        )
+        .await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
+    assert_eq!(s(&body["error"]["code"]), "forbidden");
+}
+
+#[tokio::test]
+async fn storage_checkout_404s_when_billing_disabled() {
+    let Some(ctx) = setup(None).await else {
+        return;
+    };
+    let (mut owner, ws, _t) = bootstrap(&ctx.state).await;
+    let (status, _) = owner
+        .post(
+            &format!("/api/workspaces/{ws}/billing/storage"),
+            json!({ "units": 2 }),
+        )
+        .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
 }

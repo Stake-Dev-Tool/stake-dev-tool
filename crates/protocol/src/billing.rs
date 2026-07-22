@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 
 /// A purchasable plan. Serialized lowercase to match the `subscriptions.plan`
-/// `CHECK` constraint and the Polar product mapping.
+/// `CHECK` constraint and the Stripe price mapping.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[serde(rename_all = "lowercase")]
 #[ts(export, export_to = "protocol/")]
@@ -38,12 +38,21 @@ pub struct CheckoutRequest {
     pub interval: BillingInterval,
 }
 
-/// `POST /workspaces/:slug/billing/checkout` response: the hosted Polar checkout
+/// `POST /workspaces/:slug/billing/checkout` response: the hosted Stripe checkout
 /// URL the browser is redirected to.
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
 #[ts(export, export_to = "protocol/")]
 pub struct CheckoutResponse {
     pub checkout_url: String,
+}
+
+/// `POST /workspaces/:slug/billing/storage` request body: how many storage
+/// add-on units to purchase, each granting +10 GiB for €1/mo. Bounded `1..=100`
+/// server-side (a single Stripe checkout with `quantity = units`).
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "protocol/")]
+pub struct StorageCheckoutRequest {
+    pub units: i64,
 }
 
 /// Effective quota limits for a workspace. `null` on any field means unlimited
@@ -73,21 +82,26 @@ pub struct BillingUsage {
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
 #[ts(export, export_to = "protocol/")]
 pub struct BillingStatusResponse {
-    /// Whether Polar billing is configured on this instance. `false` → quotas are
+    /// Whether Stripe billing is configured on this instance. `false` → quotas are
     /// never enforced and every limit is unlimited.
     pub enabled: bool,
     /// The resolved plan label: `"trial"`, `"solo"`, `"team"`, `"unlimited"`
     /// (billing disabled), or `"expired"` (trial lapsed, unpaid — reads still
     /// work, writes are blocked with `upgrade_required`).
     pub plan: String,
-    /// The subscription status verbatim from Polar (e.g. `"active"`, `"trialing"`,
-    /// `"past_due"`, `"canceled"`), or `null` when there is no subscription.
+    /// The subscription status verbatim from Stripe (e.g. `"active"`, `"trialing"`,
+    /// `"past_due"`, `"canceled"`), or `null` when there is no subscription. A
+    /// storage-only subscription (no plan) reports the sentinel `"storage_only"`.
     pub status: Option<String>,
     /// The subscription's billing interval, or `null` when there is no subscription.
     pub interval: Option<BillingInterval>,
     /// The current billing period's end (subscription) or, on the free trial, when
     /// the trial expires. `null` when neither applies.
     pub current_period_end: Option<DateTime<Utc>>,
+    /// Extra storage granted by the add-on, in GiB (`extra_storage_units × 10`).
+    /// `0` when no storage add-on is active. Already folded into
+    /// `limits.max_storage_bytes`; surfaced separately so the UI can show it.
+    pub extra_storage_gib: i64,
     pub usage: BillingUsage,
     pub limits: BillingLimits,
 }

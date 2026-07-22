@@ -9,7 +9,12 @@
     statusLabel,
     intervalLabel,
     meter,
-    meterFill
+    meterFill,
+    clampStorageUnits,
+    storageMonthlyEur,
+    STORAGE_UNIT_GIB,
+    STORAGE_UNITS_MIN,
+    STORAGE_UNITS_MAX
   } from '$lib/billing';
   import { humanSize, formatDate, errorText } from '$lib/format';
   import { toast } from '$lib/toasts.svelte';
@@ -30,6 +35,11 @@
 
   let checkoutError = $state('');
   let checkoutBusy = $state<PlanId | null>(null);
+
+  // Storage add-on stepper (one unit = +10 GiB for €1/mo).
+  let storageUnits = $state(1);
+  let storageBusy = $state(false);
+  let storageError = $state('');
 
   // Per-card Monthly/Yearly toggle.
   let intervals = $state<Record<PlanId, BillingInterval>>({ solo: 'monthly', team: 'monthly' });
@@ -113,7 +123,7 @@
       wsName = detail?.workspace.name ?? '';
       status = cached;
 
-      // Polar success redirect (?upgraded=1): celebrate, refetch fresh (the
+      // Stripe success redirect (?upgraded=1): celebrate, refetch fresh (the
       // cache may predate the subscription), and strip the param. Read here —
       // after the await — so this effect never subscribes to page.url.
       if (page.url.searchParams.get('upgraded') === '1') {
@@ -151,6 +161,28 @@
       checkoutError = errorText(e);
     }
     checkoutBusy = null;
+  }
+
+  function stepStorage(delta: number) {
+    storageUnits = clampStorageUnits(storageUnits + delta);
+  }
+
+  async function buyStorage() {
+    if (!isOwner || storageBusy) return;
+    const units = clampStorageUnits(storageUnits);
+    storageBusy = true;
+    storageError = '';
+    try {
+      const url = await api.billing.buyStorage(slug, units);
+      if (url) {
+        window.location.href = url; // full navigation to the hosted checkout
+        return; // leave the button busy; the page is unloading
+      }
+      storageError = 'Checkout is unavailable right now. Please try again.';
+    } catch (e) {
+      storageError = errorText(e);
+    }
+    storageBusy = false;
   }
 </script>
 
@@ -304,9 +336,72 @@
       </div>
 
       <p class="mt-4 text-xs text-faint">
-        Indicative pricing — the final price, taxes and currency are shown at checkout. Payments and
-        invoices are handled by Polar (our merchant of record).
+        Indicative pricing — the final price, taxes and currency are shown at checkout. Payments are
+        processed securely by Stripe.
       </p>
+    </section>
+
+    <!-- Storage add-on -->
+    <section class="mt-8">
+      <h2 class="mb-3 text-sm font-semibold uppercase tracking-wide text-faint">Storage add-on</h2>
+      <Card class="flex flex-col gap-4 p-6">
+        <p class="max-w-prose text-sm text-muted">
+          Need more room for math blobs? Add storage in {STORAGE_UNIT_GIB} GiB units for €1/mo each.
+          It stacks on top of your plan's storage cap.
+        </p>
+
+        {#if status.extra_storage_gib > 0}
+          <p class="text-sm">
+            <span class="font-medium text-text">Current add-on:</span>
+            <span class="font-mono-tab">{status.extra_storage_gib} GiB</span>
+            <span class="text-faint">· €{status.extra_storage_gib / STORAGE_UNIT_GIB} / mo</span>
+          </p>
+        {/if}
+
+        {#if storageError}
+          <p class="rounded-md border border-danger/30 bg-danger/10 px-3 py-2 text-sm text-danger">
+            {storageError}
+          </p>
+        {/if}
+
+        <div class="flex flex-wrap items-center gap-4">
+          <div class="inline-flex items-center rounded-md border border-border">
+            <button
+              type="button"
+              class="px-3 py-1.5 text-lg leading-none text-muted transition hover:text-text disabled:opacity-40"
+              aria-label="Fewer units"
+              disabled={!isOwner || storageUnits <= STORAGE_UNITS_MIN}
+              onclick={() => stepStorage(-1)}
+            >
+              −
+            </button>
+            <span class="min-w-[7rem] px-3 text-center text-sm font-mono-tab font-medium text-text">
+              +{storageUnits * STORAGE_UNIT_GIB} GiB
+            </span>
+            <button
+              type="button"
+              class="px-3 py-1.5 text-lg leading-none text-muted transition hover:text-text disabled:opacity-40"
+              aria-label="More units"
+              disabled={!isOwner || storageUnits >= STORAGE_UNITS_MAX}
+              onclick={() => stepStorage(1)}
+            >
+              +
+            </button>
+          </div>
+
+          <span class="text-sm text-muted">
+            <span class="font-semibold text-text">€{storageMonthlyEur(storageUnits)} / mo</span>
+          </span>
+
+          <Button loading={storageBusy} disabled={!isOwner || storageBusy} onclick={buyStorage}>
+            {status.extra_storage_gib > 0 ? 'Add more storage' : 'Add storage'}
+          </Button>
+        </div>
+
+        {#if !isOwner}
+          <p class="text-xs text-faint">Only the workspace owner can buy storage.</p>
+        {/if}
+      </Card>
     </section>
   {/if}
 </main>

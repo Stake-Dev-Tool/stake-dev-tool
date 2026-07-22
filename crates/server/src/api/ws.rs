@@ -40,6 +40,20 @@ pub fn router() -> Router<AppState> {
         .route("/ws/:slug/g/:game/front", get(front_index))
         .route("/ws/:slug/g/:game/front/", get(front_index))
         .route("/ws/:slug/g/:game/front/*path", get(front_path))
+        // Pinned bundle: same membership-gated streaming as the latest handler
+        // above, but for an exact bundle id (the test view's version picker).
+        .route(
+            "/ws/:slug/g/:game/fronts/:bundle_id",
+            get(pinned_front_index),
+        )
+        .route(
+            "/ws/:slug/g/:game/fronts/:bundle_id/",
+            get(pinned_front_index),
+        )
+        .route(
+            "/ws/:slug/g/:game/fronts/:bundle_id/*path",
+            get(pinned_front_path),
+        )
 }
 
 #[derive(Deserialize)]
@@ -62,6 +76,22 @@ async fn front_path(
     Path((slug, game, path)): Path<(String, String, String)>,
 ) -> ApiResult<Response> {
     serve_front(state, user, slug, game, path).await
+}
+
+async fn pinned_front_index(
+    state: State<AppState>,
+    user: CurrentUser,
+    Path((slug, game, bundle_id)): Path<(String, String, Uuid)>,
+) -> ApiResult<Response> {
+    serve_pinned_front(state, user, slug, game, bundle_id, String::new()).await
+}
+
+async fn pinned_front_path(
+    state: State<AppState>,
+    user: CurrentUser,
+    Path((slug, game, bundle_id, path)): Path<(String, String, Uuid, String)>,
+) -> ApiResult<Response> {
+    serve_pinned_front(state, user, slug, game, bundle_id, path).await
 }
 
 /// Membership-gated serving of the game's LATEST front bundle from the object
@@ -94,6 +124,51 @@ async fn serve_front(
              `sdt push-front` or from the game page",
         ));
     };
+    serve_from_manifest(&state, workspace.id, manifest, &path).await
+}
+
+/// Membership-gated serving of an EXACT front bundle by id (byte-identical to
+/// [`serve_front`] once the manifest is resolved). 404 for an unknown or foreign
+/// bundle id, so a member of one workspace can never reach another's bundle.
+async fn serve_pinned_front(
+    State(state): State<AppState>,
+    user: CurrentUser,
+    slug: String,
+    game: String,
+    bundle_id: Uuid,
+    path: String,
+) -> ApiResult<Response> {
+    let workspace = workspace_by_slug(&state.pool, &slug).await?;
+    require_membership(&state.pool, workspace.id, user.user_id).await?;
+
+    let manifest: Option<serde_json::Value> = sqlx::query_scalar(
+        "SELECT fb.manifest FROM front_bundles fb \
+         JOIN games g ON g.id = fb.game_id \
+         WHERE g.workspace_id = $1 AND g.slug = $2 AND fb.id = $3",
+    )
+    .bind(workspace.id)
+    .bind(&game)
+    .bind(bundle_id)
+    .fetch_optional(&state.pool)
+    .await?;
+    let Some(manifest) = manifest else {
+        return Err(ApiError::not_found(
+            "bundle_not_found",
+            "no such front bundle for this game",
+        ));
+    };
+    serve_from_manifest(&state, workspace.id, manifest, &path).await
+}
+
+/// Resolve a request path against a bundle manifest and stream the matching blob.
+/// `''` → `index.html`; an unknown non-asset path falls back to `index.html`
+/// (SPA routing); an unknown asset-looking path is a 404.
+async fn serve_from_manifest(
+    state: &AppState,
+    workspace_id: Uuid,
+    manifest: serde_json::Value,
+    path: &str,
+) -> ApiResult<Response> {
     let entries: HashMap<String, ManifestEntry> = serde_json::from_value(manifest)
         .map_err(|e| ApiError::internal(format!("malformed front bundle manifest: {e}")))?;
 
@@ -116,7 +191,7 @@ async fn serve_front(
     } else {
         "index.html"
     };
-    stream_entry(&state, workspace.id, served, entry).await
+    stream_entry(state, workspace_id, served, entry).await
 }
 
 async fn stream_entry(

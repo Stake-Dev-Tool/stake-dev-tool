@@ -38,6 +38,7 @@ base64.workspace = true
 dashmap.workspace = true
 reqwest.workspace = true
 sqlx.workspace = true
+sysinfo.workspace = true
 object_store.workspace = true
 dotenvy.workspace = true
 futures-util.workspace = true

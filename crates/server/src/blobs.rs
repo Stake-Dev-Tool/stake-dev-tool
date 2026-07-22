@@ -61,6 +61,60 @@ pub async fn fetch_blob_vec(
     Ok(store.get(&key).await?.bytes().await?.to_vec())
 }
 
+/// Garbage-collect a workspace's now-unreferenced blobs, returning the freed
+/// `(sha256 bytes, size)` pairs so the caller can delete the store objects.
+///
+/// A blob is orphaned when NO `revision_files` row of ANY revision in the
+/// workspace references it, AND NO `front_bundles` manifest of the workspace
+/// references it (manifests are `{ "<path>": { "hash": "<hex>", ... } }` JSONB —
+/// hashes are extracted with `jsonb_each` and `decode(..., 'hex')`). The whole
+/// query is scoped to `workspace_id`, so a byte-identical blob in another
+/// workspace is a different `(workspace_id, hash)` row (and a different store
+/// key) and is never touched.
+///
+/// Runs the DELETE on `conn` — call it INSIDE the same transaction that removed
+/// the revision/bundle rows (and AFTER that removal), so the orphan set already
+/// reflects the deletion.
+pub(crate) async fn gc_orphaned_blobs(
+    conn: &mut sqlx::PgConnection,
+    workspace_id: Uuid,
+) -> Result<Vec<(Vec<u8>, i64)>, sqlx::Error> {
+    sqlx::query_as::<_, (Vec<u8>, i64)>(
+        "DELETE FROM blobs b \
+         WHERE b.workspace_id = $1 \
+           AND NOT EXISTS ( \
+             SELECT 1 FROM revision_files rf \
+             JOIN revisions r ON r.id = rf.revision_id \
+             JOIN games g ON g.id = r.game_id \
+             WHERE g.workspace_id = $1 AND rf.hash = b.hash) \
+           AND NOT EXISTS ( \
+             SELECT 1 FROM front_bundles fb \
+             JOIN games g2 ON g2.id = fb.game_id \
+             CROSS JOIN LATERAL jsonb_each(fb.manifest) AS m(key, val) \
+             WHERE g2.workspace_id = $1 AND decode(m.val ->> 'hash', 'hex') = b.hash) \
+         RETURNING b.hash, b.size",
+    )
+    .bind(workspace_id)
+    .fetch_all(conn)
+    .await
+}
+
+/// Best-effort delete of the object-store bytes for freed blobs. Failures are
+/// logged, never surfaced — the DB rows are already gone, so orphaned bytes are
+/// harmless (and the object may already be absent).
+pub(crate) async fn delete_blob_objects(
+    store: &dyn ObjectStore,
+    workspace_id: Uuid,
+    freed: &[(Vec<u8>, i64)],
+) {
+    for (hash, _) in freed {
+        let key = blob_key(workspace_id, &to_hex(hash));
+        if let Err(e) = store.delete(&key).await {
+            tracing::warn!(error = %e, key = %key, "blob GC: store delete failed");
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
