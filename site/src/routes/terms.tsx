@@ -54,8 +54,8 @@ function TermsPage() {
       <h2>3. Subscriptions, trials and billing</h2>
       <ul>
         <li>
-          Paid plans are sold by Polar Software Inc. acting as merchant of
-          record. Polar's own terms apply to the purchase itself, and Polar
+          Paid plans are processed by Stripe, Inc. acting as merchant of
+          record. Stripe's own terms apply to the purchase itself, and Stripe
           handles payment processing and VAT.
         </li>
         <li>

@@ -1,10 +1,8 @@
 import { useState } from 'react'
 import { createFileRoute } from '@tanstack/react-router'
-import { useServerFn } from '@tanstack/react-start'
 import SectionRule from '../components/SectionRule'
 import { PLANS, SELF_HOST_FEATURES } from '../lib/plans'
 import type { BillingInterval, PlanId } from '../lib/plans'
-import { createCheckout } from '../server/billing'
 
 export const Route = createFileRoute('/pricing')({
   head: () => ({
@@ -83,44 +81,16 @@ function PlanCard({
           <li key={feature}>{feature}</li>
         ))}
       </ul>
-      <button
-        type="button"
-        onClick={() => onSubscribe(plan)}
-        disabled={pending}
-        className="btn btn-primary mt-7 w-full disabled:cursor-wait disabled:opacity-60"
-      >
-        {pending ? 'Opening checkout…' : 'Start 14-day trial'}
-      </button>
+      <a href="https://app.stakedevtool.com" className="btn btn-primary mt-7 w-full">
+        Start 14-day trial
+      </a>
     </article>
   )
 }
 
 function PricingPage() {
-  const checkout = useServerFn(createCheckout)
   const [interval, setInterval] = useState<BillingInterval>('month')
-  const [pendingPlan, setPendingPlan] = useState<PlanId | null>(null)
-  const [error, setError] = useState<string | null>(null)
 
-  async function subscribe(plan: PlanId) {
-    setError(null)
-    setPendingPlan(plan)
-    try {
-      const result = await checkout({ data: { plan, interval } })
-      if (result.url) {
-        window.location.assign(result.url)
-        return
-      }
-      setError(
-        result.reason === 'not_configured'
-          ? 'Checkout is not available yet on this deployment.'
-          : 'The payment provider did not respond. Try again in a minute.',
-      )
-    } catch {
-      setError('Something went wrong starting the checkout. Try again in a minute.')
-    } finally {
-      setPendingPlan(null)
-    }
-  }
 
   return (
     <main className="wrap pt-16 pb-8">

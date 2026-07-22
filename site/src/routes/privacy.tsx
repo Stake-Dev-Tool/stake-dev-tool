@@ -39,7 +39,7 @@ function PrivacyPage() {
         <li>
           <strong>Billing status</strong>: your subscription plan and its
           state. Payment details (card numbers, billing address) are collected
-          and stored by Polar, our merchant of record, never by us.
+          and stored by Stripe, our merchant of record, never by us.
         </li>
         <li>
           <strong>Technical logs</strong>: IP address, user agent and request
@@ -77,7 +77,7 @@ function PrivacyPage() {
           and game bundles.
         </li>
         <li>
-          <strong>Polar Software Inc.</strong> (United States): payments, as
+          <strong>Stripe, Inc.</strong> (United States): payments, as
           merchant of record.
         </li>
         <li>
@@ -90,7 +90,7 @@ function PrivacyPage() {
       </ul>
       <p>
         Data is stored in the European Union wherever possible. Where a
-        processor is outside the EU (such as Polar), transfers rely on
+        processor is outside the EU (such as Stripe), transfers rely on
         recognised safeguards such as standard contractual clauses.
       </p>
 
@@ -103,7 +103,7 @@ function PrivacyPage() {
         </li>
         <li>Technical logs: a few weeks at most.</li>
         <li>
-          Billing records: kept by Polar and by us as required by tax law.
+          Billing records: kept by Stripe and by us as required by tax law.
         </li>
       </ul>
 

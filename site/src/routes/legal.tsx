@@ -43,8 +43,8 @@ function LegalNoticePage() {
 
       <h2>Payments</h2>
       <p>
-        Paid subscriptions are sold by <strong>Polar Software Inc.</strong> acting
-        as merchant of record. Polar appears on your invoice and handles payment
+        Paid subscriptions are processed by <strong>Stripe, Inc.</strong> acting
+        as merchant of record (Stripe Managed Payments). Stripe appears on your invoice and handles payment
         processing and VAT remittance.
       </p>
 

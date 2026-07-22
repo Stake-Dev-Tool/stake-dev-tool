@@ -44,8 +44,8 @@ function RefundsPage() {
 
       <h2>How refunds are paid</h2>
       <p>
-        Payments are processed by Polar, our merchant of record, so approved
-        refunds are issued by Polar to your original payment method. Refunds
+        Payments are processed by Stripe, our merchant of record, so approved
+        refunds are issued by Stripe to your original payment method. Refunds
         usually appear within 5 to 10 business days depending on your bank.
       </p>
 

@@ -19,9 +19,6 @@ import { Route as PricingRouteImport } from './routes/pricing'
 import { Route as PrivacyRouteImport } from './routes/privacy'
 import { Route as RefundsRouteImport } from './routes/refunds'
 import { Route as TermsRouteImport } from './routes/terms'
-import { Route as CheckoutCancelledRouteImport } from './routes/checkout.cancelled'
-import { Route as CheckoutSuccessRouteImport } from './routes/checkout.success'
-import { Route as ApiBillingWebhookRouteImport } from './routes/api.billing.webhook'
 
 const IndexRoute = IndexRouteImport.update({
   id: '/',
@@ -73,21 +70,6 @@ const TermsRoute = TermsRouteImport.update({
   path: '/terms',
   getParentRoute: () => rootRouteImport,
 } as any)
-const CheckoutCancelledRoute = CheckoutCancelledRouteImport.update({
-  id: '/checkout/cancelled',
-  path: '/checkout/cancelled',
-  getParentRoute: () => rootRouteImport,
-} as any)
-const CheckoutSuccessRoute = CheckoutSuccessRouteImport.update({
-  id: '/checkout/success',
-  path: '/checkout/success',
-  getParentRoute: () => rootRouteImport,
-} as any)
-const ApiBillingWebhookRoute = ApiBillingWebhookRouteImport.update({
-  id: '/api/billing/webhook',
-  path: '/api/billing/webhook',
-  getParentRoute: () => rootRouteImport,
-} as any)
 
 export interface FileRoutesByFullPath {
   '/': typeof IndexRoute
@@ -100,9 +82,6 @@ export interface FileRoutesByFullPath {
   '/privacy': typeof PrivacyRoute
   '/refunds': typeof RefundsRoute
   '/terms': typeof TermsRoute
-  '/checkout/cancelled': typeof CheckoutCancelledRoute
-  '/checkout/success': typeof CheckoutSuccessRoute
-  '/api/billing/webhook': typeof ApiBillingWebhookRoute
 }
 export interface FileRoutesByTo {
   '/': typeof IndexRoute
@@ -115,9 +94,6 @@ export interface FileRoutesByTo {
   '/privacy': typeof PrivacyRoute
   '/refunds': typeof RefundsRoute
   '/terms': typeof TermsRoute
-  '/checkout/cancelled': typeof CheckoutCancelledRoute
-  '/checkout/success': typeof CheckoutSuccessRoute
-  '/api/billing/webhook': typeof ApiBillingWebhookRoute
 }
 export interface FileRoutesById {
   __root__: typeof rootRouteImport
@@ -131,9 +107,6 @@ export interface FileRoutesById {
   '/privacy': typeof PrivacyRoute
   '/refunds': typeof RefundsRoute
   '/terms': typeof TermsRoute
-  '/checkout/cancelled': typeof CheckoutCancelledRoute
-  '/checkout/success': typeof CheckoutSuccessRoute
-  '/api/billing/webhook': typeof ApiBillingWebhookRoute
 }
 export interface FileRouteTypes {
   fileRoutesByFullPath: FileRoutesByFullPath
@@ -148,9 +121,6 @@ export interface FileRouteTypes {
     | '/privacy'
     | '/refunds'
     | '/terms'
-    | '/checkout/cancelled'
-    | '/checkout/success'
-    | '/api/billing/webhook'
   fileRoutesByTo: FileRoutesByTo
   to:
     | '/'
@@ -163,9 +133,6 @@ export interface FileRouteTypes {
     | '/privacy'
     | '/refunds'
     | '/terms'
-    | '/checkout/cancelled'
-    | '/checkout/success'
-    | '/api/billing/webhook'
   id:
     | '__root__'
     | '/'
@@ -178,9 +145,6 @@ export interface FileRouteTypes {
     | '/privacy'
     | '/refunds'
     | '/terms'
-    | '/checkout/cancelled'
-    | '/checkout/success'
-    | '/api/billing/webhook'
   fileRoutesById: FileRoutesById
 }
 export interface RootRouteChildren {
@@ -194,9 +158,6 @@ export interface RootRouteChildren {
   PrivacyRoute: typeof PrivacyRoute
   RefundsRoute: typeof RefundsRoute
   TermsRoute: typeof TermsRoute
-  CheckoutCancelledRoute: typeof CheckoutCancelledRoute
-  CheckoutSuccessRoute: typeof CheckoutSuccessRoute
-  ApiBillingWebhookRoute: typeof ApiBillingWebhookRoute
 }
 
 declare module '@tanstack/react-router' {
@@ -271,27 +232,6 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof TermsRouteImport
       parentRoute: typeof rootRouteImport
     }
-    '/checkout/cancelled': {
-      id: '/checkout/cancelled'
-      path: '/checkout/cancelled'
-      fullPath: '/checkout/cancelled'
-      preLoaderRoute: typeof CheckoutCancelledRouteImport
-      parentRoute: typeof rootRouteImport
-    }
-    '/checkout/success': {
-      id: '/checkout/success'
-      path: '/checkout/success'
-      fullPath: '/checkout/success'
-      preLoaderRoute: typeof CheckoutSuccessRouteImport
-      parentRoute: typeof rootRouteImport
-    }
-    '/api/billing/webhook': {
-      id: '/api/billing/webhook'
-      path: '/api/billing/webhook'
-      fullPath: '/api/billing/webhook'
-      preLoaderRoute: typeof ApiBillingWebhookRouteImport
-      parentRoute: typeof rootRouteImport
-    }
   }
 }
 
@@ -306,9 +246,6 @@ const rootRouteChildren: RootRouteChildren = {
   PrivacyRoute: PrivacyRoute,
   RefundsRoute: RefundsRoute,
   TermsRoute: TermsRoute,
-  CheckoutCancelledRoute: CheckoutCancelledRoute,
-  CheckoutSuccessRoute: CheckoutSuccessRoute,
-  ApiBillingWebhookRoute: ApiBillingWebhookRoute,
 }
 export const routeTree = rootRouteImport
   ._addFileChildren(rootRouteChildren)
