@@ -36,11 +36,18 @@ export const Route = createRootRoute({
   shellComponent: RootDocument,
 })
 
+// After a deploy, a tab loaded on the previous build holds a chunk index whose
+// hashed files no longer exist — the next client-side navigation 404s. Vite
+// surfaces that as `vite:preloadError`; reload once to pick up the new build
+// (session-scoped throttle so a genuinely broken asset can't reload-loop).
+const RELOAD_ON_STALE_CHUNK = `window.addEventListener('vite:preloadError',function(e){var k='sdt-reload-at',t=+(sessionStorage.getItem(k)||0);if(Date.now()-t>60000){sessionStorage.setItem(k,String(Date.now()));e.preventDefault();location.reload()}});`
+
 function RootDocument({ children }: { children: React.ReactNode }) {
   return (
     <html lang="en">
       <head>
         <HeadContent />
+        <script dangerouslySetInnerHTML={{ __html: RELOAD_ON_STALE_CHUNK }} />
       </head>
       <body className="bg-pit font-sans text-ink antialiased">
         <Header />
