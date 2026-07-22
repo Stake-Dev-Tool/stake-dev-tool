@@ -303,3 +303,62 @@ spinner and `error` surfaces the server message. Presentation helpers live in
 `formatSpins`, `formatMetric`, `formatCount`, and `xmult` (`0.96x`). The math
 components are split out under `src/lib/components/Math*` (`MathVerdict`,
 `MathConstraints`, `MathModePanel`) and the page owns only load/poll/selection.
+
+## Admin console (instance operators)
+
+An instance-operator console at **`/admin`** — global stats, workspace plan
+comps, user admin management, and cross-workspace share moderation. Every
+`/api/admin/*` endpoint is cookie-auth **and** admin-gated: a non-admin gets a
+flat **404** on all of them, including `/me`, so gating is a boolean, never an
+error path.
+
+- **API** (`src/lib/api.ts`, `api.admin.*`): `me()` (probe → `boolean`; 404 →
+  `false` without throwing), `overview()`, `workspaces(query?)`,
+  `setOverride(id, {plan, expires_in_days?, note?})` (plan `null` clears the
+  comp), `users(query?)`, `setAdmin(id, is_admin)` (→ `boolean`; a 409
+  `last_admin` surfaces as an `ApiError` the page classifies by `code`),
+  `shares(query?)`, and `revokeShare(id)`. Wire shapes go through `normalize*`
+  helpers (`normalizeAdminOverview/Workspace/User/Share`) like the rest of the
+  surface — `bigint` counters coerced to plain numbers, every nullable field
+  tolerated — reconciled against the generated `crates/protocol` bindings.
+- **Admin probe** (`src/lib/admin.ts`): a session-cached `isAdmin()` mirroring
+  billing.ts's module-cache idiom — **one** `GET /api/admin/me` per session,
+  shared by every mount. A definitive 404 (not admin) resolves `false` and is
+  kept; a transient (non-404) failure is evicted so a later mount re-probes.
+  `resetAdmin()` clears it on logout (wired into the account page's logout beside
+  `resetWorkspaces()`).
+- **Nav gating** (`Nav.svelte`): the **Admin** link renders only when the probe
+  resolves `true`. An `$effect` keyed on `session.user?.id` re-probes if the
+  signed-in user changes without a full reload; any failure keeps the link
+  hidden. Non-admins never see the link, and a direct `/admin` visit by a
+  non-admin renders the standard **not-found** `EmptyState` (the 404s are treated
+  as "not found", never an error banner).
+- **`Sparkline.svelte`**: a dependency-free tiny bar chart for a 30-day daily
+  series — inline SVG, one accent-filled `<rect>` per day with a per-day
+  `<title>` tooltip, stretched to fill width (`preserveAspectRatio="none"`).
+  Renders a calm "no activity" panel when the series is empty or all-zero.
+- **`/admin`** (`src/routes/admin/+page.svelte`): leads with eight **stat tiles**
+  (users, workspaces, games, revisions, share links, storage via `humanSize`,
+  sessions, spins) and two 30-day **sparklines** (signups, pushes, each with a
+  running total). Below, deep-linkable `#hash` **Tabs** (reusing `Tabs.svelte`):
+  - **Workspaces** — debounced (300 ms) slug/name search; a table (slug/name,
+    created via `Time`, members, games, storage, plan badge — trial=neutral,
+    solo/team=accent, unlimited=info, expired=danger — subscription-status text,
+    and a `comped: <plan> → <date>` indicator when an override is active). Row
+    action **Manage plan** expands an inline **Plan override (comp)** panel: plan
+    select (None/Solo/Team/Unlimited — "None" clears), optional expiry days
+    (seeded from the override's remaining days via `daysUntil`), and an optional
+    note → `PUT` → toast + in-place row refresh.
+  - **Users** — debounced email/name search; a table (email, display name,
+    created, workspaces count, admin badge, a `you` badge on self). Action toggles
+    **Make admin** / **Remove admin** (confirm on remove); a 409 `last_admin`
+    surfaces inline via `toast.error`.
+  - **Shares** — debounced search; a table (slug + full URL as a `CopyField` when
+    present, workspace, game, sessions/spins, created, Active/Revoked status).
+    Action **Revoke** (confirm) → `toast` + in-place status flip.
+
+  Each tab loads lazily on first activation, keeps its own search/loading/error
+  state, and shows a `Skeleton` while loading and a helpful `EmptyState`
+  (search-aware copy) when empty. All tables sit in `overflow-x-auto` and the tile
+  grid collapses (2 → 3 → 4 columns). A 404 from any admin fetch (e.g. admin
+  revoked mid-session) flips the page to the not-found state rather than an error.

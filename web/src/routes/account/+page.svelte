@@ -5,6 +5,7 @@
   import { session, setUser } from '$lib/session.svelte';
   import { formatDate, formatExpiry, errorText } from '$lib/format';
   import { resetWorkspaces } from '$lib/workspaces.svelte';
+  import { resetAdmin } from '$lib/admin';
   import Button from '$lib/components/Button.svelte';
   import Input from '$lib/components/Input.svelte';
   import Card from '$lib/components/Card.svelte';
@@ -89,6 +90,7 @@
     }
     setUser(null);
     resetWorkspaces();
+    resetAdmin();
     await goto('/login');
   }
 </script>

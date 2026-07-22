@@ -1,6 +1,7 @@
 <script lang="ts">
   import { page } from '$app/state';
   import { session } from '$lib/session.svelte';
+  import { isAdmin } from '$lib/admin';
   import WorkspaceSwitcher from '$lib/components/WorkspaceSwitcher.svelte';
 
   const links = [
@@ -11,6 +12,29 @@
   function isActive(href: string, path: string): boolean {
     return path === href || path.startsWith(href + '/');
   }
+
+  // The Admin link shows only for instance admins. One cached /admin/me probe
+  // per session (see admin.ts); any failure keeps the link hidden. Re-probes if
+  // the signed-in user changes without a full reload.
+  let admin = $state(false);
+  $effect(() => {
+    const uid = session.user?.id;
+    if (!uid) {
+      admin = false;
+      return;
+    }
+    let cancelled = false;
+    isAdmin()
+      .then((v) => {
+        if (!cancelled) admin = v;
+      })
+      .catch(() => {
+        if (!cancelled) admin = false;
+      });
+    return () => {
+      cancelled = true;
+    };
+  });
 </script>
 
 <header class="sticky top-0 z-10 border-b border-border bg-bg/80 backdrop-blur">
@@ -40,6 +64,16 @@
           {l.label}
         </a>
       {/each}
+      {#if admin}
+        <a
+          href="/admin"
+          class="rounded-md px-3 py-1.5 text-sm transition {isActive('/admin', page.url.pathname)
+            ? 'bg-surface-2 text-text'
+            : 'text-muted hover:text-text'}"
+        >
+          Admin
+        </a>
+      {/if}
       {#if session.user}
         <a
           href="/account"

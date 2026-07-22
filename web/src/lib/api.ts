@@ -428,6 +428,104 @@ export interface FrontBundleCreated {
 }
 
 // ---------------------------------------------------------------------------
+// Admin console (instance operator — M-admin)
+// ---------------------------------------------------------------------------
+// Every /api/admin endpoint is cookie-auth AND admin-gated: a non-admin gets a
+// flat 404 on ALL of them, including /me. `admin.me()` translates that 404 to
+// `false` (never a throw), so gating the UI is a boolean, not an error path.
+
+/** One day's count in a 30-day activity series (signups / pushes). */
+export interface AdminDayCount {
+  /** `YYYY-MM-DD` (server-local day). */
+  date: string;
+  count: number;
+}
+
+/**
+ * Instance-wide totals plus two 30-day daily series. The count fields may be
+ * `bigint` on the wire; coerced to plain numbers (well under
+ * `Number.MAX_SAFE_INTEGER`) so formatting/arithmetic just work.
+ */
+export interface AdminOverview {
+  users: number;
+  workspaces: number;
+  games: number;
+  revisions: number;
+  share_links: number;
+  storage_bytes: number;
+  sessions_total: number;
+  spins_total: number;
+  signups_30d: AdminDayCount[];
+  pushes_30d: AdminDayCount[];
+}
+
+/**
+ * A comp/override an operator has granted on a workspace's plan. `plan` is the
+ * comped plan label; `expires_at` null = no expiry; `note` an optional memo.
+ */
+export interface AdminOverrideInfo {
+  plan: string;
+  expires_at: string | null;
+  note: string | null;
+}
+
+/** One row in the admin workspaces table. */
+export interface AdminWorkspace {
+  id: string;
+  slug: string;
+  name: string;
+  created_at: string;
+  members: number;
+  games: number;
+  storage_bytes: number;
+  /** Effective resolved plan label ("trial"/"solo"/"team"/"unlimited"/"expired"). */
+  plan: string;
+  /** Present when an operator comp is active; null otherwise. */
+  override: AdminOverrideInfo | null;
+  /** Polar's verbatim subscription status, or null when there's no subscription. */
+  subscription_status: string | null;
+}
+
+/** The plan an override sets; `null` clears the override entirely. */
+export type AdminOverridePlan = 'solo' | 'team' | 'unlimited' | null;
+
+/**
+ * Body for `PUT /admin/workspaces/:id/override`. `plan: null` clears the comp;
+ * `expires_in_days` (relative) and `note` are optional and only meaningful when
+ * granting a plan.
+ */
+export interface AdminOverrideInput {
+  plan: AdminOverridePlan;
+  expires_in_days?: number;
+  note?: string;
+}
+
+/** One row in the admin users table. */
+export interface AdminUser {
+  id: string;
+  email: string;
+  display_name: string;
+  created_at: string;
+  is_admin: boolean;
+  /** Count of workspaces the user belongs to. */
+  workspaces: number;
+}
+
+/** One row in the admin shares table (cross-workspace share-link moderation). */
+export interface AdminShare {
+  id: string;
+  slug: string;
+  /** Full play URL, or null when the instance has no play domain. */
+  url: string | null;
+  workspace_slug: string;
+  game: string;
+  sessions_count: number;
+  spins_count: number;
+  revoked_at: string | null;
+  created_at: string;
+}
+
+// ---------------------------------------------------------------------------
 // Error type
 // ---------------------------------------------------------------------------
 
@@ -866,6 +964,84 @@ function normalizeShareLink(raw: unknown): ShareLink {
     total_win: num(s.total_win),
     observed_rtp: numOrNull(s.observed_rtp),
     active_sessions: num(s.active_sessions)
+  };
+}
+
+// ---- Admin console ---------------------------------------------------------
+
+function normalizeAdminDayCount(raw: unknown): AdminDayCount {
+  const d = (raw ?? {}) as Record<string, unknown>;
+  return { date: String(d.date ?? ''), count: num(d.count) };
+}
+
+function normalizeAdminOverview(raw: unknown): AdminOverview {
+  const o = (raw ?? {}) as Record<string, unknown>;
+  return {
+    users: num(o.users),
+    workspaces: num(o.workspaces),
+    games: num(o.games),
+    revisions: num(o.revisions),
+    share_links: num(o.share_links),
+    storage_bytes: num(o.storage_bytes),
+    sessions_total: num(o.sessions_total),
+    spins_total: num(o.spins_total),
+    signups_30d: Array.isArray(o.signups_30d) ? o.signups_30d.map(normalizeAdminDayCount) : [],
+    pushes_30d: Array.isArray(o.pushes_30d) ? o.pushes_30d.map(normalizeAdminDayCount) : []
+  };
+}
+
+function normalizeAdminOverride(raw: unknown): AdminOverrideInfo | null {
+  if (raw == null) return null;
+  const o = raw as Record<string, unknown>;
+  return {
+    plan: String(o.plan ?? ''),
+    expires_at: strOrNull(o.expires_at),
+    note: strOrNull(o.note)
+  };
+}
+
+function normalizeAdminWorkspace(raw: unknown): AdminWorkspace {
+  const w = (raw ?? {}) as Record<string, unknown>;
+  return {
+    id: String(w.id ?? ''),
+    slug: String(w.slug ?? ''),
+    name: String(w.name ?? w.slug ?? ''),
+    created_at: String(w.created_at ?? ''),
+    members: num(w.members),
+    games: num(w.games),
+    storage_bytes: num(w.storage_bytes),
+    // Default to `trial` (the most-restricted paid state) if ever omitted, so a
+    // shape surprise never paints a false "unlimited".
+    plan: String(w.plan ?? 'trial'),
+    override: normalizeAdminOverride(w.override),
+    subscription_status: strOrNull(w.subscription_status)
+  };
+}
+
+function normalizeAdminUser(raw: unknown): AdminUser {
+  const u = (raw ?? {}) as Record<string, unknown>;
+  return {
+    id: String(u.id ?? ''),
+    email: String(u.email ?? ''),
+    display_name: String(u.display_name ?? u.name ?? ''),
+    created_at: String(u.created_at ?? ''),
+    is_admin: Boolean(u.is_admin),
+    workspaces: num(u.workspaces)
+  };
+}
+
+function normalizeAdminShare(raw: unknown): AdminShare {
+  const s = (raw ?? {}) as Record<string, unknown>;
+  return {
+    id: String(s.id ?? ''),
+    slug: String(s.slug ?? ''),
+    url: strOrNull(s.url),
+    workspace_slug: String(s.workspace_slug ?? ''),
+    game: String(s.game ?? ''),
+    sessions_count: num(s.sessions_count),
+    spins_count: num(s.spins_count),
+    revoked_at: strOrNull(s.revoked_at),
+    created_at: String(s.created_at ?? '')
   };
 }
 
@@ -1387,6 +1563,94 @@ export const api = {
       );
       const r = (raw ?? {}) as Record<string, unknown>;
       return String(r.checkout_url ?? '');
+    }
+  },
+
+  admin: {
+    /**
+     * Probe whether the current session is an instance admin. Non-admins get a
+     * flat 404 here (as on every /admin endpoint), which we resolve to `false`
+     * WITHOUT throwing — the caller gates UI on a boolean, never an error. Any
+     * OTHER failure (network, 5xx) rejects, so the module-cache probe in
+     * `admin.ts` can evict and re-try rather than caching a transient miss.
+     */
+    async me(): Promise<boolean> {
+      try {
+        const raw = await request<unknown>('GET', '/admin/me');
+        const r = (raw ?? {}) as Record<string, unknown>;
+        return Boolean(r.is_admin);
+      } catch (e) {
+        if (e instanceof ApiError && e.status === 404) return false;
+        throw e;
+      }
+    },
+
+    /** Instance-wide totals + the two 30-day activity series. */
+    async overview(): Promise<AdminOverview> {
+      const raw = await request<unknown>('GET', '/admin/overview');
+      return normalizeAdminOverview(raw);
+    },
+
+    /** Workspaces (optionally filtered by `query` — slug/name substring). */
+    async workspaces(query = ''): Promise<AdminWorkspace[]> {
+      const q = query.trim() ? `?query=${encodeURIComponent(query.trim())}` : '';
+      const raw = await request<unknown>('GET', `/admin/workspaces${q}`);
+      const arr = Array.isArray(raw)
+        ? raw
+        : ((raw as { workspaces?: unknown[] } | undefined)?.workspaces ?? []);
+      return arr.map(normalizeAdminWorkspace);
+    },
+
+    /**
+     * Set (or clear, with `plan: null`) a workspace's plan override — the
+     * comp-subscription grant. Returns the updated row.
+     */
+    async setOverride(id: string, input: AdminOverrideInput): Promise<AdminWorkspace> {
+      const raw = await request<unknown>(
+        'PUT',
+        `/admin/workspaces/${encodeURIComponent(id)}/override`,
+        input
+      );
+      const r = (raw ?? {}) as Record<string, unknown>;
+      return normalizeAdminWorkspace(r.workspace ?? r);
+    },
+
+    /** Users (optionally filtered by `query` — email/name substring). */
+    async users(query = ''): Promise<AdminUser[]> {
+      const q = query.trim() ? `?query=${encodeURIComponent(query.trim())}` : '';
+      const raw = await request<unknown>('GET', `/admin/users${q}`);
+      const arr = Array.isArray(raw)
+        ? raw
+        : ((raw as { users?: unknown[] } | undefined)?.users ?? []);
+      return arr.map(normalizeAdminUser);
+    },
+
+    /**
+     * Grant/revoke instance admin on a user. Returns the resulting `is_admin`.
+     * A 409 `last_admin` (refusing to remove the final admin) surfaces as an
+     * `ApiError` the caller classifies by `code`.
+     */
+    async setAdmin(id: string, is_admin: boolean): Promise<boolean> {
+      const raw = await request<unknown>('PUT', `/admin/users/${encodeURIComponent(id)}/admin`, {
+        is_admin
+      });
+      const r = (raw ?? {}) as Record<string, unknown>;
+      return Boolean(r.is_admin);
+    },
+
+    /** Share links across all workspaces (optionally filtered by `query`). */
+    async shares(query = ''): Promise<AdminShare[]> {
+      const q = query.trim() ? `?query=${encodeURIComponent(query.trim())}` : '';
+      const raw = await request<unknown>('GET', `/admin/shares${q}`);
+      const arr = Array.isArray(raw)
+        ? raw
+        : ((raw as { shares?: unknown[] } | undefined)?.shares ?? []);
+      return arr.map(normalizeAdminShare);
+    },
+
+    /** Revoke a share link (moderation). Resolves on 200. */
+    async revokeShare(id: string): Promise<void> {
+      await request<void>('POST', `/admin/shares/${encodeURIComponent(id)}/revoke`);
     }
   },
 
