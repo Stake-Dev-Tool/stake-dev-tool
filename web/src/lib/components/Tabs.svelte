@@ -11,7 +11,14 @@
   let { tabs, active, onselect, class: klass = '' }: Props = $props();
 </script>
 
-<div role="tablist" class="flex gap-1 overflow-x-auto border-b border-border {klass}">
+<!-- The buttons' -mb-px underline overflows the box by 1px; with overflow-x-auto
+     that forces overflow-y to auto too, which paints a scrollbar track on
+     Windows (non-overlay scrollbars). Hide the track; scrolling still works
+     when tabs genuinely overflow on narrow screens. -->
+<div
+  role="tablist"
+  class="flex gap-1 overflow-x-auto border-b border-border [-ms-overflow-style:none] [scrollbar-width:none] [&::-webkit-scrollbar]:hidden {klass}"
+>
   {#each tabs as t (t.id)}
     <button
       type="button"
