@@ -116,8 +116,8 @@
   function planTone(plan: string): 'neutral' | 'accent' | 'info' | 'danger' {
     if (plan === 'unlimited') return 'info';
     if (plan === 'solo' || plan === 'team') return 'accent';
-    if (plan === 'expired') return 'danger';
-    return 'neutral'; // trial + anything unexpected
+    if (plan === 'free') return 'danger';
+    return 'neutral'; // anything unexpected
   }
 
   // Plan-override (comp) editor — an inline panel expanded under a row.
@@ -435,8 +435,8 @@
     {#if activeTab === 'workspaces'}
       <section>
         <SectionHeader title="Workspaces">
-          Manage plan overrides — grant a <span class="text-text">comp</span> subscription, extend a
-          trial, or clear a comp back to the normal billing state.
+          Manage plan overrides — grant a <span class="text-text">comp</span> subscription, or clear
+          a comp back to the normal billing state.
         </SectionHeader>
 
         <div class="mb-4 max-w-sm">

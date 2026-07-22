@@ -60,7 +60,7 @@
         return;
       }
       if (e instanceof ApiError && e.code === 'upgrade_required') {
-        // The workspace is at its plan's member cap (or its trial lapsed). The
+        // The workspace is at its plan's member cap (or has no active plan). The
         // invitee can't act on billing — point them at the owner rather than a
         // billing page they have no access to.
         const name = preview?.workspace_name ? `"${preview.workspace_name}"` : 'This workspace';

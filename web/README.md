@@ -148,9 +148,9 @@ dependency, **`hash-wasm`**.
 
 ## Billing & plans (M7)
 
-Polar-backed subscriptions, surfaced without ever hiding the app behind a
-paywall — the free/self-host experience stays fully usable. The paywall moments
-are exactly three: the trial countdown, the expired-trial banner, and
+Polar-backed subscriptions. On a billing-enabled instance a workspace is
+read-only (the **Free** state) until it subscribes; self-hosting stays fully
+unlimited. The paywall moments are exactly two: the no-active-plan banner and
 quota-hit errors. The whole surface degrades to **nothing** on a self-hosted
 instance (`GET /billing` → `enabled: false`, every limit unlimited).
 
@@ -169,12 +169,12 @@ instance (`GET /billing` → `enabled: false`, every limit unlimited).
   (`planLabel`, `statusLabel`, `intervalLabel`, `daysUntil`, and a `meter()` that
   drives the usage bars — amber at ≥ 80%, red at 100%).
 - **`PlanBanner.svelte`** (self-fetching, `{slug}`): renders **nothing** when
-  billing is disabled; a subtle banner on **trial** (`N days left · Upgrade`); a
-  prominent banner when **expired** (writes disabled); a warning banner on
-  **past_due** (grace period); a tiny plan **chip** on a healthy Solo/Team plan.
-  A failed fetch renders nothing — it never breaks the page.
+  billing is disabled; a prominent banner on **free** (no active plan, writes
+  disabled — "Choose a plan →"); a warning banner on **past_due** (grace period);
+  a tiny plan **chip** on a healthy Solo/Team plan. A failed fetch renders
+  nothing — it never breaks the page.
 - **`/w/[slug]/billing`**: the current plan (label, Polar status, interval,
-  renewal / trial-end date), a usage section (members, storage via `humanSize`,
+  renewal date), a usage section (members, storage via `humanSize`,
   active share links vs limits, `∞` when unlimited), and an upgrade section with
   Solo/Team cards, a per-card Monthly/Yearly toggle, and indicative pricing
   (from `V2.md` — "final price at checkout"; yearly = 2 months free). The Upgrade
@@ -342,8 +342,8 @@ error path.
   sessions, spins) and two 30-day **sparklines** (signups, pushes, each with a
   running total). Below, deep-linkable `#hash` **Tabs** (reusing `Tabs.svelte`):
   - **Workspaces** — debounced (300 ms) slug/name search; a table (slug/name,
-    created via `Time`, members, games, storage, plan badge — trial=neutral,
-    solo/team=accent, unlimited=info, expired=danger — subscription-status text,
+    created via `Time`, members, games, storage, plan badge — free=danger,
+    solo/team=accent, unlimited=info — subscription-status text,
     and a `comped: <plan> → <date>` indicator when an override is active). Row
     action **Manage plan** expands an inline **Plan override (comp)** panel: plan
     select (None/Solo/Team/Unlimited — "None" clears), optional expiry days

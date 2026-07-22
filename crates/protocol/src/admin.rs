@@ -91,8 +91,8 @@ pub struct AdminWorkspace {
     pub members: i64,
     pub games: i64,
     pub storage_bytes: i64,
-    /// Resolved plan label: `"unlimited"` (billing disabled), `"trial"`,
-    /// `"expired"`, `"solo"`, or `"team"`.
+    /// Resolved plan label: `"unlimited"` (billing disabled), `"free"`,
+    /// `"solo"`, or `"team"`.
     pub plan: String,
     #[serde(rename = "override")]
     #[ts(rename = "override")]

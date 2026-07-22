@@ -13,9 +13,9 @@ export type BillingStatusResponse = {
  */
 enabled: boolean, 
 /**
- * The resolved plan label: `"trial"`, `"solo"`, `"team"`, `"unlimited"`
- * (billing disabled), or `"expired"` (trial lapsed, unpaid — reads still
- * work, writes are blocked with `upgrade_required`).
+ * The resolved plan label: `"free"` (billing enabled, no active subscription
+ * — reads still work, writes are blocked with `upgrade_required`), `"solo"`,
+ * `"team"`, or `"unlimited"` (billing disabled, self-host).
  */
 plan: string, 
 /**
@@ -29,8 +29,7 @@ status: string | null,
  */
 interval: BillingInterval | null, 
 /**
- * The current billing period's end (subscription) or, on the free trial, when
- * the trial expires. `null` when neither applies.
+ * The current billing period's end, or `null` when there is no subscription.
  */
 current_period_end: string | null, 
 /**

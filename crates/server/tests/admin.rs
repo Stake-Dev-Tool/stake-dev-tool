@@ -50,7 +50,7 @@ struct Ctx {
     _tmp: tempfile::TempDir,
 }
 
-/// Billing-enabled config so plan resolution runs (trial/override) instead of
+/// Billing-enabled config so plan resolution runs (free/override) instead of
 /// short-circuiting to unlimited. The keys are placeholders — no Stripe call is hit.
 fn stripe_config() -> StripeConfig {
     StripeConfig {
@@ -564,9 +564,9 @@ async fn override_grant_flips_resolved_plan() {
         .await;
     let ws_id = workspace_id(&ctx.state, &ws).await;
 
-    // Fresh workspace on a billing-enabled instance → trial, no override.
+    // Fresh workspace on a billing-enabled instance → free, no override.
     let row = admin_ws(&mut admin, &ws).await;
-    assert_eq!(s(&row["plan"]), "trial");
+    assert_eq!(s(&row["plan"]), "free");
     assert_eq!(row["override"], json!(null));
 
     // Comp a team plan → the response echoes the flipped resolution + raw row.
@@ -586,11 +586,11 @@ async fn override_grant_flips_resolved_plan() {
     // Reflected on a fresh admin read…
     let reread = admin_ws(&mut admin, &ws).await;
     assert_eq!(s(&reread["plan"]), "team");
-    // …and the override wins over the trial in the workspace's own billing view.
+    // …and the override wins over the Free state in the workspace's own billing view.
     let (_, billing) = admin.get(&format!("/api/workspaces/{ws}/billing")).await;
     assert_eq!(s(&billing["plan"]), "team");
 
-    // Null plan clears it → back to trial.
+    // Null plan clears it → back to free.
     let (status, cleared) = admin
         .send(
             Method::PUT,
@@ -599,7 +599,7 @@ async fn override_grant_flips_resolved_plan() {
         )
         .await;
     assert_eq!(status, StatusCode::OK, "{cleared}");
-    assert_eq!(s(&cleared["plan"]), "trial");
+    assert_eq!(s(&cleared["plan"]), "free");
     assert_eq!(cleared["override"], json!(null));
 
     // An invalid plan value is rejected.
@@ -648,14 +648,14 @@ async fn expired_override_is_ignored_but_still_listed() {
     .unwrap();
 
     let row = admin_ws(&mut admin, &ws).await;
-    assert_eq!(s(&row["plan"]), "trial", "expired override must be ignored");
+    assert_eq!(s(&row["plan"]), "free", "expired override must be ignored");
     // …but the raw row is still surfaced on the list.
     assert_eq!(s(&row["override"]["plan"]), "team");
     assert!(row["override"]["expires_at"].is_string());
 
     // The workspace's own billing view agrees (override hook honors expiry).
     let (_, billing) = admin.get(&format!("/api/workspaces/{ws}/billing")).await;
-    assert_eq!(s(&billing["plan"]), "trial");
+    assert_eq!(s(&billing["plan"]), "free");
 }
 
 #[tokio::test]

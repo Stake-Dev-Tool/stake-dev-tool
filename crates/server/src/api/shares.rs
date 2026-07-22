@@ -147,7 +147,7 @@ async fn create_front_bundle(
     Json(req): Json<CreateFrontBundleRequest>,
 ) -> ApiResult<Response> {
     let workspace = authorize_push(&state, &user, &slug).await?;
-    // M7: committing a front bundle is a write — refuse it on a lapsed trial.
+    // M7: committing a front bundle is a write — refuse it on a Free (unsubscribed) workspace.
     billing::write_allowed(&state, workspace.id).await?;
     validate_bundle_manifest(&req.files)?;
     let game_id = game_id_by_slug(&state.pool, workspace.id, &game_slug).await?;
@@ -461,7 +461,7 @@ async fn create_share(
     Json(req): Json<CreateShareRequest>,
 ) -> ApiResult<Response> {
     let workspace = authorize_admin(&state, &user, &slug).await?;
-    // M7: a new share is a write — refuse it on a lapsed trial (see plan.rs).
+    // M7: a new share is a write — refuse it on a Free (unsubscribed) workspace (see plan.rs).
     billing::write_allowed(&state, workspace.id).await?;
     let game_id = game_id_by_slug(&state.pool, workspace.id, &game_slug).await?;
     let limits = billing::limits_for(&state, workspace.id).await?;

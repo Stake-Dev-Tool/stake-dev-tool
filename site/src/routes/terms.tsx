@@ -51,7 +51,7 @@ function TermsPage() {
         old.
       </p>
 
-      <h2>3. Subscriptions, trials and billing</h2>
+      <h2>3. Subscriptions and billing</h2>
       <ul>
         <li>
           Paid plans are processed by Stripe, Inc. acting as merchant of
@@ -59,9 +59,10 @@ function TermsPage() {
           handles payment processing and VAT.
         </li>
         <li>
-          Every cloud plan starts with a 14-day free trial. You are not charged
-          until the trial ends, and cancelling during the trial means you are
-          never charged.
+          There is no free trial on the hosted service: billing begins when you
+          subscribe, and until then a hosted workspace is read-only. If you would
+          rather not pay, the entire platform is open source and free to
+          self-host, with every feature included.
         </li>
         <li>
           Subscriptions renew automatically at the end of each billing period.

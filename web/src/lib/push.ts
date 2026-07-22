@@ -163,7 +163,7 @@ export function pushErrorMessage(e: unknown): string {
       // Billing gates (M7). Prefer the server's copy — it already names the fix —
       // and let the panel pair it with an "Upgrade →" link (see `isUpgradeError`).
       case 'upgrade_required':
-        return e.message || "This workspace's trial has ended — upgrade the plan to push.";
+        return e.message || 'This workspace has no active plan — subscribe to push.';
       case 'storage_quota_exceeded':
         return e.message || 'This push would exceed the workspace storage limit — upgrade for more space.';
     }

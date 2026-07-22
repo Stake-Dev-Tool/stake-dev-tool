@@ -53,8 +53,8 @@ roadmap.
 ## Get started
 
 **Use the hosted cloud (zero install).** Create an account at
-[app.stakedevtool.com](https://app.stakedevtool.com) — every plan starts
-with a 14-day free trial ([pricing](https://stakedevtool.com/pricing)).
+[app.stakedevtool.com](https://app.stakedevtool.com) and pick a plan
+([pricing](https://stakedevtool.com/pricing)) — or self-host for free.
 
 **Install the desktop app.** Grab the latest build from the
 [Releases page](https://github.com/simnJS/stake-dev-tool/releases/latest):

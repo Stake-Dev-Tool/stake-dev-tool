@@ -1,6 +1,6 @@
 <script lang="ts">
   /**
-   * UpgradeNotice — the inline surface for a quota / expired-trial write refusal
+   * UpgradeNotice — the inline surface for a quota / no-active-plan write refusal
    * (`upgrade_required`, `storage_quota_exceeded`). Shows the friendly message
    * plus an "Upgrade →" link to the workspace billing page, in place of a bare
    * error box. Kept small and self-contained so panels adopt it with one line.

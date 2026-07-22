@@ -58,16 +58,14 @@ export function daysUntil(iso: string | null | undefined): number {
 /** Human plan name for a resolved plan label. */
 export function planLabel(plan: string): string {
   switch (plan) {
-    case 'trial':
-      return 'Trial';
+    case 'free':
+      return 'Free';
     case 'solo':
       return 'Solo';
     case 'team':
       return 'Team';
     case 'unlimited':
       return 'Unlimited';
-    case 'expired':
-      return 'Trial expired';
     default:
       return plan ? plan[0].toUpperCase() + plan.slice(1) : '—';
   }

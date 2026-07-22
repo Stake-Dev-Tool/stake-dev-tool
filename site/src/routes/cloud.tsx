@@ -123,7 +123,7 @@ function CloudPage() {
 
       <div className="mt-14 flex flex-wrap gap-3">
         <Link to="/pricing" className="btn btn-primary">
-          Start a free trial
+          Get started
         </Link>
         <a
           href="https://github.com/simnJS/stake-dev-tool/blob/v2/V2.md"

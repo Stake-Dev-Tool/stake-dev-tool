@@ -317,11 +317,11 @@ export type BillingInterval = 'monthly' | 'yearly';
 
 /**
  * The resolved plan label the status endpoint reports. `unlimited` = billing
- * disabled (self-host, everything unlimited); `expired` = trial lapsed with no
- * subscription (reads work, writes are blocked with `upgrade_required`). Kept
- * open to `string` so an unknown server value is never a runtime throw.
+ * disabled (self-host, everything unlimited); `free` = billing enabled with no
+ * active subscription (reads work, writes are blocked with `upgrade_required`).
+ * Kept open to `string` so an unknown server value is never a runtime throw.
  */
-export type PlanLabel = 'trial' | 'solo' | 'team' | 'unlimited' | 'expired';
+export type PlanLabel = 'free' | 'solo' | 'team' | 'unlimited';
 
 /**
  * Current resource usage. The wire fields are `bigint` in the generated
@@ -350,7 +350,7 @@ export interface BillingStatus {
   /** Stripe's status verbatim ("active", "trialing", "past_due", …) or null. */
   status: string | null;
   interval: BillingInterval | null;
-  /** Period end (subscription) or trial expiry (trial); null when neither applies. */
+  /** The subscription's current period end; null when there is no subscription. */
   current_period_end: string | null;
   /**
    * Extra storage granted by the add-on, in GiB (already folded into
@@ -519,7 +519,7 @@ export interface AdminWorkspace {
   members: number;
   games: number;
   storage_bytes: number;
-  /** Effective resolved plan label ("trial"/"solo"/"team"/"unlimited"/"expired"). */
+  /** Effective resolved plan label ("free"/"solo"/"team"/"unlimited"). */
   plan: string;
   /** Present when an operator comp is active; null otherwise. */
   override: AdminOverrideInfo | null;
@@ -601,7 +601,7 @@ export function isUnauthorized(e: unknown): boolean {
 
 /**
  * True when a write was refused for a billing reason: `upgrade_required` (the
- * workspace's trial lapsed, or its member cap is reached on invite-accept) or
+ * workspace has no active plan, or its member cap is reached on invite-accept) or
  * `storage_quota_exceeded`. Callers surface an inline "Upgrade →" affordance
  * for these instead of a bare error.
  */
@@ -1083,9 +1083,9 @@ function normalizeAdminWorkspace(raw: unknown): AdminWorkspace {
     members: num(w.members),
     games: num(w.games),
     storage_bytes: num(w.storage_bytes),
-    // Default to `trial` (the most-restricted paid state) if ever omitted, so a
+    // Default to `free` (the most-restricted state) if ever omitted, so a
     // shape surprise never paints a false "unlimited".
-    plan: String(w.plan ?? 'trial'),
+    plan: String(w.plan ?? 'free'),
     override: normalizeAdminOverride(w.override),
     subscription_status: strOrNull(w.subscription_status)
   };

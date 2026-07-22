@@ -68,7 +68,18 @@
       const ws = await api.workspaces.create(name.trim(), slug);
       // Refresh the cached list so the Nav switcher shows the new workspace.
       void loadWorkspaces(true);
-      await goto(`/w/${ws.slug}`);
+      // On a billing-enabled instance the fresh workspace is read-only Free until
+      // it subscribes — route to its billing page in "activate" mode so the owner
+      // can pick a plan (or pay later). Self-hosted (billing disabled) goes
+      // straight to the workspace as before.
+      let dest = `/w/${ws.slug}`;
+      try {
+        const st = await api.billing.status(ws.slug);
+        if (st.enabled && st.plan === 'free') dest = `/w/${ws.slug}/billing?new=1`;
+      } catch {
+        // Billing status is best-effort; fall back to the workspace page.
+      }
+      await goto(dest);
     } catch (e) {
       if (e instanceof ApiError && e.code === 'slug_taken') {
         createError = 'That slug is already taken — pick another.';

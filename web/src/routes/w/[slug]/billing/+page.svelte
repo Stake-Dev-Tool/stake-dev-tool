@@ -1,6 +1,6 @@
 <script lang="ts">
   import { page } from '$app/state';
-  import { replaceState } from '$app/navigation';
+  import { goto, replaceState } from '$app/navigation';
   import { api, type BillingStatus, type BillingInterval, type PlanId, type Role } from '$lib/api';
   import {
     billingStatus,
@@ -32,6 +32,10 @@
   let wsName = $state('');
   let loading = $state(true);
   let loadError = $state('');
+
+  // Set from ?new=1 (a just-created, still-Free workspace): show the focused
+  // "pick a plan to activate" header with a Pay-later escape hatch.
+  let activating = $state(false);
 
   let checkoutError = $state('');
   let checkoutBusy = $state<PlanId | null>(null);
@@ -100,11 +104,13 @@
   let periodLine = $derived.by(() => {
     if (!status || !status.current_period_end) return '';
     const d = formatDate(status.current_period_end);
-    if (status.plan === 'trial') return `Trial ends ${d}`;
-    if (status.plan === 'expired') return `Trial ended ${d}`;
     if (status.status === 'canceled') return `Access until ${d}`;
     return `Renews ${d}`;
   });
+
+  function payLater() {
+    void goto(`/w/${slug}`);
+  }
 
   $effect(() => {
     void slug;
@@ -137,6 +143,16 @@
         }
         const url = new URL(page.url);
         url.searchParams.delete('upgraded');
+        replaceState(url.pathname + url.search, {});
+      }
+
+      // Fresh-workspace activation (?new=1): show the focused header, then strip
+      // the param so a refresh doesn't re-trigger it. Read after the awaits so
+      // this effect never subscribes to page.url.
+      if (page.url.searchParams.get('new') === '1') {
+        activating = true;
+        const url = new URL(page.url);
+        url.searchParams.delete('new');
         replaceState(url.pathname + url.search, {});
       }
     } catch (e) {
@@ -193,7 +209,17 @@
     items={[{ label: wsName || workspaceName(slug), href: `/w/${slug}` }, { label: 'Billing' }]}
   />
 
-  <h1 class="mb-8 text-2xl font-semibold tracking-tight">Billing</h1>
+  {#if activating}
+    <div class="mb-8">
+      <h1 class="text-2xl font-semibold tracking-tight">Activate {wsName || workspaceName(slug)}</h1>
+      <p class="mt-2 max-w-prose text-sm leading-relaxed text-muted">
+        Pick a plan to start pushing math, inviting your team and sharing games.
+      </p>
+      <Button variant="outline" size="sm" class="mt-4" onclick={payLater}>Pay later</Button>
+    </div>
+  {:else}
+    <h1 class="mb-8 text-2xl font-semibold tracking-tight">Billing</h1>
+  {/if}
 
   {#if loading}
     <Card class="p-6"><Skeleton /></Card>
@@ -219,13 +245,11 @@
         <div class="flex flex-wrap items-center gap-3">
           <span class="text-lg font-semibold">{planLabel(status.plan)}</span>
           {#if status.status}
-            <Badge tone={status.status === 'past_due' ? 'warn' : status.plan === 'expired' ? 'danger' : 'accent'}>
+            <Badge tone={status.status === 'past_due' ? 'warn' : 'accent'}>
               {statusLabel(status.status)}
             </Badge>
-          {:else if status.plan === 'expired'}
-            <Badge tone="danger">Expired</Badge>
-          {:else if status.plan === 'trial'}
-            <Badge tone="info">Trialing</Badge>
+          {:else if status.plan === 'free'}
+            <Badge tone="danger">No plan</Badge>
           {/if}
           {#if status.interval}
             <span class="text-sm text-muted">· {intervalLabel(status.interval)}</span>
@@ -267,7 +291,7 @@
     <!-- Upgrade -->
     <section>
       <h2 class="mb-3 text-sm font-semibold uppercase tracking-wide text-faint">
-        {status.plan === 'solo' || status.plan === 'team' ? 'Change plan' : 'Upgrade'}
+        {status.plan === 'solo' || status.plan === 'team' ? 'Change plan' : 'Choose a plan'}
       </h2>
 
       {#if !isOwner}
@@ -329,7 +353,7 @@
               disabled={!isOwner || checkoutBusy !== null}
               onclick={() => upgrade(p.id)}
             >
-              {active ? 'Switch billing' : `Upgrade to ${p.name}`}
+              {active ? 'Switch billing' : 'Subscribe'}
             </Button>
           </Card>
         {/each}

@@ -8,8 +8,8 @@ import type { AdminOverride } from "./AdminOverride";
  */
 export type AdminWorkspace = { id: string, slug: string, name: string, created_at: string, members: bigint, games: bigint, storage_bytes: bigint, 
 /**
- * Resolved plan label: `"unlimited"` (billing disabled), `"trial"`,
- * `"expired"`, `"solo"`, or `"team"`.
+ * Resolved plan label: `"unlimited"` (billing disabled), `"free"`,
+ * `"solo"`, or `"team"`.
  */
 plan: string, override: AdminOverride | null, 
 /**

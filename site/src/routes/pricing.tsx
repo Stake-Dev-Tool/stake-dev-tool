@@ -11,7 +11,7 @@ export const Route = createFileRoute('/pricing')({
       {
         name: 'description',
         content:
-          'Self-hosting is free forever with every feature. The cloud subscription sells hosting: Solo €5/month, Team €15/month, 14-day free trial.',
+          'Self-hosting is free forever with every feature. The cloud subscription sells hosting: Solo €5/month, Team €15/month. Subscribe when you are ready, cancel anytime.',
       },
     ],
   }),
@@ -34,8 +34,8 @@ const FAQ = [
     a: 'A single server binary (or Docker image), Postgres, and Caddy for TLS. Object storage is the local filesystem by default, or any S3-compatible bucket.',
   },
   {
-    q: 'How does the trial work?',
-    a: 'Every cloud plan starts with a 14-day free trial: you are not charged until the trial ends, and you can cancel from the billing portal at any time. Payments and EU VAT are handled by our merchant of record.',
+    q: 'Is there a free trial?',
+    a: 'No — there is no free trial on the hosted cloud. The free option is self-hosting: the whole platform is open source with every feature, so you can run it yourself for nothing. On the hosted service, billing starts when you subscribe and you can cancel anytime from the billing portal. Payments and EU VAT are handled by our merchant of record.',
   },
   {
     q: 'Why AGPL for the server?',
@@ -46,14 +46,10 @@ const FAQ = [
 function PlanCard({
   plan,
   interval,
-  onSubscribe,
-  pending,
   highlighted,
 }: {
   plan: PlanId
   interval: BillingInterval
-  onSubscribe: (plan: PlanId) => void
-  pending: boolean
   highlighted?: boolean
 }) {
   const def = PLANS[plan]
@@ -82,7 +78,7 @@ function PlanCard({
         ))}
       </ul>
       <a href="https://app.stakedevtool.com" className="btn btn-primary mt-7 w-full">
-        Start 14-day trial
+        Get started
       </a>
     </article>
   )
@@ -148,29 +144,12 @@ function PricingPage() {
           </a>
         </article>
 
-        <PlanCard
-          plan="solo"
-          interval={interval}
-          onSubscribe={subscribe}
-          pending={pendingPlan === 'solo'}
-          highlighted
-        />
-        <PlanCard
-          plan="team"
-          interval={interval}
-          onSubscribe={subscribe}
-          pending={pendingPlan === 'team'}
-        />
+        <PlanCard plan="solo" interval={interval} highlighted />
+        <PlanCard plan="team" interval={interval} />
       </div>
 
-      {error ? (
-        <p className="mt-5 mb-0 font-mono text-[0.75rem] text-amber" role="alert">
-          {error}
-        </p>
-      ) : null}
-
       <p className="mt-6 mb-0 font-mono text-[0.7rem] tracking-[0.06em] text-faint">
-        14-day free trial · cancel anytime · payments and VAT handled by our merchant of record
+        Cancel anytime · payments and VAT handled by our merchant of record
       </p>
 
       {/* FAQ */}

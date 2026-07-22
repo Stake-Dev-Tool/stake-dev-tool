@@ -9,7 +9,6 @@ use axum::Json;
 use axum::Router;
 use axum::extract::{Path, State};
 use axum::routing::{get, post};
-use chrono::Duration;
 use protocol::Role;
 use protocol::billing::{
     BillingLimits, BillingStatusResponse, BillingUsage, CheckoutRequest, CheckoutResponse,
@@ -19,7 +18,7 @@ use protocol::billing::{
 use crate::AppState;
 use crate::api::workspaces::{WorkspaceRow, require_membership, workspace_by_slug};
 use crate::auth::extract::CurrentUser;
-use crate::billing::plan::{self, Plan};
+use crate::billing::plan;
 use crate::billing::stripe;
 use crate::config::StripeConfig;
 use crate::error::{ApiError, ApiResult};
@@ -162,12 +161,8 @@ async fn status(
             sub.interval_enum(),
             sub.current_period_end,
         ),
-        // No subscription: on the trial, surface when it ends.
-        None => {
-            let trial_end = (enabled && matches!(resolved, Plan::Trial | Plan::Expired))
-                .then(|| workspace.created_at + Duration::days(plan::TRIAL_DAYS));
-            (None, None, trial_end)
-        }
+        // No subscription: no plan, so no period end to surface.
+        None => (None, None, None),
     };
 
     Ok(Json(BillingStatusResponse {

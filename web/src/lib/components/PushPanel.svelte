@@ -63,7 +63,7 @@
   // --- Push run state ---------------------------------------------------------
   let pushing = $state(false);
   let pushError = $state('');
-  // True when `pushError` is a billing gate (expired trial / quota) — the panel
+  // True when `pushError` is a billing gate (no active plan / quota) — the panel
   // then shows an inline "Upgrade →" link instead of a plain error.
   let pushErrorUpgrade = $state(false);
   let phase = $state<PushPhase | null>(null);

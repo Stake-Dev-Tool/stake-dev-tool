@@ -8,7 +8,7 @@ export const Route = createFileRoute('/refunds')({
       { title: 'Refund policy — Stake Dev Tool' },
       {
         name: 'description',
-        content: 'Trial, cancellation and refund terms for Stake Dev Tool cloud plans.',
+        content: 'Cancellation and refund terms for Stake Dev Tool cloud plans.',
       },
     ],
   }),
@@ -18,12 +18,13 @@ export const Route = createFileRoute('/refunds')({
 function RefundsPage() {
   return (
     <LegalPage title="Refund policy" updated="21 July 2026">
-      <h2>Try before you pay</h2>
+      <h2>Evaluate without risk</h2>
       <p>
-        Every cloud plan starts with a 14-day free trial. You are not charged
-        until the trial ends, and cancelling during the trial means you are
-        never charged. The best way to know whether Stake Dev Tool fits your
-        workflow is simply to use it during those two weeks.
+        There is no free trial on the hosted service, but you take on no risk.
+        The entire platform is open source, so you can self-host it for free and
+        try every feature before you ever pay. And if you subscribe to the hosted
+        service and it does not work out, the first-payment guarantee below
+        refunds you in full.
       </p>
 
       <h2>First payment</h2>

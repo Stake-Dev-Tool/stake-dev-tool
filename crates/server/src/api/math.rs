@@ -254,7 +254,7 @@ pub async fn put_blob(
     request: Request,
 ) -> ApiResult<Response> {
     let workspace = authorize_write(&state, &user, &slug).await?;
-    // M7: block writes on a lapsed trial before touching the body.
+    // M7: block writes on a Free (unsubscribed) workspace before touching the body.
     crate::billing::write_allowed(&state, workspace.id).await?;
     if !blobs::is_hex64_lower(&hash_hex) {
         return Err(ApiError::unprocessable(
@@ -445,7 +445,7 @@ pub async fn create_revision(
     let workspace = authorize_write(&state, &user, &slug).await?;
     validate_game_slug(&game_slug)?;
     validate_manifest(&req.files)?;
-    // M7: block commits on a lapsed trial; resolve the storage cap once.
+    // M7: block commits on a Free (unsubscribed) workspace; resolve the storage cap once.
     crate::billing::write_allowed(&state, workspace.id).await?;
     let limits = crate::billing::limits_for(&state, workspace.id).await?;
 

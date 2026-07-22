@@ -320,15 +320,6 @@ async fn insert_fake_blob(state: &AppState, ws_id: Uuid, tag: u8, size: i64) {
         .unwrap();
 }
 
-async fn set_created_at(state: &AppState, slug: &str, when: DateTime<Utc>) {
-    sqlx::query("UPDATE workspaces SET created_at = $2 WHERE slug = $1")
-        .bind(slug)
-        .bind(when)
-        .execute(&state.pool)
-        .await
-        .unwrap();
-}
-
 // --- webhook signing -------------------------------------------------------
 
 /// The `Stripe-Signature` header for a body, signed with `WEBHOOK_SECRET` (used
@@ -453,20 +444,20 @@ async fn plan_matrix_resolves_expected_limits() {
         return;
     };
 
-    // Fresh workspace, no subscription → Trial (2 GiB, 3 members).
+    // Fresh workspace, no subscription → Free (2 GiB, 3 members), writes gated.
     let (mut owner, ws, _t) = bootstrap(&ctx.state).await;
     let (status, body) = owner.get(&format!("/api/workspaces/{ws}/billing")).await;
     assert_eq!(status, StatusCode::OK, "{body}");
     assert_eq!(body["enabled"], json!(true));
-    assert_eq!(s(&body["plan"]), "trial");
+    assert_eq!(s(&body["plan"]), "free");
     assert_eq!(body["status"], json!(null));
     assert_eq!(body["limits"]["max_members"], json!(3));
     assert_eq!(
         body["limits"]["max_storage_bytes"],
         json!(2u64 * 1024 * 1024 * 1024)
     );
-    // The trial's current_period_end surfaces the trial's expiry.
-    assert!(body["current_period_end"].is_string());
+    // No subscription → no period end.
+    assert_eq!(body["current_period_end"], json!(null));
 
     // trialing subscription → its plan (team).
     let ws_id = workspace_id(&ctx.state, &ws).await;
@@ -531,16 +522,15 @@ async fn plan_matrix_resolves_expected_limits() {
 }
 
 #[tokio::test]
-async fn expired_trial_blocks_writes_with_upgrade_required() {
+async fn free_workspace_blocks_writes_with_upgrade_required() {
     let Some(ctx) = setup(Some(stripe_config())).await else {
         return;
     };
+    // A fresh workspace on a billing-enabled instance is Free (no subscription).
     let (mut owner, ws, token) = bootstrap(&ctx.state).await;
-    // Push the workspace's creation 15 days back → trial lapsed, no subscription.
-    set_created_at(&ctx.state, &ws, Utc::now() - Duration::days(15)).await;
 
     let (_, body) = owner.get(&format!("/api/workspaces/{ws}/billing")).await;
-    assert_eq!(s(&body["plan"]), "expired", "{body}");
+    assert_eq!(s(&body["plan"]), "free", "{body}");
 
     // A blob PUT (a write) is refused with 403 upgrade_required.
     let bytes = b"hello world";
@@ -565,68 +555,32 @@ async fn expired_trial_blocks_writes_with_upgrade_required() {
 }
 
 // ===========================================================================
-// Trial workspace cap (one free-trial workspace per user)
+// Workspace creation is uncapped (every fresh workspace is read-only Free)
 // ===========================================================================
 
 #[tokio::test]
-async fn trial_user_is_capped_at_one_workspace() {
+async fn free_user_can_create_multiple_workspaces() {
     let Some(ctx) = setup(Some(stripe_config())).await else {
         return;
     };
     let mut owner = register(&ctx.state, &unique_email(), "Owner").await;
 
-    // The one free-trial workspace: allowed.
-    let (status, body) = owner
-        .post(
-            "/api/workspaces",
-            json!({ "name": "First", "slug": unique_slug() }),
-        )
-        .await;
-    assert_eq!(status, StatusCode::OK, "{body}");
+    // A user with zero subscriptions can create several workspaces in a row;
+    // each one resolves to the read-only Free state, so there is nothing to cap.
+    for n in 0..3 {
+        let (status, body) = owner
+            .post(
+                "/api/workspaces",
+                json!({ "name": format!("WS {n}"), "slug": unique_slug() }),
+            )
+            .await;
+        assert_eq!(status, StatusCode::OK, "workspace {n} refused: {body}");
+    }
 
-    // A second trial workspace for the same user: refused (no trial rotation).
-    let (status, body) = owner
-        .post(
-            "/api/workspaces",
-            json!({ "name": "Second", "slug": unique_slug() }),
-        )
-        .await;
-    assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
-    assert_eq!(s(&body["error"]["code"]), "trial_workspace_limit");
-}
-
-#[tokio::test]
-async fn paid_workspace_lifts_the_trial_cap() {
-    let Some(ctx) = setup(Some(stripe_config())).await else {
-        return;
-    };
-    let mut owner = register(&ctx.state, &unique_email(), "Owner").await;
-    let ws1 = unique_slug();
-    let (status, _) = owner
-        .post("/api/workspaces", json!({ "name": "Paid", "slug": &ws1 }))
-        .await;
-    assert_eq!(status, StatusCode::OK);
-
-    // Put the first workspace on an active paid plan → the user is no longer a
-    // pure free-trial user, so a second (trial) workspace becomes allowed.
-    let ws1_id = workspace_id(&ctx.state, &ws1).await;
-    insert_subscription(
-        &ctx.state,
-        ws1_id,
-        "solo",
-        "monthly",
-        "active",
-        Some(Utc::now() + Duration::days(30)),
-    )
-    .await;
-
-    let (status, body) = owner
-        .post(
-            "/api/workspaces",
-            json!({ "name": "Second", "slug": unique_slug() }),
-        )
-        .await;
-    assert_eq!(status, StatusCode::OK, "{body}");
+    // All three are owned by the same user — the list returns every one.
+    let (status, list) = owner.get("/api/workspaces").await;
+    assert_eq!(status, StatusCode::OK, "{list}");
+    assert_eq!(list["workspaces"].as_array().map(Vec::len), Some(3));
 }
 
 // ===========================================================================
@@ -710,8 +664,18 @@ async fn storage_cap_blocks_commit_over_quota() {
     let Some(ctx) = setup(Some(stripe_config())).await else {
         return;
     };
-    let (mut owner, ws, token) = bootstrap(&ctx.state).await; // fresh → Trial (2 GiB)
+    let (mut owner, ws, token) = bootstrap(&ctx.state).await;
     let ws_id = workspace_id(&ctx.state, &ws).await;
+    // Solo (10 GiB cap) so writes are allowed — the Free state blocks writes outright.
+    insert_subscription(
+        &ctx.state,
+        ws_id,
+        "solo",
+        "monthly",
+        "active",
+        Some(Utc::now() + Duration::days(30)),
+    )
+    .await;
 
     // Upload a real (tiny) index.json so the manifest's blob exists.
     let index = br#"{"modes":[]}"#;
@@ -728,8 +692,8 @@ async fn storage_cap_blocks_commit_over_quota() {
         .await;
     assert_eq!(status, StatusCode::CREATED);
 
-    // Inflate stored bytes past the 2 GiB trial cap with a fake 3 GiB blob row.
-    insert_fake_blob(&ctx.state, ws_id, 0xAB, 3 * 1024 * 1024 * 1024).await;
+    // Inflate stored bytes past the 10 GiB Solo cap with a fake 11 GiB blob row.
+    insert_fake_blob(&ctx.state, ws_id, 0xAB, 11 * 1024 * 1024 * 1024).await;
 
     // Committing a revision now exceeds the cap → 413 storage_quota_exceeded.
     let manifest = json!([{ "path": "index.json", "hash": hash, "size": index.len() }]);
@@ -750,11 +714,21 @@ async fn storage_cap_blocks_upload_via_content_length() {
     let Some(ctx) = setup(Some(stripe_config())).await else {
         return;
     };
-    let (mut owner, ws, token) = bootstrap(&ctx.state).await; // Trial (2 GiB)
+    let (mut owner, ws, token) = bootstrap(&ctx.state).await;
     let ws_id = workspace_id(&ctx.state, &ws).await;
+    // Solo (10 GiB cap) so writes are allowed — the Free state blocks writes outright.
+    insert_subscription(
+        &ctx.state,
+        ws_id,
+        "solo",
+        "monthly",
+        "active",
+        Some(Utc::now() + Duration::days(30)),
+    )
+    .await;
 
-    // Leave only 3 bytes of headroom under the 2 GiB cap.
-    let cap = 2u64 * 1024 * 1024 * 1024;
+    // Leave only 3 bytes of headroom under the 10 GiB cap.
+    let cap = 10u64 * 1024 * 1024 * 1024;
     insert_fake_blob(&ctx.state, ws_id, 0xCD, (cap - 3) as i64).await;
 
     // A 5-byte upload with a declared Content-Length blows the remaining 3 bytes.
@@ -787,11 +761,21 @@ async fn storage_cap_blocks_upload_without_content_length() {
     let Some(ctx) = setup(Some(stripe_config())).await else {
         return;
     };
-    let (mut owner, ws, token) = bootstrap(&ctx.state).await; // Trial (2 GiB)
+    let (mut owner, ws, token) = bootstrap(&ctx.state).await;
     let ws_id = workspace_id(&ctx.state, &ws).await;
+    // Solo (10 GiB cap) so writes are allowed — the Free state blocks writes outright.
+    insert_subscription(
+        &ctx.state,
+        ws_id,
+        "solo",
+        "monthly",
+        "active",
+        Some(Utc::now() + Duration::days(30)),
+    )
+    .await;
 
-    // Leave only 3 bytes of headroom under the 2 GiB cap.
-    let cap = 2u64 * 1024 * 1024 * 1024;
+    // Leave only 3 bytes of headroom under the 10 GiB cap.
+    let cap = 10u64 * 1024 * 1024 * 1024;
     insert_fake_blob(&ctx.state, ws_id, 0xEF, (cap - 3) as i64).await;
 
     // A 5-byte upload with NO Content-Length (chunked). The pre-check can't fire,
@@ -837,6 +821,17 @@ async fn usage_endpoint_counts_members_and_storage() {
         return;
     };
     let (mut owner, ws, token) = bootstrap(&ctx.state).await;
+    let ws_id = workspace_id(&ctx.state, &ws).await;
+    // An active plan so the blob PUTs are allowed — the Free state blocks writes.
+    insert_subscription(
+        &ctx.state,
+        ws_id,
+        "solo",
+        "monthly",
+        "active",
+        Some(Utc::now() + Duration::days(30)),
+    )
+    .await;
 
     // Upload two distinct blobs (10 + 20 bytes).
     for bytes in [b"0123456789".as_slice(), b"0123456789abcdefghij".as_slice()] {
@@ -1082,7 +1077,7 @@ async fn webhook_storage_only_adds_storage_without_granting_a_plan() {
     let Some(ctx) = setup(Some(stripe_config())).await else {
         return;
     };
-    let (mut owner, ws, _t) = bootstrap(&ctx.state).await; // fresh → Trial (2 GiB)
+    let (mut owner, ws, _t) = bootstrap(&ctx.state).await; // fresh → Free (2 GiB)
     let ws_id = workspace_id(&ctx.state, &ws).await;
 
     // A storage-only subscription: two units (+20 GiB), no plan price.
@@ -1100,10 +1095,10 @@ async fn webhook_storage_only_adds_storage_without_granting_a_plan() {
     let (status, _) = post_webhook(&mut owner, &signed_headers(ts, &body), &body).await;
     assert_eq!(status, StatusCode::OK);
 
-    // The plan stays Trial (storage_only never grants a plan), but the trial's
+    // The plan stays Free (storage_only never grants a plan), but the Free
     // 2 GiB cap is lifted to 2 + 20 = 22 GiB and the add-on is surfaced.
     let (_, view) = owner.get(&format!("/api/workspaces/{ws}/billing")).await;
-    assert_eq!(s(&view["plan"]), "trial", "{view}");
+    assert_eq!(s(&view["plan"]), "free", "{view}");
     assert_eq!(view["extra_storage_gib"], json!(20));
     assert_eq!(
         view["limits"]["max_storage_bytes"],

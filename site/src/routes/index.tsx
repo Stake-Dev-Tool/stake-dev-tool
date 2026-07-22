@@ -149,7 +149,7 @@ function Home() {
               Download for desktop
             </a>
             <Link to="/pricing" className="btn btn-ghost">
-              Start a free trial
+              Get started
             </Link>
           </div>
         </div>

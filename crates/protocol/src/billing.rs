@@ -85,9 +85,9 @@ pub struct BillingStatusResponse {
     /// Whether Stripe billing is configured on this instance. `false` → quotas are
     /// never enforced and every limit is unlimited.
     pub enabled: bool,
-    /// The resolved plan label: `"trial"`, `"solo"`, `"team"`, `"unlimited"`
-    /// (billing disabled), or `"expired"` (trial lapsed, unpaid — reads still
-    /// work, writes are blocked with `upgrade_required`).
+    /// The resolved plan label: `"free"` (billing enabled, no active subscription
+    /// — reads still work, writes are blocked with `upgrade_required`), `"solo"`,
+    /// `"team"`, or `"unlimited"` (billing disabled, self-host).
     pub plan: String,
     /// The subscription status verbatim from Stripe (e.g. `"active"`, `"trialing"`,
     /// `"past_due"`, `"canceled"`), or `null` when there is no subscription. A
@@ -95,8 +95,7 @@ pub struct BillingStatusResponse {
     pub status: Option<String>,
     /// The subscription's billing interval, or `null` when there is no subscription.
     pub interval: Option<BillingInterval>,
-    /// The current billing period's end (subscription) or, on the free trial, when
-    /// the trial expires. `null` when neither applies.
+    /// The current billing period's end, or `null` when there is no subscription.
     pub current_period_end: Option<DateTime<Utc>>,
     /// Extra storage granted by the add-on, in GiB (`extra_storage_units × 10`).
     /// `0` when no storage add-on is active. Already folded into

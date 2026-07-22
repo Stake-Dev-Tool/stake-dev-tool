@@ -1,9 +1,9 @@
 //! Plan limits (the single source of truth for quotas) and plan resolution.
 //!
 //! `plan_for` maps a workspace to its effective [`Plan`]; [`Plan::limits`] turns
-//! that into the frozen [`PlanLimits`]. Writes on a lapsed trial are gated
-//! separately by [`write_allowed`] so the frozen limits struct stays untouched
-//! (an `Expired` workspace keeps Trial *read* limits but cannot push).
+//! that into the frozen [`PlanLimits`]. Writes on a `Free` (unsubscribed)
+//! workspace are gated separately by [`write_allowed`] so the frozen limits
+//! struct stays untouched (a `Free` workspace keeps read limits but cannot push).
 
 use std::collections::HashMap;
 use std::sync::{LazyLock, Mutex};
@@ -20,8 +20,6 @@ use crate::AppState;
 use crate::error::{ApiError, ApiResult};
 
 const GIB: u64 = 1024 * 1024 * 1024;
-/// Free trial length, measured from `workspaces.created_at`.
-pub const TRIAL_DAYS: i64 = 14;
 /// How long a `past_due` subscription keeps its plan past `current_period_end`.
 pub const GRACE_DAYS: i64 = 7;
 /// How long the per-workspace storage total is memoized for the usage endpoint.
@@ -32,21 +30,20 @@ const STORAGE_CACHE_TTL: StdDuration = StdDuration::from_secs(60);
 pub enum Plan {
     /// Billing disabled (self-host) — no limits, no gating.
     Unlimited,
-    /// Within the 14-day free trial.
-    Trial,
-    /// Trial lapsed with no active subscription: reads work, writes are blocked.
-    Expired,
+    /// Billing enabled with no active subscription and no admin override: reads
+    /// work, writes are blocked. The hosted default until a workspace subscribes.
+    Free,
     Solo,
     Team,
 }
 
 impl Plan {
-    /// The quota limits for this plan. `Expired` intentionally shares Trial's
-    /// (read) limits — writes are refused by [`write_allowed`], not by the limits.
+    /// The quota limits for this plan. `Free` keeps read limits — writes are
+    /// refused by [`write_allowed`], not by the limits.
     pub fn limits(self) -> PlanLimits {
         match self {
             Plan::Unlimited => PlanLimits::UNLIMITED,
-            Plan::Trial | Plan::Expired => PlanLimits {
+            Plan::Free => PlanLimits {
                 max_members: Some(3),
                 max_storage_bytes: Some(2 * GIB),
                 max_active_share_links: Some(2),
@@ -71,25 +68,15 @@ impl Plan {
     pub fn label(self) -> &'static str {
         match self {
             Plan::Unlimited => "unlimited",
-            Plan::Trial => "trial",
-            Plan::Expired => "expired",
+            Plan::Free => "free",
             Plan::Solo => "solo",
             Plan::Team => "team",
         }
     }
 
-    /// Writes (pushes, new shares) are allowed on every plan except `Expired`.
+    /// Writes (pushes, new shares, invites) are allowed on every plan except `Free`.
     pub fn writes_allowed(self) -> bool {
-        !matches!(self, Plan::Expired)
-    }
-
-    /// Whether this is a paid (or comped) tier. The free trial tiers (`Trial`,
-    /// `Expired`) are not paid; `Unlimited` — self-host, or an instance-admin
-    /// comp on a billing-enabled instance — counts as paid. Used to cap free
-    /// users to a single workspace (a fresh workspace always starts on `Trial`,
-    /// so owning one already blocks creating another).
-    pub fn is_paid(self) -> bool {
-        matches!(self, Plan::Unlimited | Plan::Solo | Plan::Team)
+        !matches!(self, Plan::Free)
     }
 }
 
@@ -152,8 +139,7 @@ pub async fn extra_storage_units(pool: &PgPool, workspace_id: Uuid) -> ApiResult
 /// self-host short-circuit, kept FIRST so overrides never touch a self-hosted
 /// instance). Otherwise a non-expired instance-admin plan override wins next;
 /// failing that, an active/trialing (or within-grace `past_due`) subscription
-/// grants its plan; failing that, the workspace is on the trial (`Trial` while
-/// within 14 days of creation, else `Expired`).
+/// grants its plan; failing all of that, the workspace is `Free` (read-only).
 pub async fn plan_for(state: &AppState, workspace_id: Uuid) -> ApiResult<Plan> {
     if state.config.stripe.is_none() {
         return Ok(Plan::Unlimited);
@@ -165,8 +151,7 @@ pub async fn plan_for(state: &AppState, workspace_id: Uuid) -> ApiResult<Plan> {
         return Ok(plan);
     }
     let subscription = load_subscription(&state.pool, workspace_id).await?;
-    let created_at = workspace_created_at(&state.pool, workspace_id).await?;
-    Ok(resolve_plan(subscription.as_ref(), created_at, Utc::now()))
+    Ok(resolve_plan(subscription.as_ref(), Utc::now()))
 }
 
 /// The plan granted by a non-expired `plan_overrides` row for this workspace, or
@@ -200,29 +185,22 @@ async fn active_override(
     })
 }
 
-/// Pure resolution given a loaded subscription and the workspace's creation time.
-fn resolve_plan(
-    subscription: Option<&SubscriptionRow>,
-    created_at: DateTime<Utc>,
-    now: DateTime<Utc>,
-) -> Plan {
+/// Pure resolution given a loaded subscription. A subscription that currently
+/// grants a plan wins; failing that, the workspace is `Free` (read-only).
+fn resolve_plan(subscription: Option<&SubscriptionRow>, now: DateTime<Utc>) -> Plan {
     if let Some(sub) = subscription
         && let Some(plan) = active_plan(sub, now)
     {
         return plan;
     }
-    if created_at + Duration::days(TRIAL_DAYS) > now {
-        Plan::Trial
-    } else {
-        Plan::Expired
-    }
+    Plan::Free
 }
 
 /// The plan a subscription currently grants, or `None` if it grants nothing.
 /// `storage_only` is the sentinel for a storage-add-on row with no plan (its
 /// `plan` column is a placeholder `'solo'`), so it never grants a plan; likewise
 /// Stripe's terminal statuses (canceled/unpaid/incomplete_expired/incomplete) and
-/// a `past_due` past its 7-day grace fall through to the trial/expired resolution.
+/// a `past_due` past its 7-day grace fall through to the `Free` resolution.
 fn active_plan(sub: &SubscriptionRow, now: DateTime<Utc>) -> Option<Plan> {
     // A storage-only row carries a placeholder plan; it must not grant a plan.
     if sub.status == "storage_only" {
@@ -244,25 +222,17 @@ fn active_plan(sub: &SubscriptionRow, now: DateTime<Utc>) -> Option<Plan> {
     }
 }
 
-/// 403 `upgrade_required` when the workspace's trial has lapsed with no active
-/// subscription; `Ok(())` on every other plan (including billing disabled).
+/// 403 `upgrade_required` when the workspace has no active plan (`Free`);
+/// `Ok(())` on every other plan (including billing disabled).
 pub async fn write_allowed(state: &AppState, workspace_id: Uuid) -> ApiResult<()> {
     if plan_for(state, workspace_id).await?.writes_allowed() {
         Ok(())
     } else {
         Err(ApiError::forbidden(
             "upgrade_required",
-            "this workspace's trial has ended; upgrade the plan to make changes",
+            "this workspace has no active plan; subscribe to make changes",
         ))
     }
-}
-
-async fn workspace_created_at(pool: &PgPool, workspace_id: Uuid) -> ApiResult<DateTime<Utc>> {
-    sqlx::query_scalar::<_, DateTime<Utc>>("SELECT created_at FROM workspaces WHERE id = $1")
-        .bind(workspace_id)
-        .fetch_optional(pool)
-        .await?
-        .ok_or_else(|| ApiError::not_found("workspace_not_found", "no such workspace"))
 }
 
 // ---------------------------------------------------------------------------
@@ -354,10 +324,10 @@ mod tests {
 
     #[test]
     fn plan_limits_match_the_contract_table() {
-        assert_eq!(Plan::Trial.limits().max_members, Some(3));
-        assert_eq!(Plan::Trial.limits().max_storage_bytes, Some(2 * GIB));
-        assert_eq!(Plan::Trial.limits().max_active_share_links, Some(2));
-        assert_eq!(Plan::Trial.limits().max_concurrent_share_sessions, Some(5));
+        assert_eq!(Plan::Free.limits().max_members, Some(3));
+        assert_eq!(Plan::Free.limits().max_storage_bytes, Some(2 * GIB));
+        assert_eq!(Plan::Free.limits().max_active_share_links, Some(2));
+        assert_eq!(Plan::Free.limits().max_concurrent_share_sessions, Some(5));
 
         assert_eq!(Plan::Solo.limits().max_members, Some(1));
         assert_eq!(Plan::Solo.limits().max_storage_bytes, Some(10 * GIB));
@@ -367,76 +337,67 @@ mod tests {
         assert_eq!(Plan::Team.limits().max_storage_bytes, Some(50 * GIB));
         assert_eq!(Plan::Team.limits().max_concurrent_share_sessions, Some(25));
 
-        // Expired keeps Trial (read) limits; Unlimited is all-None.
-        assert_eq!(Plan::Expired.limits(), Plan::Trial.limits());
+        // Unlimited is all-None.
         assert_eq!(Plan::Unlimited.limits(), PlanLimits::UNLIMITED);
     }
 
     #[test]
-    fn expired_is_the_only_write_gated_plan() {
+    fn free_is_the_only_write_gated_plan() {
         assert!(Plan::Unlimited.writes_allowed());
-        assert!(Plan::Trial.writes_allowed());
         assert!(Plan::Solo.writes_allowed());
         assert!(Plan::Team.writes_allowed());
-        assert!(!Plan::Expired.writes_allowed());
+        assert!(!Plan::Free.writes_allowed());
     }
 
     #[test]
-    fn resolution_prefers_active_subscription_then_trial_window() {
+    fn resolution_prefers_active_subscription_then_free() {
         let now = Utc::now();
-        let fresh = now - Duration::days(1);
-        let old = now - Duration::days(30);
 
-        // Active/trialing grant their plan regardless of trial age.
+        // Active/trialing grant their plan.
         assert_eq!(
-            resolve_plan(Some(&sub("solo", "active", None)), old, now),
+            resolve_plan(Some(&sub("solo", "active", None)), now),
             Plan::Solo
         );
         assert_eq!(
-            resolve_plan(Some(&sub("team", "trialing", None)), old, now),
+            resolve_plan(Some(&sub("team", "trialing", None)), now),
             Plan::Team
         );
 
-        // No subscription → trial window from creation.
-        assert_eq!(resolve_plan(None, fresh, now), Plan::Trial);
-        assert_eq!(resolve_plan(None, old, now), Plan::Expired);
+        // No subscription → Free.
+        assert_eq!(resolve_plan(None, now), Plan::Free);
 
-        // Canceled/revoked fall through to the (here lapsed) trial.
+        // Canceled/revoked fall through to Free.
         assert_eq!(
-            resolve_plan(Some(&sub("team", "canceled", None)), old, now),
-            Plan::Expired
+            resolve_plan(Some(&sub("team", "canceled", None)), now),
+            Plan::Free
         );
         assert_eq!(
-            resolve_plan(Some(&sub("solo", "revoked", None)), old, now),
-            Plan::Expired
+            resolve_plan(Some(&sub("solo", "revoked", None)), now),
+            Plan::Free
         );
     }
 
     #[test]
     fn past_due_holds_the_plan_only_within_grace() {
         let now = Utc::now();
-        let old = now - Duration::days(30);
         // 1 day into grace → still granted.
         let within = sub("team", "past_due", Some(now - Duration::days(1)));
-        assert_eq!(resolve_plan(Some(&within), old, now), Plan::Team);
-        // 8 days past period end (> 7-day grace) → lapses to Expired.
+        assert_eq!(resolve_plan(Some(&within), now), Plan::Team);
+        // 8 days past period end (> 7-day grace) → lapses to Free.
         let beyond = sub("team", "past_due", Some(now - Duration::days(8)));
-        assert_eq!(resolve_plan(Some(&beyond), old, now), Plan::Expired);
+        assert_eq!(resolve_plan(Some(&beyond), now), Plan::Free);
         // past_due with no known period end gets no grace.
         let unknown = sub("solo", "past_due", None);
-        assert_eq!(resolve_plan(Some(&unknown), old, now), Plan::Expired);
+        assert_eq!(resolve_plan(Some(&unknown), now), Plan::Free);
     }
 
     #[test]
     fn storage_only_never_grants_a_plan() {
         let now = Utc::now();
-        let fresh = now - Duration::days(1);
-        let old = now - Duration::days(30);
         // Placeholder plan='solo' with the storage_only sentinel status: the
-        // workspace falls through to the trial window, not Solo.
+        // workspace falls through to Free, not Solo.
         let storage = sub("solo", "storage_only", None);
-        assert_eq!(resolve_plan(Some(&storage), fresh, now), Plan::Trial);
-        assert_eq!(resolve_plan(Some(&storage), old, now), Plan::Expired);
+        assert_eq!(resolve_plan(Some(&storage), now), Plan::Free);
     }
 
     #[test]

@@ -56,5 +56,5 @@ done
 echo
 echo "Done. Verify from your machine (expects \"enabled\":true for members):"
 echo "  1. log into the dashboard, open any workspace -> Billing"
-echo "  2. the page should show the Trial state and the upgrade cards"
+echo "  2. the page should show the No-plan state and the plan cards"
 echo "Then point the Polar webhook at: https://app.stakedevtool.com/api/billing/webhook"

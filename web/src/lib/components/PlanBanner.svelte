@@ -3,8 +3,7 @@
    * PlanBanner — the per-workspace billing nudge. Self-fetches (once per slug per
    * session, via the shared `billingStatus` cache) and renders:
    *   • nothing            when billing is disabled (self-host) or unknown;
-   *   • a subtle banner    on the free trial ("Trial — N days left · Upgrade");
-   *   • a prominent banner when the trial has expired (writes blocked);
+   *   • a prominent banner when the workspace has no active plan (Free — writes blocked);
    *   • a warning banner   when the subscription is past_due (grace period);
    *   • a tiny plan chip   on a healthy Solo/Team plan (no banner).
    *
@@ -12,7 +11,7 @@
    * rest. Never throws up the tree — a failed fetch simply renders nothing.
    */
   import type { BillingStatus } from '$lib/api';
-  import { billingStatus, daysUntil } from '$lib/billing';
+  import { billingStatus } from '$lib/billing';
   import { formatDate } from '$lib/format';
 
   let { slug }: { slug: string } = $props();
@@ -37,36 +36,22 @@
   });
 
   let billingHref = $derived(`/w/${slug}/billing`);
-  let trialDays = $derived(st ? daysUntil(st.current_period_end) : 0);
 </script>
 
 {#if st && st.enabled}
-  {#if st.plan === 'trial'}
-    <div
-      class="mb-6 flex flex-wrap items-center justify-between gap-x-4 gap-y-2 rounded-lg border border-border bg-surface-2/60 px-4 py-2.5 text-sm"
-    >
-      <span class="text-muted">
-        <span class="font-medium text-text">Trial</span>
-        — {trialDays}
-        {trialDays === 1 ? 'day' : 'days'} left
-      </span>
-      <a href={billingHref} class="font-medium text-accent underline-offset-4 hover:underline">
-        Upgrade
-      </a>
-    </div>
-  {:else if st.plan === 'expired'}
+  {#if st.plan === 'free'}
     <div
       class="mb-6 flex flex-wrap items-center justify-between gap-x-4 gap-y-2 rounded-lg border border-danger/40 bg-danger/10 px-4 py-3 text-sm"
     >
       <span class="text-danger">
-        <span class="font-semibold">Trial expired</span>
-        — pushes, invites and new share links are disabled.
+        <span class="font-semibold">No active plan</span>
+        — pushes, invites and new share links require a subscription.
       </span>
       <a
         href={billingHref}
         class="font-semibold text-danger underline-offset-4 hover:underline"
       >
-        Upgrade now →
+        Choose a plan →
       </a>
     </div>
   {:else if st.status === 'past_due'}
