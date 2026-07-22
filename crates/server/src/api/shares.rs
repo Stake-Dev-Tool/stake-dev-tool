@@ -646,15 +646,18 @@ async fn ensure_share_in_game(pool: &PgPool, id: Uuid, game_id: Uuid) -> ApiResu
 }
 
 /// The columns for a `ShareLinkView`, with the NUMERIC counters cast to `float8`
-/// (no bigdecimal/rust_decimal feature is enabled). `where_order` is appended.
+/// (no bigdecimal/rust_decimal feature is enabled). Joins the workspace so the
+/// URL can prefer the workspace's custom play domain. `where_order` is appended.
 fn share_select(where_order: &str) -> String {
     format!(
         "SELECT s.id, s.slug, g.slug AS game, s.revision_number, s.front_bundle_id, \
                 (s.password_hash IS NOT NULL) AS password_protected, s.expires_at, \
                 s.max_concurrent_sessions, s.revoked_at, s.created_at, \
                 s.sessions_count, s.spins_count, \
-                s.total_bet::float8 AS total_bet, s.total_win::float8 AS total_win \
-         FROM share_links s JOIN games g ON g.id = s.game_id {where_order}"
+                s.total_bet::float8 AS total_bet, s.total_win::float8 AS total_win, \
+                w.custom_play_domain AS custom_play_domain \
+         FROM share_links s JOIN games g ON g.id = s.game_id \
+         JOIN workspaces w ON w.id = s.workspace_id {where_order}"
     )
 }
 
@@ -674,6 +677,7 @@ struct ShareRow {
     spins_count: i64,
     total_bet: f64,
     total_win: f64,
+    custom_play_domain: Option<String>,
 }
 
 impl ShareRow {
@@ -683,8 +687,14 @@ impl ShareRow {
         } else {
             None
         };
+        // A workspace's attached custom domain takes precedence over the
+        // platform play domain (both hosts resolve; this is the URL we surface).
+        let url = match &self.custom_play_domain {
+            Some(domain) => Some(format!("https://{}.{}/", self.slug, domain)),
+            None => share::public_url(play_domain, &self.slug),
+        };
         ShareLinkView {
-            url: share::public_url(play_domain, &self.slug),
+            url,
             active_sessions: share::active_sessions(self.id),
             observed_rtp,
             id: self.id,

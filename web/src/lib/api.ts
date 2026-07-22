@@ -57,6 +57,11 @@ export interface WorkspaceDetail {
   /** The calling user's own role, when the server provides it at the top level. */
   role: Role | null;
   members: Member[];
+  /**
+   * The workspace's attached custom play domain (lowercase, e.g. `play.acme.com`),
+   * or null when none is set. Share links are then served at `<slug>.<domain>`.
+   */
+  custom_play_domain: string | null;
 }
 
 export interface Invite {
@@ -904,6 +909,22 @@ export function isValidShareSlug(slug: string): boolean {
   return SHARE_SLUG_RE.test(slug);
 }
 
+/**
+ * Custom play domain rule — mirrors the server's `validate_custom_domain`: a
+ * lowercase DNS name of ≥ 2 labels, each 1-63 chars of `[a-z0-9-]` with no
+ * leading/trailing hyphen, total ≤ 253, and not an IPv4 literal. The server is
+ * authoritative (it also rejects domains overlapping this platform's own host);
+ * this is just the inline UI check.
+ */
+const DOMAIN_LABEL = '[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?';
+export const PLAY_DOMAIN_RE = new RegExp(`^(?:${DOMAIN_LABEL}\\.)+${DOMAIN_LABEL}$`);
+const IPV4_RE = /^\d{1,3}(?:\.\d{1,3}){3}$/;
+
+export function isValidPlayDomain(domain: string): boolean {
+  const d = domain.trim().toLowerCase();
+  return d.length > 0 && d.length <= 253 && !IPV4_RE.test(d) && PLAY_DOMAIN_RE.test(d);
+}
+
 /** Live-derive a candidate slug from a workspace name. */
 export function slugFromName(name: string): string {
   return name
@@ -967,8 +988,21 @@ export const api = {
       return {
         workspace: normalizeWorkspace(raw?.workspace ?? raw),
         role: raw?.role === 'owner' || raw?.role === 'admin' || raw?.role === 'member' ? raw.role : null,
-        members: membersRaw.map(normalizeMember)
+        members: membersRaw.map(normalizeMember),
+        custom_play_domain: strOrNull(raw?.custom_play_domain)
       };
+    },
+    /**
+     * Owner-only: attach a custom play domain (or clear it with `null`). Returns
+     * the stored value (lowercased server-side). Throws ApiError on 409
+     * `domain_taken` or 422 `invalid_domain`.
+     */
+    async setDomain(slug: string, domain: string | null): Promise<string | null> {
+      const raw = await request<unknown>('PUT', `/workspaces/${encodeURIComponent(slug)}/domain`, {
+        domain
+      });
+      const r = (raw ?? {}) as Record<string, unknown>;
+      return strOrNull(r.domain);
     },
     async setMemberRole(slug: string, userId: string, role: Role): Promise<void> {
       await request<void>(

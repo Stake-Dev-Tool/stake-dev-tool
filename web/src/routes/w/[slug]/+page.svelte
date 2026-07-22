@@ -5,6 +5,7 @@
   import {
     api,
     ApiError,
+    isValidPlayDomain,
     type Role,
     type InviteRole,
     type Member,
@@ -42,6 +43,14 @@
   let actionError = $state('');
   let busyUser = $state<string | null>(null); // user_id currently mutating
 
+  // Custom play domain (owner-only). `domainInput` is seeded from the loaded
+  // detail; `domainError` surfaces inline validation + server errors. `appHost`
+  // (this dashboard's own host) backs the DNS-setup instructions.
+  let domainInput = $state('');
+  let savingDomain = $state(false);
+  let domainError = $state('');
+  let appHost = $state('');
+
   // Client-side tabs (deep-linkable via #games / #settings). Games is primary.
   type WsTab = 'games' | 'settings';
   let activeTab = $state<WsTab>('games');
@@ -60,6 +69,7 @@
   );
   let ownersCount = $derived(members.filter((m) => m.role === 'owner').length);
   let canManage = $derived(myRole === 'owner' || myRole === 'admin');
+  let isOwner = $derived(myRole === 'owner');
   let selfMember = $derived(members.find((m) => m.user_id === myId) ?? null);
   // Sole owners can't leave (would orphan the workspace) — the danger zone says so.
   let canLeave = $derived(!!selfMember && !(selfMember.role === 'owner' && ownersCount <= 1));
@@ -76,6 +86,7 @@
   // so PlanBanner re-reads fresh, and strip the param. The redirect is a full page
   // load, so this one-shot onMount is the right hook.
   onMount(() => {
+    appHost = location.hostname;
     // Deep-link to a tab via #hash.
     const h = location.hash.replace('#', '');
     if (h === 'settings' || h === 'games') activeTab = h;
@@ -93,6 +104,8 @@
     loadError = '';
     try {
       detail = await api.workspaces.get(slug);
+      domainInput = detail.custom_play_domain ?? '';
+      domainError = '';
       await loadGames();
       if (canManage) {
         await loadInvites();
@@ -197,6 +210,51 @@
       actionError = errorText(e);
     } finally {
       busyUser = null;
+    }
+  }
+
+  // ---- Custom play domain (owner-only) ----------------------------------
+  let domainCandidate = $derived(domainInput.trim().toLowerCase());
+  // Live validity: empty is allowed (clears), else must pass the DNS rule.
+  let domainValid = $derived(domainCandidate === '' || isValidPlayDomain(domainCandidate));
+  let domainDirty = $derived(domainCandidate !== (detail?.custom_play_domain ?? ''));
+
+  async function saveDomain(ev: SubmitEvent) {
+    ev.preventDefault();
+    if (savingDomain) return;
+    domainError = '';
+    const value = domainCandidate;
+    if (value !== '' && !isValidPlayDomain(value)) {
+      domainError =
+        'Enter a valid domain like play.acme.com — at least two labels of letters, digits and hyphens.';
+      return;
+    }
+    await persistDomain(value === '' ? null : value);
+  }
+
+  async function clearDomain() {
+    if (savingDomain) return;
+    domainError = '';
+    await persistDomain(null);
+  }
+
+  async function persistDomain(domain: string | null) {
+    savingDomain = true;
+    try {
+      const saved = await api.workspaces.setDomain(slug, domain);
+      if (detail) detail = { ...detail, custom_play_domain: saved };
+      domainInput = saved ?? '';
+      toast.success(saved ? `Custom domain set to ${saved}` : 'Custom domain cleared.');
+    } catch (e) {
+      if (e instanceof ApiError && e.code === 'domain_taken') {
+        domainError = 'That domain is already attached to another workspace.';
+      } else if (e instanceof ApiError && e.code === 'invalid_domain') {
+        domainError = e.message;
+      } else {
+        domainError = errorText(e);
+      }
+    } finally {
+      savingDomain = false;
     }
   }
 
@@ -529,6 +587,97 @@
           <Button href={`/w/${slug}/billing`} variant="secondary" size="sm">Open billing</Button>
         </Card>
       </section>
+
+      <!-- Custom play domain (owner-only) -->
+      {#if isOwner}
+        <section class="mb-10">
+          <SectionHeader title="Custom play domain" />
+          <Card class="p-6">
+            <p class="mb-4 text-sm text-muted">
+              Serve this workspace's share links from a domain you own — e.g.
+              <span class="font-mono-tab text-text">play.acme.com</span>. Once set, every share link is
+              reachable at
+              <span class="font-mono-tab text-text"
+                >&lt;slug&gt;.{domainCandidate || 'play.acme.com'}</span
+              >, with its TLS certificate issued automatically on the first visit.
+            </p>
+
+            <form class="flex flex-col gap-3 sm:flex-row sm:items-end" onsubmit={saveDomain}>
+              <div class="flex-1">
+                <Input
+                  id="custom-domain"
+                  label="Domain"
+                  mono
+                  bind:value={domainInput}
+                  placeholder="play.acme.com"
+                  autocomplete="off"
+                  spellcheck={false}
+                  error={domainError}
+                  hint="Lowercase, at least two labels. Leave blank and Save to remove."
+                />
+              </div>
+              <div class="flex gap-2">
+                <Button type="submit" loading={savingDomain} disabled={!domainValid || !domainDirty}>
+                  Save
+                </Button>
+                {#if detail.custom_play_domain}
+                  <Button
+                    type="button"
+                    variant="outline"
+                    disabled={savingDomain}
+                    onclick={clearDomain}
+                  >
+                    Clear
+                  </Button>
+                {/if}
+              </div>
+            </form>
+
+            {#if domainCandidate !== '' && !domainValid && !domainError}
+              <p class="mt-2 text-xs text-warn">
+                That doesn't look like a valid domain — need at least two labels of letters, digits and
+                hyphens (e.g. <span class="font-mono-tab">play.acme.com</span>).
+              </p>
+            {/if}
+
+            {#if detail.custom_play_domain}
+              <div class="fade-in mt-5 rounded-md border border-accent/30 bg-accent/5 p-4">
+                <div class="mb-2 flex items-center gap-2">
+                  <Badge tone="accent">Active</Badge>
+                  <span class="font-mono-tab text-sm text-text">{detail.custom_play_domain}</span>
+                </div>
+                <p class="text-sm text-muted">
+                  Your share links now use
+                  <span class="font-mono-tab text-text"
+                    >&lt;slug&gt;.{detail.custom_play_domain}</span
+                  >.
+                </p>
+
+                <div class="mt-4 border-t border-border/60 pt-4">
+                  <div class="text-xs font-medium uppercase tracking-wide text-faint">DNS setup</div>
+                  <p class="mt-2 text-sm text-muted">
+                    Add a <span class="text-text">wildcard</span> record so every share subdomain
+                    resolves here, in <span class="text-text">DNS-only</span> mode (grey cloud on
+                    Cloudflare):
+                  </p>
+                  <div class="mt-3 grid gap-2">
+                    <CopyField label="Wildcard record" value={`*.${detail.custom_play_domain}`} />
+                    {#if appHost}
+                      <CopyField label="Points at (CNAME target)" value={appHost} />
+                    {/if}
+                  </div>
+                  <p class="mt-3 text-xs text-faint">
+                    Point it at this dashboard's host: a <span class="text-text">CNAME</span> to
+                    {appHost || 'the app host'}, or an <span class="text-text">A</span> record to that
+                    host's IP. The first visit to a share link issues its certificate automatically —
+                    that request can take ~30 s.
+                  </p>
+                </div>
+              </div>
+            {/if}
+          </Card>
+        </section>
+      {/if}
 
       <!-- Danger zone -->
       <section>

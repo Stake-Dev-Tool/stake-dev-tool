@@ -227,7 +227,7 @@ pub async fn accept(
     .ok_or_else(|| ApiError::not_found("invite_not_found", "no such invite"))?;
 
     let workspace = sqlx::query_as::<_, WorkspaceRow>(
-        "SELECT id, slug, name, created_at FROM workspaces WHERE id = $1",
+        "SELECT id, slug, name, created_at, custom_play_domain FROM workspaces WHERE id = $1",
     )
     .bind(invite.workspace_id)
     .fetch_one(&mut *tx)

@@ -23,6 +23,8 @@ pub(crate) struct WorkspaceRow {
     pub slug: String,
     pub name: String,
     pub created_at: DateTime<Utc>,
+    /// Attached custom play domain (lowercase), or `None`. See `api::domains`.
+    pub custom_play_domain: Option<String>,
 }
 
 #[derive(sqlx::FromRow)]
@@ -61,7 +63,7 @@ pub async fn create(
     let mut tx = state.pool.begin().await?;
     let result = sqlx::query_as::<_, WorkspaceRow>(
         "INSERT INTO workspaces (slug, name, created_by) VALUES ($1, $2, $3) \
-         RETURNING id, slug, name, created_at",
+         RETURNING id, slug, name, created_at, custom_play_domain",
     )
     .bind(slug)
     .bind(name)
@@ -139,6 +141,7 @@ pub async fn detail(
         created_at: workspace.created_at,
         role,
         members,
+        custom_play_domain: workspace.custom_play_domain,
     }))
 }
 
@@ -257,7 +260,7 @@ pub async fn remove_member(
 /// Loads a workspace by slug, or 404.
 pub(crate) async fn workspace_by_slug(pool: &PgPool, slug: &str) -> ApiResult<WorkspaceRow> {
     sqlx::query_as::<_, WorkspaceRow>(
-        "SELECT id, slug, name, created_at FROM workspaces WHERE slug = $1",
+        "SELECT id, slug, name, created_at, custom_play_domain FROM workspaces WHERE slug = $1",
     )
     .bind(slug)
     .fetch_optional(pool)

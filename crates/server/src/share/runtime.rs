@@ -167,6 +167,15 @@ impl ShareRuntime {
     }
 }
 
+/// Mint a random opaque visitor id (32 lowercase hex chars) for the
+/// `sdt_share_sid` cookie the front-contract bootstrap sets. Same OsRng/hex
+/// idiom as [`ShareRuntime::store_unlock`], but standalone (no state stored).
+pub(super) fn new_visitor_id() -> String {
+    let mut bytes = [0u8; 16];
+    rand::rngs::OsRng.fill_bytes(&mut bytes);
+    hex32(&bytes)
+}
+
 fn hex32(bytes: &[u8]) -> String {
     let mut out = String::with_capacity(bytes.len() * 2);
     for b in bytes {

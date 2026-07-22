@@ -123,6 +123,24 @@ impl Config {
             .unwrap_or_else(|| format!("http://{}", self.bind_addr))
     }
 
+    /// The bare host of `SERVER_PUBLIC_URL` — scheme, userinfo, port, and path
+    /// stripped, lowercased (e.g. `app.example.com` for
+    /// `https://app.example.com/`). Backs two custom-domain rules: a workspace
+    /// may not claim a play domain that equals or nests under the dashboard's own
+    /// host, and the Host-dispatch layer skips the custom-domain DB probe for
+    /// ordinary dashboard traffic addressed to this host. `None` when no public
+    /// URL is configured.
+    pub fn app_host(&self) -> Option<String> {
+        let url = self.public_url.as_deref()?;
+        let rest = url.split_once("://").map(|(_, r)| r).unwrap_or(url);
+        let authority = rest.split(['/', '?', '#']).next().unwrap_or("");
+        // Drop any `user:pass@` userinfo, then the `:port`.
+        let host = authority.rsplit('@').next().unwrap_or(authority);
+        let host = host.split(':').next().unwrap_or("");
+        let host = host.trim().trim_end_matches('.').to_ascii_lowercase();
+        (!host.is_empty()).then_some(host)
+    }
+
     /// Locates the dashboard's static build (`web/build`). An explicit
     /// `SERVER_WEB_DIR` wins even if the path is missing (so a typo surfaces as
     /// a warning instead of silently falling back); otherwise probes the
@@ -524,6 +542,23 @@ mod tests {
         let polar = Config::from_source(source(&env)).unwrap().polar.unwrap();
         assert_eq!(polar.server, PolarServer::Sandbox);
         assert_eq!(polar.api_base(), "https://sandbox-api.polar.sh");
+    }
+
+    #[test]
+    fn app_host_strips_scheme_port_and_path() {
+        let cfg = Config::from_source(|_| None).unwrap();
+        assert_eq!(cfg.app_host(), None);
+
+        let cfg = Config::from_source(source(&[(
+            "SERVER_PUBLIC_URL",
+            "https://App.Example.com:8443/x",
+        )]))
+        .unwrap();
+        assert_eq!(cfg.app_host().as_deref(), Some("app.example.com"));
+
+        let cfg =
+            Config::from_source(source(&[("SERVER_PUBLIC_URL", "http://localhost:8080")])).unwrap();
+        assert_eq!(cfg.app_host().as_deref(), Some("localhost"));
     }
 
     #[test]

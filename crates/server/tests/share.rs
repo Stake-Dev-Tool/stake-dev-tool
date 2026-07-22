@@ -469,8 +469,10 @@ async fn static_serving_and_app_host_unaffected() {
         "{url}"
     );
 
-    // `/` → index.html
-    let root = share_get(&ctx.state, &host, "/", None).await;
+    // `/` with a sessionID already present → index.html directly (a bare `/`
+    // without one is 302'd through the front-contract bootstrap; see
+    // `entry_redirect_injects_front_contract`).
+    let root = share_get(&ctx.state, &host, "/?sessionID=probe", None).await;
     assert_eq!(root.status, StatusCode::OK);
     assert_eq!(root.body, INDEX_HTML);
     assert!(
@@ -724,8 +726,9 @@ async fn password_gate() {
     let cookie = set_cookie.split(';').next().unwrap().to_string();
     assert!(cookie.starts_with("sdt_share="));
 
-    // Unlocked: `/` now serves the bundle.
-    let unlocked = share_get(&ctx.state, &host, "/", Some(&cookie)).await;
+    // Unlocked: `/` now serves the bundle (sessionID present → no bootstrap
+    // redirect; the unlock cookie rides alongside).
+    let unlocked = share_get(&ctx.state, &host, "/?sessionID=probe", Some(&cookie)).await;
     assert_eq!(unlocked.status, StatusCode::OK);
     assert_eq!(unlocked.body, INDEX_HTML);
 }
@@ -852,4 +855,85 @@ async fn list_reports_counters() {
     assert_eq!(entry["total_bet"].as_f64(), Some(2.0));
     // observed_rtp is present (total_bet > 0).
     assert!(entry["observed_rtp"].is_number());
+}
+
+/// Pull the `sessionID` value out of a redirect `Location` query.
+fn sid_from_location(location: &str) -> String {
+    let query = location.split_once('?').map(|(_, q)| q).unwrap_or("");
+    for kv in query.split('&') {
+        if let Some(v) = kv.strip_prefix("sessionID=") {
+            return v.to_string();
+        }
+    }
+    panic!("no sessionID in {location}");
+}
+
+/// Front-contract bootstrap: a bare `/` on a share host (no query) is 302'd to
+/// itself with the Stake front-contract params — `sessionID`, `rgs_url` pointing
+/// at THIS host's `/api/rgs/<game>`, `lang`/`currency`/`device`/`social` — and a
+/// `sdt_share_sid` cookie. Following the redirect serves the bundle; a second
+/// paramless load carrying the cookie redirects with the SAME sessionID (so a
+/// refresh never inflates the session count).
+#[tokio::test]
+async fn entry_redirect_injects_front_contract() {
+    let Some(ctx) = setup().await else { return };
+    let (ws, token) = seed(&ctx.state).await;
+    let share = create_share(&ctx.state, &ws, &token, json!({})).await;
+    let host = host_for(share["slug"].as_str().unwrap());
+
+    // Bare `/` → 302 with the contract params + a fresh sid cookie.
+    let boot = share_get(&ctx.state, &host, "/", None).await;
+    assert_eq!(
+        boot.status,
+        StatusCode::FOUND,
+        "expected 302, got {:?}",
+        boot.status
+    );
+    let location = boot
+        .headers
+        .get("location")
+        .and_then(|v| v.to_str().ok())
+        .unwrap()
+        .to_string();
+    assert!(
+        location.contains("sessionID="),
+        "location has sessionID: {location}"
+    );
+    assert!(
+        location.contains("rgs_url="),
+        "location has rgs_url: {location}"
+    );
+    // rgs_url targets this share host's /api/rgs/<game> (game slug survives
+    // percent-encoding as a substring).
+    assert!(
+        location.contains(GAME),
+        "rgs_url targets the game: {location}"
+    );
+    assert!(location.contains("lang=en"), "{location}");
+    assert!(location.contains("currency=USD"), "{location}");
+    assert!(location.contains("device=desktop"), "{location}");
+    assert!(location.contains("social=false"), "{location}");
+
+    let set_cookie = boot.set_cookie().expect("sid cookie set");
+    assert!(set_cookie.starts_with("sdt_share_sid="), "{set_cookie}");
+    let cookie = set_cookie.split(';').next().unwrap().to_string();
+    let sid = sid_from_location(&location);
+
+    // Following the redirect (sessionID now present) serves the bundle index.
+    let followed = share_get(&ctx.state, &host, &location, Some(&cookie)).await;
+    assert_eq!(followed.status, StatusCode::OK, "{:?}", followed.status);
+    assert_eq!(followed.body, INDEX_HTML);
+
+    // A second paramless load carrying the cookie reuses the SAME sid and does
+    // not re-set the cookie.
+    let again = share_get(&ctx.state, &host, "/", Some(&cookie)).await;
+    assert_eq!(again.status, StatusCode::FOUND);
+    let loc2 = again
+        .headers
+        .get("location")
+        .and_then(|v| v.to_str().ok())
+        .unwrap()
+        .to_string();
+    assert_eq!(sid_from_location(&loc2), sid, "reused cookie keeps the sid");
+    assert!(again.set_cookie().is_none(), "no new cookie on reuse");
 }

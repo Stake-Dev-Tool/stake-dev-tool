@@ -36,6 +36,10 @@ pub struct AppState {
     pub http_client: reqwest::Client,
     /// Per-workspace realtime fan-out behind the SSE stream (M3).
     pub events: Arc<crate::documents::WorkspaceEvents>,
+    /// 60s cache of custom-domain -> workspace resolutions, shared by the
+    /// Host-dispatch layer and the `/api/tls-check` ask endpoint. Cleared on any
+    /// custom-domain write so a set/clear takes effect immediately.
+    pub custom_domains: Arc<crate::share::custom::CustomDomainCache>,
 }
 
 impl AppState {
@@ -47,6 +51,7 @@ impl AppState {
             login_limiter: Arc::new(LoginRateLimiter::new()),
             http_client: reqwest::Client::new(),
             events: Arc::new(crate::documents::WorkspaceEvents::new()),
+            custom_domains: Arc::new(crate::share::custom::CustomDomainCache::new()),
         }
     }
 }

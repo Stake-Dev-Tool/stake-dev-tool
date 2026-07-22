@@ -1,16 +1,31 @@
 # Reverse proxy for the cloud server. Domains come from deploy/.env.prod via
 # compose `environment` so this file needs no per-instance edits.
 
+# ---------------------------------------------------------------------------
+# Global options. MUST be the first block in the file. `on_demand_tls.ask` gates
+# every ON-DEMAND certificate: before issuing one for an unknown hostname, Caddy
+# GETs this endpoint with `?domain=<sni>` and only proceeds on a 2xx. The server
+# answers 200 only when the host is `<label>.<a registered workspace
+# custom_play_domain>` — so a cert is issued exactly for domains a workspace has
+# attached, never for arbitrary hosts pointed at this box. The endpoint is
+# unauthenticated, cheap, and secret-free (a cached DB lookup).
+# ---------------------------------------------------------------------------
+{
+	on_demand_tls {
+		ask http://server:8080/api/tls-check
+	}
+}
+
 {$APP_DOMAIN} {
 	encode zstd gzip
 	reverse_proxy server:8080
 }
 
 # ---------------------------------------------------------------------------
-# M5 — share links on wildcard subdomains. `<slug>.play.<domain>` is terminated
-# here (wildcard TLS via the Cloudflare DNS challenge) and proxied to the server
-# with the Host header intact; the server's Host-dispatch layer routes it to the
-# share router when SERVER_PLAY_DOMAIN matches.
+# M5 — share links on the PLATFORM's own wildcard subdomains. `<slug>.play.<domain>`
+# is terminated here (wildcard TLS via the Cloudflare DNS challenge) and proxied to
+# the server with the Host header intact; the server's Host-dispatch layer routes it
+# to the share router when SERVER_PLAY_DOMAIN matches.
 # Requires: the cloudflare-dns Caddy build (deploy/caddy/Dockerfile, already
 # used by compose) + CLOUDFLARE_API_TOKEN in .env.prod (Zone → DNS → Edit),
 # a DNS-only A record for *.play.<domain> pointing at this box, and PLAY_DOMAIN
@@ -21,5 +36,27 @@
 	tls {
 		dns cloudflare {env.CLOUDFLARE_API_TOKEN}
 	}
+	reverse_proxy server:8080
+}
+
+# ---------------------------------------------------------------------------
+# Workspace CUSTOM play domains. A workspace owner attaches a domain they own
+# (e.g. `play.acme.com`) and points a wildcard record at this box — customer DNS =
+# a wildcard `*.play.acme.com` A record (→ this server's IP) or CNAME (→ the app
+# host), in DNS-only mode (no proxy). This catch-all terminates any HTTPS host not
+# matched by the sites above and issues a per-hostname certificate ON DEMAND
+# (HTTP-01 / TLS-ALPN) the first time a visitor arrives — gated by the `ask`
+# endpoint in the global block. Requests are proxied with the Host header intact;
+# the server's Host-dispatch layer resolves `<label>.<custom_play_domain>` to the
+# owning workspace and serves that workspace's share links (scoped).
+#
+# The two named sites above are more specific, so Caddy always prefers them; only
+# genuinely-unknown hosts reach this block.
+# ---------------------------------------------------------------------------
+https:// {
+	tls {
+		on_demand
+	}
+	encode zstd gzip
 	reverse_proxy server:8080
 }

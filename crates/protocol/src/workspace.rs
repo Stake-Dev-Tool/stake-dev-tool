@@ -82,6 +82,22 @@ pub struct WorkspaceDetail {
     pub created_at: DateTime<Utc>,
     pub role: Role,
     pub members: Vec<WorkspaceMember>,
+    /// The workspace's attached custom play domain (lowercase, e.g.
+    /// `play.acme.com`), or `null` when none is set. Share links are served at
+    /// `<slug>.<custom_play_domain>` when present. `#[serde(default)]` keeps
+    /// older payloads that predate the field deserializing cleanly.
+    #[serde(default)]
+    pub custom_play_domain: Option<String>,
+}
+
+/// `PUT /api/workspaces/:slug/domain` request body and response. `domain: null`
+/// clears the workspace's custom play domain; a value sets it (validated +
+/// lowercased server-side). The response echoes the stored value.
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "protocol/")]
+pub struct WorkspaceDomain {
+    #[serde(default)]
+    pub domain: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]

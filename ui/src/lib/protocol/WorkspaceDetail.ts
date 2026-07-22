@@ -5,4 +5,11 @@ import type { WorkspaceMember } from "./WorkspaceMember";
 /**
  * Full workspace view: the workspace, the caller's role, and every member.
  */
-export type WorkspaceDetail = { id: string, slug: string, name: string, created_at: string, role: Role, members: Array<WorkspaceMember>, };
+export type WorkspaceDetail = { id: string, slug: string, name: string, created_at: string, role: Role, members: Array<WorkspaceMember>, 
+/**
+ * The workspace's attached custom play domain (lowercase, e.g.
+ * `play.acme.com`), or `null` when none is set. Share links are served at
+ * `<slug>.<custom_play_domain>` when present. `#[serde(default)]` keeps
+ * older payloads that predate the field deserializing cleanly.
+ */
+custom_play_domain: string | null, };

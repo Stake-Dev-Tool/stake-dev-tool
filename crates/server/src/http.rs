@@ -14,7 +14,7 @@ use tower_http::trace::TraceLayer;
 
 use crate::AppState;
 use crate::api;
-use crate::share::{self, ShareHost};
+use crate::share::{self, ShareHost, ShareWorkspace};
 use crate::storage;
 
 const DB_CHECK_TIMEOUT: Duration = Duration::from_secs(2);
@@ -59,12 +59,22 @@ pub fn build_router(state: AppState) -> Router {
     // added ONLY when `play_domain` is set, so an instance without it keeps a
     // byte-identical app router (the existing health/auth tests exercise that
     // path with `play_domain: None`).
+    //
+    // The same layer also serves workspace *custom* play domains: a Host that is
+    // neither the app host nor a play-domain match is looked up (cached) against
+    // registered `custom_play_domain`s, and on a hit is dispatched to the share
+    // router scoped to that workspace. The DB probe only fires for such unknown
+    // hosts — ordinary dashboard traffic (app host) and play-domain hosts never
+    // reach it.
     match state.config.play_domain.clone() {
         Some(play_domain) => {
-            let share_router = share::router().with_state(state);
+            let share_router = share::router().with_state(state.clone());
+            let app_host = state.config.app_host().map(|h| Arc::from(h.as_str()));
             let dispatch = ShareDispatch {
                 play_domain: Arc::from(play_domain.as_str()),
+                app_host,
                 share_router,
+                state,
             };
             app.layer(middleware::from_fn_with_state(dispatch, host_dispatch))
         }
@@ -72,12 +82,16 @@ pub fn build_router(state: AppState) -> Router {
     }
 }
 
-/// State for the Host-dispatch middleware: the configured play domain and the
-/// (already state-bound) share router.
+/// State for the Host-dispatch middleware: the configured play domain, the
+/// dashboard's own host (to skip the custom-domain probe for app traffic), the
+/// (already state-bound) share router, and app state for the custom-domain
+/// lookup + cache.
 #[derive(Clone)]
 struct ShareDispatch {
     play_domain: Arc<str>,
+    app_host: Option<Arc<str>>,
     share_router: Router,
+    state: AppState,
 }
 
 /// Peel share-host requests off to the share router; forward everything else to
@@ -88,14 +102,38 @@ async fn host_dispatch(
     mut req: Request,
     next: Next,
 ) -> Response {
+    // 1. Platform play-domain share host (`<label>.<play_domain>`): global slug.
     if let Some(label) = share::match_share_label(req.headers(), &dispatch.play_domain) {
         req.extensions_mut().insert(ShareHost(label));
-        return match dispatch.share_router.clone().oneshot(req).await {
-            Ok(response) => response,
-            Err(infallible) => match infallible {},
-        };
+        return dispatch_to_share(&dispatch, req).await;
     }
+
+    // 2. Workspace custom play domain (`<label>.<custom_play_domain>`): scoped
+    //    slug. Only probed for hosts that are neither our app host nor a
+    //    play-domain match — so ordinary dashboard traffic never hits the DB.
+    if let Some(host) = share::request_host(req.headers())
+        && dispatch.app_host.as_deref() != Some(host.as_str())
+        && let Some((label, workspace_id)) = share::custom::resolve_custom_host(
+            &dispatch.state.pool,
+            &dispatch.state.custom_domains,
+            &host,
+        )
+        .await
+    {
+        req.extensions_mut().insert(ShareHost(label));
+        req.extensions_mut().insert(ShareWorkspace(workspace_id));
+        return dispatch_to_share(&dispatch, req).await;
+    }
+
     next.run(req).await
+}
+
+/// Drive a request through the (infallible) share router.
+async fn dispatch_to_share(dispatch: &ShareDispatch, req: Request) -> Response {
+    match dispatch.share_router.clone().oneshot(req).await {
+        Ok(response) => response,
+        Err(infallible) => match infallible {},
+    }
 }
 
 /// Liveness + readiness in one probe: 200 when every dependency answers, 503

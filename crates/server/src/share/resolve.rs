@@ -33,29 +33,53 @@ impl ResolvedShare {
     }
 }
 
-/// Load a link by its subdomain slug (does not check validity).
-async fn load_by_slug(pool: &PgPool, slug: &str) -> ApiResult<Option<ResolvedShare>> {
-    let row = sqlx::query_as::<_, ResolvedShare>(
-        "SELECT s.id, s.workspace_id, s.game_id, g.slug AS game_slug, s.revision_number, \
-                s.front_bundle_id, s.password_hash, s.expires_at, s.max_concurrent_sessions, \
-                s.revoked_at \
-         FROM share_links s JOIN games g ON g.id = s.game_id \
-         WHERE s.slug = $1",
-    )
-    .bind(slug)
-    .fetch_optional(pool)
-    .await?;
+/// The `ResolvedShare` columns, `WHERE s.slug = $1`. A `$2` workspace-scope
+/// clause is appended when the request arrived on a custom domain.
+const LOAD_BY_SLUG: &str = "SELECT s.id, s.workspace_id, s.game_id, g.slug AS game_slug, \
+            s.revision_number, s.front_bundle_id, s.password_hash, s.expires_at, \
+            s.max_concurrent_sessions, s.revoked_at \
+     FROM share_links s JOIN games g ON g.id = s.game_id \
+     WHERE s.slug = $1";
+
+/// Load a link by its subdomain slug (does not check validity). When `scope` is
+/// set (a custom-domain request) the lookup is additionally constrained to that
+/// workspace, so one tenant's domain can never resolve another tenant's slug;
+/// when it is `None` (a play-domain request) the query is byte-identical to the
+/// original global-slug lookup.
+async fn load_by_slug(
+    pool: &PgPool,
+    slug: &str,
+    scope: Option<Uuid>,
+) -> ApiResult<Option<ResolvedShare>> {
+    let row = match scope {
+        None => {
+            sqlx::query_as::<_, ResolvedShare>(LOAD_BY_SLUG)
+                .bind(slug)
+                .fetch_optional(pool)
+                .await?
+        }
+        Some(workspace_id) => {
+            sqlx::query_as::<_, ResolvedShare>(&format!("{LOAD_BY_SLUG} AND s.workspace_id = $2"))
+                .bind(slug)
+                .bind(workspace_id)
+                .fetch_optional(pool)
+                .await?
+        }
+    };
     Ok(row)
 }
 
 /// Resolve a link by slug and enforce validity. On any failure returns the
 /// branded page to serve (unknown/revoked -> 404, expired -> expired page). A DB
-/// error maps to the internal page (logged) rather than propagating.
+/// error maps to the internal page (logged) rather than propagating. `scope`
+/// constrains the lookup to a workspace for custom-domain requests (see
+/// [`load_by_slug`]).
 pub(super) async fn resolve(
     pool: &PgPool,
     slug: &str,
+    scope: Option<Uuid>,
 ) -> Result<ResolvedShare, axum::response::Response> {
-    let link = match load_by_slug(pool, slug).await {
+    let link = match load_by_slug(pool, slug, scope).await {
         Ok(link) => link,
         Err(e) => {
             tracing::error!(error = %e, slug, "share: failed to load link");

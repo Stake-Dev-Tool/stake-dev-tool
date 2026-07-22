@@ -4,6 +4,7 @@
 pub mod auth;
 pub mod billing;
 pub mod documents;
+pub mod domains;
 pub mod invites;
 pub mod math;
 pub mod shares;
@@ -55,6 +56,11 @@ pub fn router(max_blob_bytes: usize) -> Router<AppState> {
             get(workspaces::list).post(workspaces::create),
         )
         .route("/workspaces/:slug", get(workspaces::detail))
+        .route("/workspaces/:slug/domain", put(domains::set_domain))
+        // Unauthenticated: Caddy's on-demand-TLS `ask` endpoint. Kept cheap and
+        // secret-free (a cached custom-domain lookup) — it is hit during TLS
+        // handshakes for every unknown SNI host.
+        .route("/tls-check", get(domains::tls_check))
         .route(
             "/workspaces/:slug/members/:user_id",
             patch(workspaces::update_member).delete(workspaces::remove_member),
