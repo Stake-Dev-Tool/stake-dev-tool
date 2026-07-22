@@ -1,13 +1,12 @@
-//! Cloud-backed replacement for the local GitHub "teams" registry.
+//! Cloud-backed replacement for the local GitHub "teams" registry (which V2
+//! removed outright — cloud workspaces are the only team system now).
 //!
 //! The re-pointed `teams_*` commands delegate here. `list_workspaces` is the
 //! server's source of truth; this module layers a thin local cache
 //! (`workspaces.json`) over it holding the **active** workspace, an id→slug map
 //! (the M2/M3 endpoints are slug-addressed while the UI passes ids), and the
 //! last synced `seq` per workspace (for `?since_seq=` incremental pulls and SSE
-//! reconnect). This is the "`teams.json` becomes a thin cache" of the contract,
-//! kept in a separate file so the legacy GitHub `teams.json` still feeds
-//! migration.
+//! reconnect).
 
 use std::collections::HashMap;
 use std::path::PathBuf;

@@ -2,9 +2,9 @@
 //!
 //! This mirrors the reference implementation in `crates/cli` (`api.rs` +
 //! `push.rs` + `hash.rs`) — copied logic, not files — adapted to the desktop:
-//! it emits the existing `math-sync-progress` Tauri event (reusing
-//! [`crate::math_sync::MathSyncProgress`]) so `MathSyncOverlay` keeps working,
-//! and it replaces the GitHub-Release chunking with per-file blobs.
+//! it emits the `math-sync-progress` Tauri event ([`MathSyncProgress`], now
+//! owned by this module) so `MathSyncOverlay` keeps working, and it replaces
+//! the GitHub-Release chunking with per-file blobs.
 //!
 //! Wire flow (contract / `crates/server/README.md`):
 //! - `POST …/games/:game/revisions/check` `{ files }` → `{ missing: [hash] }`
@@ -28,9 +28,51 @@ use tokio::fs;
 use tokio::io::AsyncReadExt;
 use tokio_util::io::ReaderStream;
 
-use crate::math_sync::{MathSyncProgress, MathSyncReport, PROGRESS_EVENT};
-
 use super::http::Conn;
+
+// ---------------------------------------------------------------------------
+// Math-sync progress event plumbing.
+//
+// These moved here from the deleted `crate::math_sync` (the legacy GitHub-
+// Release sync) when V2 dropped GitHub teams. The `math-sync-progress` event
+// name/shape is a UI contract (`MathSyncOverlay`), so it is preserved exactly;
+// `preview.rs` also emits it via these re-exported items.
+// ---------------------------------------------------------------------------
+
+/// Tauri event name for math-sync progress. Consumed by `MathSyncOverlay`.
+pub const PROGRESS_EVENT: &str = "math-sync-progress";
+
+/// One progress tick emitted on [`PROGRESS_EVENT`].
+#[derive(Debug, Clone, Serialize)]
+pub struct MathSyncProgress {
+    #[serde(rename = "gameSlug")]
+    pub game_slug: String,
+    /// "hashing" | "uploading" | "downloading" | "committing" | "done"
+    pub phase: &'static str,
+    #[serde(rename = "currentFile")]
+    pub current_file: String,
+    #[serde(rename = "fileIndex")]
+    pub file_index: u32,
+    #[serde(rename = "fileCount")]
+    pub file_count: u32,
+    #[serde(rename = "bytesDone")]
+    pub bytes_done: u64,
+    #[serde(rename = "bytesTotal")]
+    pub bytes_total: u64,
+}
+
+/// Summary returned by a push/pull, surfaced to the UI.
+#[derive(Debug, Clone, Serialize)]
+pub struct MathSyncReport {
+    #[serde(rename = "filesUploaded")]
+    pub files_uploaded: u32,
+    #[serde(rename = "filesSkipped")]
+    pub files_skipped: u32,
+    #[serde(rename = "chunksUploaded")]
+    pub chunks_uploaded: u32,
+    #[serde(rename = "bytesUploaded")]
+    pub bytes_uploaded: u64,
+}
 
 /// How many blob uploads run at once (matches the CLI).
 const UPLOAD_CONCURRENCY: usize = 4;

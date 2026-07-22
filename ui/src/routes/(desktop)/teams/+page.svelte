@@ -24,17 +24,13 @@
 
   import {
     cloudApi,
-    githubAuth,
     teamsApi,
     type CloudUser,
-    type GithubUser,
-    type LegacyTeam,
     type SyncReport,
     type Team,
     type TeamRole
   } from '$lib/api';
   import CloudSignInDialog from '$lib/components/CloudSignInDialog.svelte';
-  import GithubSignInDialog from '$lib/components/GithubSignInDialog.svelte';
 
   let cloudUser = $state<CloudUser | null>(null);
   let loading = $state(true);
@@ -66,22 +62,15 @@
   let deleteTarget = $state<Team | null>(null);
   let deleteConfirm = $state('');
 
-  // Legacy GitHub teams + migration
-  let githubUser = $state<GithubUser | null>(null);
-  let legacyTeams = $state<LegacyTeam[]>([]);
-  let githubSignInOpen = $state(false);
-  let migratingId = $state<string | null>(null);
 
   const activeWs = $derived(workspaces.find((w) => w.id === activeId) ?? null);
   const otherWs = $derived(workspaces.filter((w) => w.id !== activeId));
-  const pendingLegacy = $derived(legacyTeams.filter((t) => !t.migratedTo));
 
   onMount(() => {
     (async () => {
       try {
         cloudUser = await cloudApi.currentUser();
         if (cloudUser) await refreshWorkspaces();
-        await refreshLegacy();
       } catch (e) {
         console.error(e);
       } finally {
@@ -108,14 +97,6 @@
     if (activeId) cloudApi.subscribe(activeId).catch(() => {});
   }
 
-  async function refreshLegacy() {
-    try {
-      githubUser = await githubAuth.currentUser();
-      legacyTeams = await teamsApi.legacyList();
-    } catch {
-      legacyTeams = [];
-    }
-  }
 
   async function onCloudSignedIn(u: CloudUser) {
     cloudUser = u;
@@ -241,34 +222,7 @@
     });
   }
 
-  async function onGithubSignedIn(u: GithubUser) {
-    githubUser = u;
-    await refreshLegacy();
-  }
 
-  async function migrate(t: LegacyTeam) {
-    if (!cloudUser) return toast.error('Sign in to the cloud first');
-    if (!githubUser) return toast.error('Sign in to GitHub to read the team repo');
-    if (
-      !confirm(
-        `Migrate "${t.name}" into a new cloud workspace? Profiles, saved rounds and math are copied. The GitHub repo is left untouched.`
-      )
-    )
-      return;
-    migratingId = t.id;
-    try {
-      const r = await teamsApi.migrateToCloud(t.id);
-      toast.success(
-        `Migrated "${t.name}" → "${r.workspaceName}" (${r.profiles} profiles, ${r.rounds} rounds, ${r.games} games)`
-      );
-      await refreshWorkspaces();
-      await refreshLegacy();
-    } catch (e) {
-      toast.error(e instanceof Error ? e.message : String(e));
-    } finally {
-      migratingId = null;
-    }
-  }
 </script>
 
 <svelte:head>
@@ -442,57 +396,9 @@
     {/if}
   {/if}
 
-  <!-- Legacy GitHub teams (deprecated) -->
-  {#if pendingLegacy.length > 0}
-    <div class="mt-4 flex flex-col gap-3">
-      <div
-        class="rounded-md border border-amber-500/40 bg-amber-500/5 px-4 py-3 text-sm text-muted-foreground"
-      >
-        <span class="font-medium text-foreground">Legacy GitHub teams are deprecated.</span>
-        Migrate each one into a cloud workspace to keep syncing. Migration copies profiles, saved
-        rounds and math; the GitHub repo is left untouched. Requires both GitHub and cloud sign-in.
-      </div>
-
-      {#if !githubUser}
-        <Button variant="outline" size="sm" class="self-start" onclick={() => (githubSignInOpen = true)}>
-          <LogInIcon />
-          Sign in with GitHub to migrate
-        </Button>
-      {/if}
-
-      <div class="flex flex-col gap-2">
-        {#each pendingLegacy as t (t.id)}
-          <Card.Root class="border-dashed">
-            <Card.Content class="flex items-center justify-between gap-3 py-4">
-              <div class="min-w-0">
-                <div class="flex items-center gap-2">
-                  <span class="font-medium">{t.name}</span>
-                  {#if t.role === 'owner'}
-                    <Badge variant="secondary" class="text-xs">owner</Badge>
-                  {/if}
-                </div>
-                <div class="font-mono-tab text-xs text-muted-foreground">
-                  {t.repoOwner}/{t.repoName}
-                </div>
-              </div>
-              <Button
-                size="sm"
-                onclick={() => migrate(t)}
-                disabled={busy || migratingId === t.id || !cloudUser || !githubUser}
-              >
-                <UploadCloudIcon class={migratingId === t.id ? 'animate-pulse' : ''} />
-                {migratingId === t.id ? 'Migrating…' : 'Migrate to cloud'}
-              </Button>
-            </Card.Content>
-          </Card.Root>
-        {/each}
-      </div>
-    </div>
-  {/if}
 </main>
 
 <CloudSignInDialog bind:open={cloudSignInOpen} onSignedIn={onCloudSignedIn} />
-<GithubSignInDialog bind:open={githubSignInOpen} onSignedIn={onGithubSignedIn} />
 
 <!-- Create workspace dialog -->
 <Dialog.Root bind:open={createOpen}>

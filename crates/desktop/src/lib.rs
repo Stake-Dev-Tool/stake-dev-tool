@@ -2,11 +2,9 @@ mod cloud;
 mod commands;
 mod file_chunker;
 mod github;
-mod math_sync;
 mod preview;
 mod profiles;
 mod state;
-mod teams;
 
 use crate::state::AppState;
 use tracing_subscriber::{EnvFilter, fmt};
@@ -52,7 +50,6 @@ pub fn run() {
             commands::github_start_device_flow,
             commands::github_poll_device_flow,
             commands::github_logout,
-            commands::github_list_orgs,
             commands::teams_list,
             commands::teams_active,
             commands::teams_set_active,
@@ -62,8 +59,6 @@ pub fn run() {
             commands::teams_delete,
             commands::teams_invite,
             commands::teams_sync,
-            commands::teams_legacy_list,
-            commands::teams_migrate_to_cloud,
             commands::teams_push_math,
             commands::teams_pull_math,
             commands::teams_list_remote_games,

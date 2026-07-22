@@ -180,20 +180,12 @@ export type DeviceFlowPoll = {
   next_interval_secs: number;
 };
 
-export type GithubOrg = {
-  login: string;
-  id: number;
-  avatar_url?: string | null;
-  description?: string | null;
-};
-
 export const githubAuth = {
   currentUser: () => invoke<GithubUser | null>('github_current_user'),
   startDeviceFlow: () => invoke<DeviceCode>('github_start_device_flow'),
   pollDeviceFlow: (deviceCode: string, currentInterval: number) =>
     invoke<DeviceFlowPoll>('github_poll_device_flow', { deviceCode, currentInterval }),
-  logout: () => invoke<void>('github_logout'),
-  listOrgs: () => invoke<GithubOrg[]>('github_list_orgs')
+  logout: () => invoke<void>('github_logout')
 };
 
 export type TeamRole = 'owner' | 'admin' | 'member';
@@ -211,31 +203,10 @@ export type Team = {
 
 // A legacy GitHub-repo team still present on this device. Surfaced only so the
 // Teams screen can offer a per-team "Migrate to cloud" action.
-export type LegacyTeam = {
-  id: string;
-  name: string;
-  repoOwner: string;
-  repoName: string;
-  role: 'owner' | 'member';
-  htmlUrl: string;
-  addedAt: number;
-  lastSyncAt?: number | null;
-  migratedTo?: string | null;
-};
-
 export type SyncReport = {
   pushed: number;
   pulled: number;
   conflicts: number;
-};
-
-export type MigrateReport = {
-  workspaceId: string;
-  workspaceSlug: string;
-  workspaceName: string;
-  profiles: number;
-  rounds: number;
-  games: number;
 };
 
 export type TeamProfileInfo = {
@@ -313,9 +284,6 @@ export const teamsApi = {
   removeFromCatalog: (teamId: string, profileId: string) =>
     invoke<void>('teams_remove_from_catalog', { teamId, profileId }),
   // ---- Legacy GitHub teams (migration only) ----
-  legacyList: () => invoke<LegacyTeam[]>('teams_legacy_list'),
-  migrateToCloud: (teamId: string) =>
-    invoke<MigrateReport>('teams_migrate_to_cloud', { teamId })
 };
 
 // ===== Cloud platform (V2) — device-flow sign-in, workspaces, live SSE =====

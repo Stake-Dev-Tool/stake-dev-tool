@@ -8,7 +8,7 @@ import type { BillingUsage } from "./BillingUsage";
  */
 export type BillingStatusResponse = { 
 /**
- * Whether Polar billing is configured on this instance. `false` → quotas are
+ * Whether Stripe billing is configured on this instance. `false` → quotas are
  * never enforced and every limit is unlimited.
  */
 enabled: boolean, 
@@ -19,8 +19,9 @@ enabled: boolean,
  */
 plan: string, 
 /**
- * The subscription status verbatim from Polar (e.g. `"active"`, `"trialing"`,
- * `"past_due"`, `"canceled"`), or `null` when there is no subscription.
+ * The subscription status verbatim from Stripe (e.g. `"active"`, `"trialing"`,
+ * `"past_due"`, `"canceled"`), or `null` when there is no subscription. A
+ * storage-only subscription (no plan) reports the sentinel `"storage_only"`.
  */
 status: string | null, 
 /**
@@ -31,4 +32,10 @@ interval: BillingInterval | null,
  * The current billing period's end (subscription) or, on the free trial, when
  * the trial expires. `null` when neither applies.
  */
-current_period_end: string | null, usage: BillingUsage, limits: BillingLimits, };
+current_period_end: string | null, 
+/**
+ * Extra storage granted by the add-on, in GiB (`extra_storage_units × 10`).
+ * `0` when no storage add-on is active. Already folded into
+ * `limits.max_storage_bytes`; surfaced separately so the UI can show it.
+ */
+extra_storage_gib: bigint, usage: BillingUsage, limits: BillingLimits, };

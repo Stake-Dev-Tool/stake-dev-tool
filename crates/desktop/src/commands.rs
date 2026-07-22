@@ -1,10 +1,8 @@
 use crate::cloud;
 use crate::github;
-use crate::math_sync;
 use crate::preview;
 use crate::profiles;
 use crate::state::{AppState, LgsRunning};
-use crate::teams;
 
 fn resolve_ui_dir() -> Option<PathBuf> {
     // 1) explicit env override
@@ -608,11 +606,12 @@ pub async fn github_logout() -> Result<(), String> {
 }
 
 // ============================================================
-// Teams → cloud workspaces (M3)
+// Teams → cloud workspaces
 //
-// The command NAMES are the UI contract and are preserved; the bodies now
-// delegate to `crate::cloud` (workspaces + document sync + M2 math) instead of
-// the legacy GitHub-repo system in `crate::teams` (kept only for migration).
+// The command NAMES are the UI contract and are preserved; the bodies delegate
+// to `crate::cloud` (workspaces + document sync + M2 math). The legacy
+// GitHub-repo teams system was removed outright in V2 — cloud workspaces are the
+// only team system.
 // ============================================================
 
 #[tauri::command]
@@ -644,12 +643,6 @@ pub async fn teams_create(
     cloud::workspaces::create(&name, slug.as_deref())
         .await
         .map_err(|e| format!("{e:#}"))
-}
-
-#[tauri::command]
-pub async fn github_list_orgs() -> Result<Vec<github::api::OrgInfo>, String> {
-    let client = github::api::GithubClient::from_stored_token().map_err(|e| format!("{e:#}"))?;
-    client.list_user_orgs().await.map_err(|e| format!("{e:#}"))
 }
 
 /// Join a workspace by accepting an invite token (from an invite URL).
@@ -694,27 +687,6 @@ pub async fn teams_sync(team_id: String) -> Result<cloud::sync::SyncReport, Stri
         .map_err(|e| format!("{e:#}"))
 }
 
-// ---- Legacy GitHub teams (migration only) ----
-
-/// Lists the legacy GitHub-repo teams still on this device, so the Teams screen
-/// can offer a per-team "Migrate to cloud" action.
-#[tauri::command]
-pub async fn teams_legacy_list() -> Result<Vec<teams::Team>, String> {
-    teams::list_local().await.map_err(|e| format!("{e:#}"))
-}
-
-/// Migrate a legacy GitHub team into a new cloud workspace (requires both
-/// GitHub and cloud sign-in).
-#[tauri::command]
-pub async fn teams_migrate_to_cloud(
-    app: AppHandle,
-    team_id: String,
-) -> Result<cloud::migrate::MigrateReport, String> {
-    cloud::migrate::migrate_to_cloud(&app, &team_id)
-        .await
-        .map_err(|e| format!("{e:#}"))
-}
-
 // ============================================================
 // Math file sync (per-team, per-game)
 // ============================================================
@@ -725,7 +697,7 @@ pub async fn teams_push_math(
     team_id: String,
     game_slug: String,
     game_path: String,
-) -> Result<math_sync::MathSyncReport, String> {
+) -> Result<cloud::math::MathSyncReport, String> {
     cloud::sync::push_math(&app, &team_id, &game_slug, game_path)
         .await
         .map_err(|e| format!("{e:#}"))
@@ -737,7 +709,7 @@ pub async fn teams_pull_math(
     team_id: String,
     game_slug: String,
     dest_path: String,
-) -> Result<math_sync::MathSyncReport, String> {
+) -> Result<cloud::math::MathSyncReport, String> {
     cloud::sync::pull_math(&app, &team_id, &game_slug, dest_path)
         .await
         .map_err(|e| format!("{e:#}"))

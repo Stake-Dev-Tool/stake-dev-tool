@@ -459,7 +459,7 @@ pub async fn push_math(
     workspace_id: &str,
     game_slug: &str,
     game_path: String,
-) -> Result<crate::math_sync::MathSyncReport> {
+) -> Result<math::MathSyncReport> {
     let entry = workspaces::resolve(workspace_id).await?;
     math::push(
         app,
@@ -478,7 +478,7 @@ pub async fn pull_math(
     workspace_id: &str,
     game_slug: &str,
     dest_path: String,
-) -> Result<crate::math_sync::MathSyncReport> {
+) -> Result<math::MathSyncReport> {
     let entry = workspaces::resolve(workspace_id).await?;
     math::pull(app, &entry.slug, game_slug, None, dest_path)
         .await

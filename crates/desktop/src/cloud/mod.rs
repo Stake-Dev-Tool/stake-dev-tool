@@ -1,10 +1,7 @@
-//! Cloud plumbing for the V2 platform — the M3-preparation seam described in
-//! `docs/v2/recon-m3-m6.md` A.5.
+//! Cloud plumbing for the V2 platform — the workspaces team system that
+//! replaced the legacy GitHub-repo teams outright in V2.
 //!
-//! This module is **purely additive**: it does not touch the existing
-//! GitHub-repo teams system (`crate::teams`, `crate::github`, `crate::math_sync`),
-//! which keeps working untouched until M3 proper replaces it. The three
-//! submodules mirror the house GitHub patterns one-for-one:
+//! The submodules mirror the house GitHub patterns one-for-one:
 //!
 //! - [`config`] — the cloud base URL (env > config file > default), so
 //!   self-hosters can point the desktop app at their own instance.
@@ -20,7 +17,6 @@ pub mod config;
 pub mod documents;
 pub mod http;
 pub mod math;
-pub mod migrate;
 pub mod sidecar;
 pub mod sse;
 pub mod sync;

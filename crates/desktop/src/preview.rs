@@ -22,9 +22,9 @@ use std::path::{Path, PathBuf};
 use tauri::{AppHandle, Emitter};
 use tokio::fs;
 
+use crate::cloud::math::{MathSyncProgress, PROGRESS_EVENT};
 use crate::file_chunker;
 use crate::github::api::{GitTreeEntry, GithubClient};
-use crate::math_sync::{MathSyncProgress, PROGRESS_EVENT};
 use crate::profiles::Profile;
 use futures_util::stream::{self, StreamExt};
 

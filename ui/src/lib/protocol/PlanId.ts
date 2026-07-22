@@ -2,6 +2,6 @@
 
 /**
  * A purchasable plan. Serialized lowercase to match the `subscriptions.plan`
- * `CHECK` constraint and the Polar product mapping.
+ * `CHECK` constraint and the Stripe price mapping.
  */
 export type PlanId = "solo" | "team";
