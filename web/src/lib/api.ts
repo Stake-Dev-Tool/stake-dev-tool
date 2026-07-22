@@ -1714,18 +1714,42 @@ export const api = {
     /**
      * Owner-only: start a Stripe checkout for the seat subscription. `seats`
      * (1..=100) is the subscription quantity, priced by Stripe's graduated tiers
-     * (€3 first seat + €2 each additional). Returns the hosted checkout URL to
-     * navigate to (`window.location.href = url`). 404s when billing is disabled;
-     * throws an ApiError `invalid_seats` when `seats` is out of range.
+     * (€3 first seat + €2 each additional). `storageUnits` (0..=100, default 0)
+     * bundles the storage add-on into the SAME checkout as a second line item
+     * (one unit = +10 GiB for €1/mo); 0 omits it. Returns the hosted checkout URL
+     * to navigate to (`window.location.href = url`). 404s when billing is
+     * disabled; throws an ApiError `invalid_seats` / `invalid_units` when a count
+     * is out of range.
      */
-    async checkout(slug: string, interval: BillingInterval, seats: number): Promise<string> {
+    async checkout(
+      slug: string,
+      interval: BillingInterval,
+      seats: number,
+      storageUnits = 0
+    ): Promise<string> {
       const raw = await request<unknown>(
         'POST',
         `/workspaces/${encodeURIComponent(slug)}/billing/checkout`,
-        { interval, seats }
+        { interval, seats, storage_units: storageUnits }
       );
       const r = (raw ?? {}) as Record<string, unknown>;
       return String(r.checkout_url ?? '');
+    },
+    /**
+     * Owner-only: change the seat count on an already-subscribed workspace.
+     * `seats` (1..=100) becomes the subscription quantity; Stripe prorates the
+     * change (`create_prorations`) so only the difference is billed on the next
+     * invoice. Returns the fresh billing status. Throws an ApiError `invalid_seats`
+     * (out of range), `no_subscription` (no active seat subscription to change),
+     * or `seats_below_members` (fewer seats than current members).
+     */
+    async updateSeats(slug: string, seats: number): Promise<BillingStatus> {
+      const raw = await request<unknown>(
+        'POST',
+        `/workspaces/${encodeURIComponent(slug)}/billing/seats`,
+        { seats }
+      );
+      return normalizeBillingStatus(raw);
     },
     /**
      * Owner-only: start a Stripe checkout for the storage add-on. `units` (1..=100)

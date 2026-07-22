@@ -5,14 +5,16 @@
   import {
     billingStatus,
     setBillingStatus,
+    invalidateBillingStatus,
     planLabel,
     statusLabel,
     intervalLabel,
     meter,
     meterFill,
     clampSeats,
-    seatMonthlyEur,
-    seatYearlyEur,
+    seatEntitlements,
+    priceSummary,
+    PER_SEAT,
     SEATS_MIN,
     SEATS_MAX,
     SEAT_FIRST_EUR,
@@ -44,16 +46,25 @@
   // "pick a plan to activate" header with a Pay-later escape hatch.
   let activating = $state(false);
 
+  // Subscribe (free workspace → Stripe checkout).
   let checkoutError = $state('');
   let checkoutBusy = $state(false);
 
-  // Seat subscription: a stepper (1..100) + a monthly/yearly toggle.
+  // Seat stepper (1..100) + a monthly/yearly toggle, shared by the Subscribe card
+  // (free) and the Change-seats control (paid).
   let seats = $state(1);
   let interval = $state<BillingInterval>('monthly');
   let seatsSeeded = false;
   const INTERVALS: BillingInterval[] = ['monthly', 'yearly'];
 
-  // Storage add-on stepper (one unit = +10 GiB for €1/mo).
+  // Storage add-on the Subscribe card bundles into the SAME checkout (0 = none).
+  let checkoutStorage = $state(0);
+
+  // Change seats on an existing subscription (proration, in place).
+  let seatsBusy = $state(false);
+  let seatsError = $state('');
+
+  // Storage add-on for a subscribed workspace (additive "add more" → checkout).
   let storageUnits = $state(1);
   let storageBusy = $state(false);
   let storageError = $state('');
@@ -62,9 +73,14 @@
   let isFree = $derived(status?.plan === 'free');
   let isPaid = $derived(status?.plan === 'paid');
 
-  // Live seat pricing.
-  let monthlyPrice = $derived(seatMonthlyEur(seats));
-  let yearlyPrice = $derived(seatYearlyEur(seats));
+  let currentSeats = $derived(status?.seats ?? 0);
+  let memberCount = $derived(status?.usage.members ?? 0);
+  let belowMembers = $derived(seats < memberCount);
+  let seatsChanged = $derived(seats !== currentSeats);
+  let paidStorageUnits = $derived(
+    status ? Math.round((status.extra_storage_gib || 0) / STORAGE_UNIT_GIB) : 0
+  );
+  let paidInterval = $derived<BillingInterval>(status?.interval ?? 'monthly');
 
   // Usage meters — only meaningful (shown with caps) once a plan is active.
   let meters = $derived(
@@ -135,6 +151,7 @@
           const fresh = await api.billing.status(slug);
           setBillingStatus(slug, fresh);
           status = fresh;
+          seatsSeeded = false;
           seedSeats();
         } catch {
           // Keep the cached status; the toast still stands.
@@ -174,12 +191,26 @@
     seats = clampSeats(seats + delta);
   }
 
+  function clampCheckoutStorage(n: number): number {
+    if (!Number.isFinite(n)) return 0;
+    return Math.min(STORAGE_UNITS_MAX, Math.max(0, Math.round(n)));
+  }
+  function stepCheckoutStorage(delta: number) {
+    checkoutStorage = clampCheckoutStorage(checkoutStorage + delta);
+  }
+
+  // Free workspace: one checkout for seats + (optional) storage add-on.
   async function subscribe() {
     if (!isOwner || checkoutBusy) return;
     checkoutBusy = true;
     checkoutError = '';
     try {
-      const url = await api.billing.checkout(slug, interval, clampSeats(seats));
+      const url = await api.billing.checkout(
+        slug,
+        interval,
+        clampSeats(seats),
+        clampCheckoutStorage(checkoutStorage)
+      );
       if (url) {
         window.location.href = url; // full navigation to the hosted checkout
         return; // leave the button busy; the page is unloading
@@ -191,10 +222,33 @@
     checkoutBusy = false;
   }
 
+  // Paid workspace: change the seat count in place (Stripe prorates it).
+  async function applySeats() {
+    if (!isOwner || seatsBusy) return;
+    const n = clampSeats(seats);
+    if (n === currentSeats || belowMembers) return;
+    seatsBusy = true;
+    seatsError = '';
+    try {
+      const fresh = await api.billing.updateSeats(slug, n);
+      // Reflect it everywhere: update this page, then drop the shared cache so the
+      // PlanBanner (and other mounts) refetch the new seat-derived limits.
+      status = fresh;
+      invalidateBillingStatus(slug);
+      seatsSeeded = false;
+      seedSeats();
+      toast.success('Seats updated — Stripe will prorate the difference on your next invoice.');
+    } catch (e) {
+      seatsError = errorText(e);
+    }
+    seatsBusy = false;
+  }
+
   function stepStorage(delta: number) {
     storageUnits = clampStorageUnits(storageUnits + delta);
   }
 
+  // Paid workspace: add more storage (a separate add-on subscription → checkout).
   async function buyStorage() {
     if (!isOwner || storageBusy) return;
     const units = clampStorageUnits(storageUnits);
@@ -215,6 +269,100 @@
 </script>
 
 <svelte:head><title>Billing · {wsName || workspaceName(slug)} · Stake Dev Tool Cloud</title></svelte:head>
+
+<!-- ── Reusable snippets ─────────────────────────────────────────────────── -->
+
+{#snippet stepperControl(
+  display: string,
+  dec: () => void,
+  inc: () => void,
+  decDisabled: boolean,
+  incDisabled: boolean,
+  decAria: string,
+  incAria: string,
+  minW = '4rem'
+)}
+  <div class="inline-flex items-center rounded-md border border-border">
+    <button
+      type="button"
+      class="px-3 py-1.5 text-lg leading-none text-muted transition hover:text-text disabled:opacity-40"
+      aria-label={decAria}
+      disabled={decDisabled}
+      onclick={dec}
+    >
+      −
+    </button>
+    <span
+      class="px-3 text-center font-mono-tab text-sm font-medium text-text"
+      style="min-width: {minW}"
+    >
+      {display}
+    </span>
+    <button
+      type="button"
+      class="px-3 py-1.5 text-lg leading-none text-muted transition hover:text-text disabled:opacity-40"
+      aria-label={incAria}
+      disabled={incDisabled}
+      onclick={inc}
+    >
+      +
+    </button>
+  </div>
+{/snippet}
+
+<!-- Live "what you get" for a chosen seat count. -->
+{#snippet entitlements(n: number)}
+  {@const e = seatEntitlements(n)}
+  <div>
+    <div class="mb-2 text-sm font-medium text-text">What you get with {plural(n, 'seat')}</div>
+    <div class="grid grid-cols-2 gap-2 sm:grid-cols-4">
+      {#each [{ v: e.members, u: n === 1 ? 'member' : 'members' }, { v: `${e.storageGib} GiB`, u: 'storage' }, { v: e.shareLinks, u: 'share links' }, { v: e.sessions, u: 'live sessions' }] as cell (cell.u)}
+        <div class="rounded-lg border border-border bg-surface-2/40 px-3 py-2.5">
+          <div class="font-mono-tab text-lg font-semibold leading-tight text-text">{cell.v}</div>
+          <div class="text-xs text-muted">{cell.u}</div>
+        </div>
+      {/each}
+    </div>
+    <p class="mt-2 text-xs text-faint">
+      Each seat = {PER_SEAT.members} member + {PER_SEAT.storageGib} GiB + {PER_SEAT.shareLinks} share
+      links + {PER_SEAT.sessions} live sessions.
+    </p>
+  </div>
+{/snippet}
+
+<!-- Live combined price summary for `seatsN` seats + `storageN` storage units. -->
+{#snippet priceBox(seatsN: number, storageN: number, iv: BillingInterval)}
+  {@const p = priceSummary(seatsN, storageN)}
+  <div class="rounded-lg border border-border bg-surface-2/40 p-4 text-sm">
+    <div class="flex items-baseline justify-between gap-3">
+      <span class="text-muted">Seats ({seatsN})</span>
+      <span class="font-mono-tab text-text">
+        {iv === 'yearly' ? `€${p.seatYearly} / yr` : `€${p.seatMonthly} / mo`}
+      </span>
+    </div>
+    {#if storageN > 0}
+      <div class="mt-1 flex items-baseline justify-between gap-3">
+        <span class="text-muted">Storage add-on (+{storageN * STORAGE_UNIT_GIB} GiB)</span>
+        <span class="font-mono-tab text-text">€{p.storageMonthly} / mo</span>
+      </div>
+    {/if}
+    <div
+      class="mt-2 flex items-baseline justify-between gap-3 border-t border-border pt-2 font-semibold"
+    >
+      <span class="text-text">Total</span>
+      <span class="font-mono-tab text-text">
+        {#if iv === 'yearly'}
+          €{p.seatYearly} / yr{#if storageN > 0}<span class="text-muted"> + €{p.storageMonthly} / mo</span>{/if}
+        {:else}
+          €{p.monthlyTotal} / mo
+        {/if}
+      </span>
+    </div>
+    {#if iv === 'yearly'}
+      <div class="mt-1 text-right text-xs text-accent">2 months free — save €{p.yearlySaving} / yr</div>
+    {/if}
+  </div>
+{/snippet}
 
 <main class="mx-auto w-full max-w-4xl px-6 py-10">
   <Breadcrumbs
@@ -268,6 +416,9 @@
           {/if}
           {#if status.interval}
             <span class="text-sm text-muted">· {intervalLabel(status.interval)}</span>
+          {/if}
+          {#if isPaid && status.extra_storage_gib > 0}
+            <span class="text-sm text-muted">· +{status.extra_storage_gib} GiB storage</span>
           {/if}
         </div>
         {#if periodLine}
@@ -332,173 +483,233 @@
       {/if}
     </section>
 
-    <!-- Subscribe / change seats -->
-    <section>
-      <h2 class="mb-3 text-sm font-semibold uppercase tracking-wide text-faint">
-        {isPaid ? 'Change plan' : 'Subscribe'}
-      </h2>
-
-      {#if !isOwner}
-        <p class="mb-4 rounded-md border border-border bg-surface-2/60 px-3 py-2 text-sm text-muted">
-          Only the workspace owner can manage billing.
-        </p>
-      {/if}
-      {#if checkoutError}
-        <p class="mb-4 rounded-md border border-danger/30 bg-danger/10 px-3 py-2 text-sm text-danger">
-          {checkoutError}
-        </p>
-      {/if}
-
-      <Card class="flex flex-col gap-5 p-6">
-        <div>
-          <div class="text-base font-semibold">Seat plan</div>
-          <p class="mt-1 max-w-prose text-sm text-muted">
-            €{SEAT_FIRST_EUR}/mo for the first seat, €{SEAT_ADDITIONAL_EUR}/mo for each additional
-            seat. Every seat adds a member slot plus {STORAGE_UNIT_GIB} GiB storage, 5 share links
-            and 5 live play sessions.
-          </p>
-        </div>
-
-        <!-- Monthly / Yearly toggle -->
-        <div class="inline-flex w-fit rounded-md border border-border p-0.5 text-sm">
-          {#each INTERVALS as iv (iv)}
-            <button
-              type="button"
-              class="rounded px-3 py-1 transition {interval === iv
-                ? 'bg-surface-2 text-text'
-                : 'text-muted hover:text-text'}"
-              aria-pressed={interval === iv}
-              onclick={() => (interval = iv)}
-            >
-              {iv === 'monthly' ? 'Monthly' : 'Yearly'}
-            </button>
-          {/each}
-          <span class="self-center px-2 text-xs text-accent">2 months free</span>
-        </div>
-
-        <!-- Seat stepper -->
-        <div class="flex flex-wrap items-center gap-4">
-          <span class="text-sm text-muted">Seats</span>
-          <div class="inline-flex items-center rounded-md border border-border">
-            <button
-              type="button"
-              class="px-3 py-1.5 text-lg leading-none text-muted transition hover:text-text disabled:opacity-40"
-              aria-label="Fewer seats"
-              disabled={!isOwner || seats <= SEATS_MIN}
-              onclick={() => stepSeats(-1)}
-            >
-              −
-            </button>
-            <span class="min-w-[4rem] px-3 text-center font-mono-tab text-sm font-medium text-text">
-              {seats}
-            </span>
-            <button
-              type="button"
-              class="px-3 py-1.5 text-lg leading-none text-muted transition hover:text-text disabled:opacity-40"
-              aria-label="More seats"
-              disabled={!isOwner || seats >= SEATS_MAX}
-              onclick={() => stepSeats(1)}
-            >
-              +
-            </button>
-          </div>
-        </div>
-
-        <!-- Live price -->
-        <div>
-          <div class="text-sm text-muted">
-            €{SEAT_FIRST_EUR}
-            {#if seats > 1}
-              + €{SEAT_ADDITIONAL_EUR} × {seats - 1}
-            {/if}
-            =
-            <span class="font-semibold text-text">€{monthlyPrice} / mo</span>
-          </div>
-          {#if interval === 'yearly'}
-            <div class="mt-0.5 text-sm">
-              <span class="font-semibold text-text">€{yearlyPrice} / yr</span>
-              <span class="text-accent">· 2 months free</span>
-            </div>
-          {/if}
-        </div>
-
-        <Button
-          class="w-fit"
-          loading={checkoutBusy}
-          disabled={!isOwner || checkoutBusy}
-          onclick={subscribe}
-        >
-          {isPaid ? 'Update subscription' : 'Subscribe'}
-        </Button>
-      </Card>
-
-      <p class="mt-4 text-xs text-faint">
-        Prices exclude tax — VAT, when applicable, is added at checkout based on your country. Payments
-        are processed securely by Stripe as merchant of record.
-      </p>
-    </section>
-
-    <!-- Storage add-on -->
-    <section class="mt-8">
-      <h2 class="mb-3 text-sm font-semibold uppercase tracking-wide text-faint">Storage add-on</h2>
-      <Card class="flex flex-col gap-4 p-6">
-        <p class="max-w-prose text-sm text-muted">
-          Need more room for math blobs? Add storage in {STORAGE_UNIT_GIB} GiB units for €1/mo each.
-          It stacks on top of your plan's storage cap.
-        </p>
-
-        {#if status.extra_storage_gib > 0}
-          <p class="text-sm">
-            <span class="font-medium text-text">Current add-on:</span>
-            <span class="font-mono-tab">{status.extra_storage_gib} GiB</span>
-            <span class="text-faint">· €{status.extra_storage_gib / STORAGE_UNIT_GIB} / mo</span>
-          </p>
-        {/if}
-
-        {#if storageError}
-          <p class="rounded-md border border-danger/30 bg-danger/10 px-3 py-2 text-sm text-danger">
-            {storageError}
-          </p>
-        {/if}
-
-        <div class="flex flex-wrap items-center gap-4">
-          <div class="inline-flex items-center rounded-md border border-border">
-            <button
-              type="button"
-              class="px-3 py-1.5 text-lg leading-none text-muted transition hover:text-text disabled:opacity-40"
-              aria-label="Fewer units"
-              disabled={!isOwner || storageUnits <= STORAGE_UNITS_MIN}
-              onclick={() => stepStorage(-1)}
-            >
-              −
-            </button>
-            <span class="min-w-[7rem] px-3 text-center text-sm font-mono-tab font-medium text-text">
-              +{storageUnits * STORAGE_UNIT_GIB} GiB
-            </span>
-            <button
-              type="button"
-              class="px-3 py-1.5 text-lg leading-none text-muted transition hover:text-text disabled:opacity-40"
-              aria-label="More units"
-              disabled={!isOwner || storageUnits >= STORAGE_UNITS_MAX}
-              onclick={() => stepStorage(1)}
-            >
-              +
-            </button>
-          </div>
-
-          <span class="text-sm text-muted">
-            <span class="font-semibold text-text">€{storageMonthlyEur(storageUnits)} / mo</span>
-          </span>
-
-          <Button loading={storageBusy} disabled={!isOwner || storageBusy} onclick={buyStorage}>
-            {status.extra_storage_gib > 0 ? 'Add more storage' : 'Add storage'}
-          </Button>
-        </div>
+    {#if isPaid}
+      <!-- Manage an active subscription: seats (prorated in place) + storage add-on. -->
+      <section>
+        <h2 class="mb-3 text-sm font-semibold uppercase tracking-wide text-faint">
+          Your subscription
+        </h2>
 
         {#if !isOwner}
-          <p class="text-xs text-faint">Only the workspace owner can buy storage.</p>
+          <p class="mb-4 rounded-md border border-border bg-surface-2/60 px-3 py-2 text-sm text-muted">
+            Only the workspace owner can manage billing.
+          </p>
         {/if}
-      </Card>
-    </section>
+
+        <Card class="flex flex-col gap-6 p-6">
+          <!-- Seats -->
+          <div class="flex flex-col gap-4">
+            <div>
+              <div class="text-base font-semibold">Seats</div>
+              <p class="mt-1 max-w-prose text-sm text-muted">
+                Changes are prorated by Stripe — you're only billed the difference on your next
+                invoice.
+              </p>
+            </div>
+
+            <div class="flex flex-wrap items-center gap-4">
+              {@render stepperControl(
+                String(seats),
+                () => stepSeats(-1),
+                () => stepSeats(1),
+                !isOwner || seats <= SEATS_MIN,
+                !isOwner || seats >= SEATS_MAX,
+                'Fewer seats',
+                'More seats'
+              )}
+              <span class="text-sm text-muted">
+                currently {plural(currentSeats, 'seat')}
+                {#if seatsChanged}<span class="text-faint">→ {seats}</span>{/if}
+              </span>
+            </div>
+
+            {@render entitlements(seats)}
+
+            {#if belowMembers}
+              <p class="rounded-md border border-warn/30 bg-warn/10 px-3 py-2 text-sm text-warn">
+                Keep at least {plural(memberCount, 'seat')} — this workspace has {plural(
+                  memberCount,
+                  'member'
+                )}. Remove members first to go lower.
+              </p>
+            {/if}
+            {#if seatsError}
+              <p class="rounded-md border border-danger/30 bg-danger/10 px-3 py-2 text-sm text-danger">
+                {seatsError}
+              </p>
+            {/if}
+
+            <Button
+              class="w-fit"
+              loading={seatsBusy}
+              disabled={!isOwner || seatsBusy || !seatsChanged || belowMembers}
+              onclick={applySeats}
+            >
+              Update seats
+            </Button>
+          </div>
+
+          <hr class="border-border" />
+
+          <!-- Storage add-on -->
+          <div class="flex flex-col gap-4">
+            <div>
+              <div class="text-base font-semibold">Storage add-on</div>
+              <p class="mt-1 max-w-prose text-sm text-muted">
+                Add storage in {STORAGE_UNIT_GIB} GiB units for €1/mo each. It stacks on top of your
+                plan's storage cap.
+              </p>
+            </div>
+
+            {#if status.extra_storage_gib > 0}
+              <p class="text-sm">
+                <span class="font-medium text-text">Current add-on:</span>
+                <span class="font-mono-tab">{status.extra_storage_gib} GiB</span>
+                <span class="text-faint">· €{status.extra_storage_gib / STORAGE_UNIT_GIB} / mo</span>
+              </p>
+            {/if}
+
+            {#if storageError}
+              <p class="rounded-md border border-danger/30 bg-danger/10 px-3 py-2 text-sm text-danger">
+                {storageError}
+              </p>
+            {/if}
+
+            <div class="flex flex-wrap items-center gap-4">
+              {@render stepperControl(
+                `+${storageUnits * STORAGE_UNIT_GIB} GiB`,
+                () => stepStorage(-1),
+                () => stepStorage(1),
+                !isOwner || storageUnits <= STORAGE_UNITS_MIN,
+                !isOwner || storageUnits >= STORAGE_UNITS_MAX,
+                'Fewer units',
+                'More units',
+                '7rem'
+              )}
+              <span class="text-sm text-muted">
+                <span class="font-semibold text-text">€{storageMonthlyEur(storageUnits)} / mo</span>
+              </span>
+              <Button loading={storageBusy} disabled={!isOwner || storageBusy} onclick={buyStorage}>
+                {status.extra_storage_gib > 0 ? 'Add more storage' : 'Add storage'}
+              </Button>
+            </div>
+          </div>
+
+          <hr class="border-border" />
+
+          <!-- Combined summary of the projected subscription -->
+          {@render priceBox(seats, paidStorageUnits, paidInterval)}
+        </Card>
+
+        <p class="mt-4 text-xs text-faint">
+          Prices exclude tax — VAT, when applicable, is added at checkout based on your country.
+          Payments are processed securely by Stripe as merchant of record.
+        </p>
+      </section>
+    {:else}
+      <!-- Subscribe: seats + interval + optional storage, all in one checkout. -->
+      <section>
+        <h2 class="mb-3 text-sm font-semibold uppercase tracking-wide text-faint">Subscribe</h2>
+
+        {#if !isOwner}
+          <p class="mb-4 rounded-md border border-border bg-surface-2/60 px-3 py-2 text-sm text-muted">
+            Only the workspace owner can manage billing.
+          </p>
+        {/if}
+        {#if checkoutError}
+          <p class="mb-4 rounded-md border border-danger/30 bg-danger/10 px-3 py-2 text-sm text-danger">
+            {checkoutError}
+          </p>
+        {/if}
+
+        <Card class="flex flex-col gap-6 p-6">
+          <div>
+            <div class="text-base font-semibold">Seat plan</div>
+            <p class="mt-1 max-w-prose text-sm text-muted">
+              €{SEAT_FIRST_EUR}/mo for the first seat, €{SEAT_ADDITIONAL_EUR}/mo for each additional
+              seat. Scale up or down anytime.
+            </p>
+          </div>
+
+          <!-- Monthly / Yearly toggle -->
+          <div class="inline-flex w-fit items-center rounded-md border border-border p-0.5 text-sm">
+            {#each INTERVALS as iv (iv)}
+              <button
+                type="button"
+                class="rounded px-3 py-1 transition {interval === iv
+                  ? 'bg-surface-2 text-text'
+                  : 'text-muted hover:text-text'}"
+                aria-pressed={interval === iv}
+                onclick={() => (interval = iv)}
+              >
+                {iv === 'monthly' ? 'Monthly' : 'Yearly'}
+              </button>
+            {/each}
+            <span class="self-center px-2 text-xs text-accent">2 months free</span>
+          </div>
+
+          <!-- Seat stepper -->
+          <div class="flex flex-wrap items-center gap-4">
+            <span class="text-sm text-muted">Seats</span>
+            {@render stepperControl(
+              String(seats),
+              () => stepSeats(-1),
+              () => stepSeats(1),
+              !isOwner || seats <= SEATS_MIN,
+              !isOwner || seats >= SEATS_MAX,
+              'Fewer seats',
+              'More seats'
+            )}
+          </div>
+
+          {@render entitlements(seats)}
+
+          <hr class="border-border" />
+
+          <!-- Optional storage add-on, bundled into the same checkout -->
+          <div class="flex flex-col gap-3">
+            <div>
+              <div class="text-sm font-medium text-text">Add storage (optional)</div>
+              <p class="mt-1 max-w-prose text-sm text-muted">
+                Extra room for math blobs in {STORAGE_UNIT_GIB} GiB units for €1/mo each — added to
+                the same subscription. Leave at 0 to skip.
+              </p>
+            </div>
+            <div class="flex flex-wrap items-center gap-4">
+              {@render stepperControl(
+                checkoutStorage > 0 ? `+${checkoutStorage * STORAGE_UNIT_GIB} GiB` : 'None',
+                () => stepCheckoutStorage(-1),
+                () => stepCheckoutStorage(1),
+                !isOwner || checkoutStorage <= 0,
+                !isOwner || checkoutStorage >= STORAGE_UNITS_MAX,
+                'Less storage',
+                'More storage',
+                '7rem'
+              )}
+              <span class="text-sm text-muted">
+                <span class="font-semibold text-text">€{storageMonthlyEur(checkoutStorage)} / mo</span>
+              </span>
+            </div>
+          </div>
+
+          <!-- Live combined price -->
+          {@render priceBox(seats, checkoutStorage, interval)}
+
+          <Button
+            class="w-fit"
+            loading={checkoutBusy}
+            disabled={!isOwner || checkoutBusy}
+            onclick={subscribe}
+          >
+            Subscribe
+          </Button>
+        </Card>
+
+        <p class="mt-4 text-xs text-faint">
+          Prices exclude tax — VAT, when applicable, is added at checkout based on your country.
+          Payments are processed securely by Stripe as merchant of record.
+        </p>
+      </section>
+    {/if}
   {/if}
 </main>

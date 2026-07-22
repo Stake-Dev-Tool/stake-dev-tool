@@ -160,3 +160,68 @@ export function clampStorageUnits(units: number): number {
 export function storageMonthlyEur(units: number): number {
   return Math.max(0, units) * STORAGE_UNIT_PRICE_EUR;
 }
+
+// ---------------------------------------------------------------------------
+// Entitlements ("what you get") — the caps one seat grants, and the totals for a
+// chosen seat count. Mirrors the server's per-seat scaling in billing/plan.rs:
+// each seat = 1 member + 10 GiB storage + 5 active share links + 5 live sessions.
+// ---------------------------------------------------------------------------
+
+/** What a single seat grants — the unit shown next to the stepper. */
+export const PER_SEAT = {
+  members: 1,
+  storageGib: STORAGE_UNIT_GIB, // 10
+  shareLinks: 5,
+  sessions: 5
+} as const;
+
+export interface SeatEntitlements {
+  members: number;
+  storageGib: number;
+  shareLinks: number;
+  sessions: number;
+}
+
+/** Total entitlements granted by `seats` seats (before any storage add-on). */
+export function seatEntitlements(seats: number): SeatEntitlements {
+  const n = clampSeats(seats);
+  return {
+    members: n * PER_SEAT.members,
+    storageGib: n * PER_SEAT.storageGib,
+    shareLinks: n * PER_SEAT.shareLinks,
+    sessions: n * PER_SEAT.sessions
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Combined price summary (seats + optional storage add-on), updated live as the
+// steppers move. The storage add-on is always billed monthly (€1/unit/mo); only
+// the seat portion has a yearly cadence (2 months free).
+// ---------------------------------------------------------------------------
+
+export interface PriceSummary {
+  /** Seat subtotal per month (€3 first seat + €2 each additional). */
+  seatMonthly: number;
+  /** Seat subtotal per year (monthly × 10 — 2 months free). */
+  seatYearly: number;
+  /** Storage add-on subtotal per month (€1 × units). */
+  storageMonthly: number;
+  /** Grand total per month = seatMonthly + storageMonthly. */
+  monthlyTotal: number;
+  /** What the yearly cadence saves on the seat portion (2 months). */
+  yearlySaving: number;
+}
+
+/** Live combined pricing for `seats` seats plus `storageUnits` storage units. */
+export function priceSummary(seats: number, storageUnits: number): PriceSummary {
+  const seatMonthly = seatMonthlyEur(seats);
+  const seatYearly = seatYearlyEur(seats);
+  const storageMonthly = storageMonthlyEur(Math.max(0, storageUnits));
+  return {
+    seatMonthly,
+    seatYearly,
+    storageMonthly,
+    monthlyTotal: seatMonthly + storageMonthly,
+    yearlySaving: seatMonthly * (12 - YEARLY_MONTHS)
+  };
+}

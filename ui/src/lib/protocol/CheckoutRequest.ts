@@ -5,5 +5,9 @@ import type { BillingInterval } from "./BillingInterval";
  * `POST /workspaces/:slug/billing/checkout` request body. The single paid plan
  * is billed per seat (Stripe graduated tiers: €3 first seat, €2 each additional);
  * `seats` becomes the subscription quantity. Bounded `1..=100` server-side.
+ *
+ * `storage_units` optionally bundles the storage add-on into the SAME checkout
+ * (one unit = +10 GiB for €1/mo, appended as a second line item). Omitted/`0`
+ * means seats-only; bounded `0..=100` server-side.
  */
-export type CheckoutRequest = { interval: BillingInterval, seats: number, };
+export type CheckoutRequest = { interval: BillingInterval, seats: number, storage_units: number, };

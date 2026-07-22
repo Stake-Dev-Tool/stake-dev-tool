@@ -9,11 +9,13 @@ use axum::Json;
 use axum::Router;
 use axum::extract::{Path, State};
 use axum::routing::{get, post};
+use chrono::Utc;
 use protocol::Role;
 use protocol::billing::{
     BillingLimits, BillingStatusResponse, BillingUsage, CheckoutRequest, CheckoutResponse,
-    StorageCheckoutRequest,
+    StorageCheckoutRequest, UpdateSeatsRequest,
 };
+use uuid::Uuid;
 
 use crate::AppState;
 use crate::api::workspaces::{WorkspaceRow, require_membership, workspace_by_slug};
@@ -31,10 +33,15 @@ const MAX_STORAGE_UNITS: i64 = 100;
 const MIN_SEATS: u32 = 1;
 const MAX_SEATS: u32 = 100;
 
+/// A checkout may bundle `0..=100` storage add-on units alongside the seats (0 =
+/// no storage line item). The standalone storage endpoint requires `>= 1`.
+const MAX_CHECKOUT_STORAGE_UNITS: u32 = 100;
+
 pub fn router() -> Router<AppState> {
     Router::new()
         .route("/workspaces/:slug/billing", get(status))
         .route("/workspaces/:slug/billing/checkout", post(checkout))
+        .route("/workspaces/:slug/billing/seats", post(update_seats))
         .route("/workspaces/:slug/billing/storage", post(buy_storage))
         .route("/billing/webhook", post(crate::billing::webhook::handle))
 }
@@ -72,10 +79,13 @@ fn success_url(state: &AppState, workspace: &WorkspaceRow) -> String {
 }
 
 /// Starts a Stripe checkout for the workspace's seat subscription (owner-only,
-/// billing-enabled-only). `seats` (1..=100) becomes the line-item quantity;
-/// Stripe's graduated tiers price it (€3 first seat + €2 each additional). The
-/// checkout carries `metadata.workspace_id` so the webhook can bind the resulting
-/// subscription without ever guessing from an email.
+/// billing-enabled-only). `seats` (1..=100) becomes the seat line-item quantity;
+/// Stripe's graduated tiers price it (€3 first seat + €2 each additional). An
+/// optional `storage_units` (0..=100) bundles the storage add-on into the SAME
+/// checkout as a second line item (one unit = +10 GiB for €1/mo), so a new
+/// workspace can pick seats and storage together. The checkout carries
+/// `metadata.workspace_id` so the webhook can bind the resulting subscription
+/// without ever guessing from an email.
 async fn checkout(
     State(state): State<AppState>,
     user: CurrentUser,
@@ -88,20 +98,112 @@ async fn checkout(
             format!("seats must be between {MIN_SEATS} and {MAX_SEATS}"),
         ));
     }
+    if req.storage_units > MAX_CHECKOUT_STORAGE_UNITS {
+        return Err(ApiError::bad_request(
+            "invalid_units",
+            format!("storage units must be between 0 and {MAX_CHECKOUT_STORAGE_UNITS}"),
+        ));
+    }
     let (stripe_cfg, workspace) = owner_checkout_context(&state, &user, &slug).await?;
 
     let price_id = stripe::seat_price_id(stripe_cfg, req.interval);
+    // Seats are always present; the storage add-on is appended only when > 0.
+    let mut line_items: Vec<(&str, i64)> = vec![(price_id, i64::from(req.seats))];
+    if req.storage_units > 0 {
+        line_items.push((
+            stripe_cfg.price_storage.as_str(),
+            i64::from(req.storage_units),
+        ));
+    }
     let success_url = success_url(&state, &workspace);
     let checkout_url = stripe::create_checkout(
         &state.http_client,
         stripe_cfg,
-        price_id,
+        &line_items,
         workspace.id,
         &success_url,
-        i64::from(req.seats),
     )
     .await?;
     Ok(Json(CheckoutResponse { checkout_url }))
+}
+
+/// Changes the seat count on an already-subscribed workspace (owner-only,
+/// billing-enabled-only), via Stripe's standard proration. Validates `seats`
+/// (1..=100 → `invalid_seats`), requires a live plan-granting subscription
+/// (active/trialing, or `past_due` within grace → else `no_subscription`), and
+/// refuses dropping below the current member count (`seats_below_members`). On
+/// success it fetches the subscription's seat line item from Stripe, updates its
+/// quantity with `proration_behavior=create_prorations`, optimistically writes the
+/// new seat count to the DB (the webhook confirms it), and returns the fresh
+/// billing status (same shape as `GET /billing`).
+async fn update_seats(
+    State(state): State<AppState>,
+    user: CurrentUser,
+    Path(slug): Path<String>,
+    Json(req): Json<UpdateSeatsRequest>,
+) -> ApiResult<Json<BillingStatusResponse>> {
+    if req.seats < MIN_SEATS || req.seats > MAX_SEATS {
+        return Err(ApiError::bad_request(
+            "invalid_seats",
+            format!("seats must be between {MIN_SEATS} and {MAX_SEATS}"),
+        ));
+    }
+    let (stripe_cfg, workspace) = owner_checkout_context(&state, &user, &slug).await?;
+
+    // Only a live plan subscription can have its seats changed. A workspace with
+    // no subscription, a storage-only row, an override comp (no Stripe row to
+    // touch), or a lapsed subscription is rejected cleanly.
+    let subscription = plan::load_subscription(&state.pool, workspace.id).await?;
+    let Some(sub) = subscription.filter(|s| s.grants_plan_now(Utc::now())) else {
+        return Err(ApiError::conflict(
+            "no_subscription",
+            "this workspace has no active seat subscription to change",
+        ));
+    };
+
+    // Lowering below the current headcount would strand members; refuse it.
+    let members = plan::member_count(&state.pool, workspace.id).await?;
+    if i64::from(req.seats) < members {
+        return Err(ApiError::conflict(
+            "seats_below_members",
+            format!(
+                "This workspace has {members} members — remove members first or keep at least {members} seats."
+            ),
+        ));
+    }
+
+    // Locate the seat line item on the Stripe subscription and set its quantity
+    // with prorations. A subscription that somehow carries no seat price has
+    // nothing to change → treat as no seat subscription.
+    let seat_item = stripe::fetch_seat_item(
+        &state.http_client,
+        stripe_cfg,
+        &sub.provider_subscription_id,
+    )
+    .await?
+    .ok_or_else(|| {
+        ApiError::conflict(
+            "no_subscription",
+            "this workspace has no active seat subscription to change",
+        )
+    })?;
+    stripe::update_seat_quantity(
+        &state.http_client,
+        stripe_cfg,
+        &sub.provider_subscription_id,
+        &seat_item.id,
+        i64::from(req.seats),
+    )
+    .await?;
+
+    // Optimistically reflect the new seat count; the webhook re-confirms it.
+    sqlx::query("UPDATE subscriptions SET seats = $2, updated_at = now() WHERE workspace_id = $1")
+        .bind(workspace.id)
+        .bind(i64::from(req.seats))
+        .execute(&state.pool)
+        .await?;
+
+    Ok(Json(billing_status_payload(&state, workspace.id).await?))
 }
 
 /// Starts a Stripe checkout for the storage add-on (owner-only,
@@ -126,10 +228,9 @@ async fn buy_storage(
     let checkout_url = stripe::create_checkout(
         &state.http_client,
         stripe_cfg,
-        &stripe_cfg.price_storage,
+        &[(stripe_cfg.price_storage.as_str(), req.units)],
         workspace.id,
         &success_url,
-        req.units,
     )
     .await?;
     Ok(Json(CheckoutResponse { checkout_url }))
@@ -143,15 +244,25 @@ async fn status(
 ) -> ApiResult<Json<BillingStatusResponse>> {
     let workspace = workspace_by_slug(&state.pool, &slug).await?;
     require_membership(&state.pool, workspace.id, user.user_id).await?;
+    Ok(Json(billing_status_payload(&state, workspace.id).await?))
+}
 
+/// Builds the `GET /billing` payload for a workspace: resolved plan, subscription
+/// status/interval/period, usage counters, storage add-on, and effective limits.
+/// Shared by the status endpoint and the seat-change endpoint (which returns the
+/// fresh status after updating the subscription).
+async fn billing_status_payload(
+    state: &AppState,
+    workspace_id: Uuid,
+) -> ApiResult<BillingStatusResponse> {
     let enabled = state.config.stripe.is_some();
-    let resolved = plan::plan_for(&state, workspace.id).await?;
-    let subscription = plan::load_subscription(&state.pool, workspace.id).await?;
+    let resolved = plan::plan_for(state, workspace_id).await?;
+    let subscription = plan::load_subscription(&state.pool, workspace_id).await?;
 
     let usage = BillingUsage {
-        members: plan::member_count(&state.pool, workspace.id).await?,
-        storage_bytes: plan::storage_bytes_cached(&state.pool, workspace.id).await?,
-        active_share_links: plan::active_share_links(&state.pool, workspace.id).await?,
+        members: plan::member_count(&state.pool, workspace_id).await?,
+        storage_bytes: plan::storage_bytes_cached(&state.pool, workspace_id).await?,
+        active_share_links: plan::active_share_links(&state.pool, workspace_id).await?,
     };
 
     // The storage add-on (if any) is reflected both as a standalone GiB figure and
@@ -177,7 +288,7 @@ async fn status(
         None => (None, None, None),
     };
 
-    Ok(Json(BillingStatusResponse {
+    Ok(BillingStatusResponse {
         enabled,
         plan: resolved.label().to_string(),
         seats: resolved.seats(),
@@ -187,7 +298,7 @@ async fn status(
         extra_storage_gib,
         usage,
         limits: billing_limits(limits),
-    }))
+    })
 }
 
 fn billing_limits(limits: crate::billing::PlanLimits) -> BillingLimits {

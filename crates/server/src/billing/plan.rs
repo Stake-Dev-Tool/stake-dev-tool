@@ -117,6 +117,14 @@ impl SubscriptionRow {
             _ => None,
         }
     }
+
+    /// Whether this subscription currently grants a plan at `now` (an
+    /// active/trialing seat plan, or a `past_due` still within grace) — as opposed
+    /// to a storage-only, canceled, or grace-expired row. The seat-change endpoint
+    /// gates on this so it only ever mutates a live plan subscription.
+    pub fn grants_plan_now(&self, now: DateTime<Utc>) -> bool {
+        active_plan(self, now).is_some()
+    }
 }
 
 /// Loads the subscription for a workspace, if any.

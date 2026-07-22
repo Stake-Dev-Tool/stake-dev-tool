@@ -23,10 +23,26 @@ pub enum BillingInterval {
 /// `POST /workspaces/:slug/billing/checkout` request body. The single paid plan
 /// is billed per seat (Stripe graduated tiers: €3 first seat, €2 each additional);
 /// `seats` becomes the subscription quantity. Bounded `1..=100` server-side.
+///
+/// `storage_units` optionally bundles the storage add-on into the SAME checkout
+/// (one unit = +10 GiB for €1/mo, appended as a second line item). Omitted/`0`
+/// means seats-only; bounded `0..=100` server-side.
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
 #[ts(export, export_to = "protocol/")]
 pub struct CheckoutRequest {
     pub interval: BillingInterval,
+    pub seats: u32,
+    #[serde(default)]
+    pub storage_units: u32,
+}
+
+/// `POST /workspaces/:slug/billing/seats` request body: the new seat count for an
+/// already-subscribed workspace. `seats` (bounded `1..=100` server-side, and never
+/// below the current member count) becomes the subscription's seat line-item
+/// quantity; Stripe prorates the change (`proration_behavior=create_prorations`).
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "protocol/")]
+pub struct UpdateSeatsRequest {
     pub seats: u32,
 }
 

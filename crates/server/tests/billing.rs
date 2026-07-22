@@ -1296,3 +1296,298 @@ async fn storage_checkout_404s_when_billing_disabled() {
         .await;
     assert_eq!(status, StatusCode::NOT_FOUND);
 }
+
+// ===========================================================================
+// Combined checkout: a subscription carrying BOTH a seat item and a storage item
+// ===========================================================================
+
+#[tokio::test]
+async fn webhook_combined_seat_and_storage_upserts_plan_and_storage_in_one_event() {
+    let Some(ctx) = setup(Some(stripe_config())).await else {
+        return;
+    };
+    let (mut owner, ws, _t) = bootstrap(&ctx.state).await;
+    let ws_id = workspace_id(&ctx.state, &ws).await;
+
+    // ONE subscription with two line items (as the combined checkout creates): a
+    // 2-seat plan price and 3 storage units (+30 GiB), in a single event.
+    let id = evt_id();
+    let event = subscription_event_items(
+        &id,
+        "customer.subscription.created",
+        ws_id,
+        "active",
+        &format!("sub-{}", Uuid::new_v4()),
+        json!([
+            { "price": { "id": "price_seat_m" }, "quantity": 2 },
+            { "price": { "id": "price_storage" }, "quantity": 3 }
+        ]),
+    );
+    let body = serde_json::to_vec(&event).unwrap();
+    let ts = Utc::now().timestamp();
+    let (status, _) = post_webhook(&mut owner, &signed_headers(ts, &body), &body).await;
+    assert_eq!(status, StatusCode::OK);
+
+    // The single event grants the plan (2 seats) AND the storage add-on (30 GiB):
+    // cap = 2×10 GiB + 30 GiB = 50 GiB, members cap = 2.
+    let (_, view) = owner.get(&format!("/api/workspaces/{ws}/billing")).await;
+    assert_eq!(s(&view["plan"]), "paid", "{view}");
+    assert_eq!(view["seats"], json!(2));
+    assert_eq!(s(&view["status"]), "active");
+    assert_eq!(view["extra_storage_gib"], json!(30));
+    assert_eq!(view["limits"]["max_members"], json!(2));
+    assert_eq!(
+        view["limits"]["max_storage_bytes"],
+        json!(50u64 * 1024 * 1024 * 1024)
+    );
+}
+
+// ===========================================================================
+// Seat change (proration) — POST /billing/seats
+// ===========================================================================
+
+/// The seat subscription-item id the Stripe mock reports (the handle an update
+/// targets), whose price is `price_seat_m` from [`stripe_config`].
+const MOCK_SEAT_ITEM_ID: &str = "si_mock_seat";
+
+/// Captured request body from the mock's subscription-update call.
+type Captured = std::sync::Arc<std::sync::Mutex<Option<String>>>;
+
+/// Spawns a tiny local HTTP server impersonating the two Stripe REST calls the
+/// seat-change endpoint makes: `GET /v1/subscriptions/:id` (a subscription with a
+/// seat line item priced `price_seat_m`) and `POST /v1/subscriptions/:id` (the
+/// quantity update, whose form body is captured for assertions). Returns the base
+/// URL to point `STRIPE_API_BASE` at, plus the captured-body handle.
+async fn spawn_stripe_mock() -> (String, Captured) {
+    use axum::Router;
+    use axum::extract::{Path, State};
+    use axum::routing::get;
+
+    async fn get_sub(Path(id): Path<String>) -> axum::Json<Value> {
+        axum::Json(json!({
+            "id": id,
+            "object": "subscription",
+            "items": { "object": "list", "data": [
+                { "id": MOCK_SEAT_ITEM_ID, "quantity": 1, "price": { "id": "price_seat_m" } },
+                { "id": "si_mock_storage", "quantity": 1, "price": { "id": "price_storage" } }
+            ]}
+        }))
+    }
+
+    async fn update_sub(
+        State(cap): State<Captured>,
+        Path(id): Path<String>,
+        body: String,
+    ) -> axum::Json<Value> {
+        *cap.lock().unwrap() = Some(body);
+        axum::Json(json!({ "id": id, "object": "subscription" }))
+    }
+
+    let captured: Captured = std::sync::Arc::new(std::sync::Mutex::new(None));
+    let app = Router::new()
+        .route("/v1/subscriptions/:id", get(get_sub).post(update_sub))
+        .with_state(captured.clone());
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+    (format!("http://{addr}"), captured)
+}
+
+#[tokio::test]
+async fn seats_update_rejects_out_of_range() {
+    let Some(ctx) = setup(Some(stripe_config())).await else {
+        return;
+    };
+    let (mut owner, ws, _t) = bootstrap(&ctx.state).await;
+
+    // Out-of-range seat counts are rejected with 400 invalid_seats before any
+    // subscription lookup or Stripe call (a negative fails to deserialize → 422).
+    for seats in [0, 101] {
+        let (status, body) = owner
+            .post(
+                &format!("/api/workspaces/{ws}/billing/seats"),
+                json!({ "seats": seats }),
+            )
+            .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "seats={seats}: {body}");
+        assert_eq!(s(&body["error"]["code"]), "invalid_seats");
+    }
+}
+
+#[tokio::test]
+async fn seats_update_requires_a_subscription() {
+    let Some(ctx) = setup(Some(stripe_config())).await else {
+        return;
+    };
+    // A fresh workspace is Free (no subscription) → nothing to change.
+    let (mut owner, ws, _t) = bootstrap(&ctx.state).await;
+
+    let (status, body) = owner
+        .post(
+            &format!("/api/workspaces/{ws}/billing/seats"),
+            json!({ "seats": 3 }),
+        )
+        .await;
+    assert_eq!(status, StatusCode::CONFLICT, "{body}");
+    assert_eq!(s(&body["error"]["code"]), "no_subscription");
+}
+
+#[tokio::test]
+async fn seats_update_refuses_below_member_count() {
+    let Some(ctx) = setup(Some(stripe_config())).await else {
+        return;
+    };
+    let (mut owner, ws, _t) = bootstrap(&ctx.state).await;
+    let ws_id = workspace_id(&ctx.state, &ws).await;
+    // 10-seat active plan so a second member fits; then the workspace has 2 members.
+    insert_subscription_seats(
+        &ctx.state,
+        ws_id,
+        "paid",
+        "monthly",
+        "active",
+        Some(Utc::now() + Duration::days(30)),
+        10,
+    )
+    .await;
+    let (_, invite) = owner
+        .post(
+            &format!("/api/workspaces/{ws}/invites"),
+            json!({ "role": "member" }),
+        )
+        .await;
+    let invite_token = s(&invite["token"]).to_string();
+    let mut member = register(&ctx.state, &unique_email(), "Member").await;
+    let (status, _) = member
+        .post(&format!("/api/invites/{invite_token}/accept"), json!({}))
+        .await;
+    assert_eq!(status, StatusCode::OK);
+
+    // Dropping to 1 seat below the 2 current members is refused (before Stripe).
+    let (status, body) = owner
+        .post(
+            &format!("/api/workspaces/{ws}/billing/seats"),
+            json!({ "seats": 1 }),
+        )
+        .await;
+    assert_eq!(status, StatusCode::CONFLICT, "{body}");
+    assert_eq!(s(&body["error"]["code"]), "seats_below_members");
+}
+
+#[tokio::test]
+async fn seats_update_is_owner_only() {
+    let Some(ctx) = setup(Some(stripe_config())).await else {
+        return;
+    };
+    let (mut owner, ws, _t) = bootstrap(&ctx.state).await;
+    let ws_id = workspace_id(&ctx.state, &ws).await;
+    insert_subscription_seats(
+        &ctx.state,
+        ws_id,
+        "paid",
+        "monthly",
+        "active",
+        Some(Utc::now() + Duration::days(30)),
+        10,
+    )
+    .await;
+    let (_, invite) = owner
+        .post(
+            &format!("/api/workspaces/{ws}/invites"),
+            json!({ "role": "member" }),
+        )
+        .await;
+    let invite_token = s(&invite["token"]).to_string();
+    let mut member = register(&ctx.state, &unique_email(), "Member").await;
+    let (status, _) = member
+        .post(&format!("/api/invites/{invite_token}/accept"), json!({}))
+        .await;
+    assert_eq!(status, StatusCode::OK);
+
+    // A non-owner member cannot change seats (403 forbidden, before any Stripe call).
+    let (status, body) = member
+        .post(
+            &format!("/api/workspaces/{ws}/billing/seats"),
+            json!({ "seats": 5 }),
+        )
+        .await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
+    assert_eq!(s(&body["error"]["code"]), "forbidden");
+}
+
+#[tokio::test]
+async fn seats_update_happy_path_prorates_and_updates_db() {
+    let Some(ctx) = setup(Some(stripe_config())).await else {
+        return;
+    };
+    let (mut owner, ws, _t) = bootstrap(&ctx.state).await;
+    let ws_id = workspace_id(&ctx.state, &ws).await;
+    // A live 1-seat active plan to grow to 5 seats.
+    insert_subscription_seats(
+        &ctx.state,
+        ws_id,
+        "paid",
+        "monthly",
+        "active",
+        Some(Utc::now() + Duration::days(30)),
+        1,
+    )
+    .await;
+
+    // Point the Stripe client at the local mock for the duration of the call.
+    let (base, captured) = spawn_stripe_mock().await;
+    // SAFETY: this is the only test that issues outbound Stripe HTTP; on Windows
+    // (the gate platform) std env access is lock-protected.
+    unsafe {
+        std::env::set_var("STRIPE_API_BASE", &base);
+    }
+
+    let (status, body) = owner
+        .post(
+            &format!("/api/workspaces/{ws}/billing/seats"),
+            json!({ "seats": 5 }),
+        )
+        .await;
+
+    unsafe {
+        std::env::remove_var("STRIPE_API_BASE");
+    }
+
+    assert_eq!(status, StatusCode::OK, "{body}");
+    // The fresh status reflects the new seat count and its scaled limits.
+    assert_eq!(s(&body["plan"]), "paid");
+    assert_eq!(body["seats"], json!(5));
+    assert_eq!(body["limits"]["max_members"], json!(5));
+    assert_eq!(
+        body["limits"]["max_storage_bytes"],
+        json!(50u64 * 1024 * 1024 * 1024)
+    );
+
+    // The DB seat count was optimistically updated too.
+    let seats: i32 = sqlx::query_scalar("SELECT seats FROM subscriptions WHERE workspace_id = $1")
+        .bind(ws_id)
+        .fetch_one(&ctx.state.pool)
+        .await
+        .unwrap();
+    assert_eq!(seats, 5);
+
+    // The update targeted the seat line item, set the new quantity, and prorated.
+    // The body is form-urlencoded, so the `items[0][…]` brackets arrive percent-
+    // encoded (`%5B`/`%5D`).
+    let form = captured.lock().unwrap().clone().expect("update was called");
+    assert!(
+        form.contains(&format!("items%5B0%5D%5Bid%5D={MOCK_SEAT_ITEM_ID}")),
+        "form: {form}"
+    );
+    assert!(
+        form.contains("items%5B0%5D%5Bquantity%5D=5"),
+        "form: {form}"
+    );
+    assert!(
+        form.contains("proration_behavior=create_prorations"),
+        "form: {form}"
+    );
+}
