@@ -256,11 +256,15 @@ fn front_contract_redirect(
     };
 
     // rgs_url must be same-origin so wallet calls come back to this share host.
+    // The Stake front contract passes it SCHEME-LESS (`host/api/rgs/<game>`) —
+    // the front SDK prefixes https:// (or wss://) itself, exactly like the
+    // desktop test view passes `location.host`. Including a scheme makes fronts
+    // build `https://https://…` and every wallet call fails.
     let host = req.headers().get(header::HOST)?.to_str().ok()?;
     if host.is_empty() {
         return None;
     }
-    let rgs_url = format!("{}://{host}/api/rgs/{}", scheme_for(host), link.game_slug);
+    let rgs_url = format!("{host}/api/rgs/{}", link.game_slug);
 
     // Append only the params the incoming URL is missing, preserving any it has.
     let defaults: [(&str, &str); 6] = [
@@ -311,18 +315,6 @@ fn visitor_sid_cookie(headers: &HeaderMap) -> Option<String> {
     let ok =
         !value.is_empty() && value.len() <= 64 && value.bytes().all(|b| b.is_ascii_alphanumeric());
     ok.then_some(value)
-}
-
-/// `https` for a real host, `http` for localhost / loopback (dev over plain
-/// http). Caddy terminates TLS and proxies plain http upstream, so the request's
-/// own scheme is unreliable; the Host is the signal.
-fn scheme_for(host: &str) -> &'static str {
-    let bare = host.split(':').next().unwrap_or(host);
-    if bare == "localhost" || bare == "[::1]" || bare.starts_with("127.") {
-        "http"
-    } else {
-        "https"
-    }
 }
 
 /// Percent-encode a query-parameter value (everything outside the RFC 3986

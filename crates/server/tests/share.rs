@@ -903,11 +903,15 @@ async fn entry_redirect_injects_front_contract() {
         location.contains("rgs_url="),
         "location has rgs_url: {location}"
     );
-    // rgs_url targets this share host's /api/rgs/<game> (game slug survives
-    // percent-encoding as a substring).
+    // rgs_url targets this share host's /api/rgs/<game>, SCHEME-LESS (the
+    // front SDK prefixes https:// itself; a scheme here breaks every front).
     assert!(
         location.contains(GAME),
         "rgs_url targets the game: {location}"
+    );
+    assert!(
+        !location.contains("rgs_url=https") && !location.contains("rgs_url=http"),
+        "rgs_url must be scheme-less: {location}"
     );
     assert!(location.contains("lang=en"), "{location}");
     assert!(location.contains("currency=USD"), "{location}");
