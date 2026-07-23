@@ -19,12 +19,14 @@
     ApiError,
     isUpgradeError,
     isValidShareSlug,
+    type BillingStatus,
     type CreateShareInput,
     type FrontBundleSummary,
     type Role,
     type RevisionSummary,
     type ShareLink
   } from '$lib/api';
+  import { billingStatus, invalidateBillingStatus } from '$lib/billing';
   import { session } from '$lib/session.svelte';
   import { toast } from '$lib/toasts.svelte';
   import { errorText, formatExpiry, humanSize, formatRtp } from '$lib/format';
@@ -66,6 +68,42 @@
     void game;
     load();
   });
+
+  // --- Plan limits (shared billing cache) --------------------------------------
+  // Drives the expiry hint ("links last up to N days on your plan") and the
+  // active-link quota line. Best-effort: a failed fetch just hides the hints.
+  let billing = $state<BillingStatus | null>(null);
+  $effect(() => {
+    const s = slug;
+    billing = null;
+    if (!s) return;
+    let cancelled = false;
+    billingStatus(s)
+      .then((r) => {
+        if (!cancelled) billing = r;
+      })
+      .catch(() => {
+        if (!cancelled) billing = null;
+      });
+    return () => {
+      cancelled = true;
+    };
+  });
+
+  /** Re-read the billing status after a mutation so the quota line stays true. */
+  function refreshBilling() {
+    invalidateBillingStatus(slug);
+    billingStatus(slug)
+      .then((r) => (billing = r))
+      .catch(() => {});
+  }
+
+  /** Longest allowed link lifetime in days on this plan; null = unlimited. */
+  let maxLinkDays = $derived(billing?.enabled ? billing.limits.max_share_link_days : null);
+  /** Active-link cap on this plan; null = unlimited. */
+  let maxLinks = $derived(billing?.enabled ? billing.limits.max_active_share_links : null);
+  let usedLinks = $derived(billing?.usage.active_share_links ?? 0);
+  let atLinkCap = $derived(maxLinks != null && usedLinks >= maxLinks);
 
   // Best-effort front-bundle status: HEAD the same-origin front route the server
   // serves an uploaded bundle at. Purely informational — a failure reads as "none".
@@ -237,6 +275,7 @@
   let newPassword = $state('');
   let newExpiryDays = $state('');
   let newMaxSessions = $state('25');
+  let newFeedback = $state(false);
 
   let creating = $state(false);
   let createError = $state('');
@@ -245,7 +284,13 @@
   let createdShare = $state<ShareLink | null>(null);
 
   let slugInvalid = $derived(newSlug.trim().length > 0 && !isValidShareSlug(newSlug.trim()));
-  let canCreate = $derived(!creating && !slugInvalid);
+  /** Caught client-side so the plan cap reads as guidance, not a server error. */
+  let expiryTooLong = $derived.by(() => {
+    if (maxLinkDays == null) return false;
+    const days = Number.parseInt(newExpiryDays.trim(), 10);
+    return newExpiryDays.trim() !== '' && Number.isFinite(days) && days > maxLinkDays;
+  });
+  let canCreate = $derived(!creating && !slugInvalid && !expiryTooLong);
 
   function resetCreateForm() {
     newSlug = '';
@@ -253,6 +298,7 @@
     newPassword = '';
     newExpiryDays = '';
     newMaxSessions = '25';
+    newFeedback = false;
   }
 
   async function createShare() {
@@ -272,17 +318,39 @@
       }
       const sessions = Number.parseInt(newMaxSessions.trim(), 10);
       if (Number.isFinite(sessions) && sessions > 0) input.max_concurrent_sessions = sessions;
+      if (newFeedback) input.feedback_enabled = true;
 
       const created = await api.shares.create(slug, game, input);
       shares = [created, ...shares];
       createdShare = created;
       resetCreateForm();
       showCreate = false;
+      refreshBilling();
     } catch (e) {
       createError = shareErrorMessage(e);
       createErrorUpgrade = isUpgradeError(e);
     } finally {
       creating = false;
+    }
+  }
+
+  async function toggleFeedback(s: ShareLink) {
+    actionError = '';
+    busyId = s.id;
+    try {
+      const updated = await api.shares.update(slug, game, s.id, {
+        feedback_enabled: !s.feedback_enabled
+      });
+      shares = shares.map((x) => (x.id === s.id ? updated : x));
+      toast.success(
+        updated.feedback_enabled
+          ? `Feedback enabled on ${s.slug} — visitors now get the feedback overlay.`
+          : `Feedback disabled on ${s.slug}.`
+      );
+    } catch (e) {
+      actionError = shareErrorMessage(e);
+    } finally {
+      busyId = null;
     }
   }
 
@@ -294,6 +362,7 @@
       const updated = await api.shares.revoke(slug, game, s.id);
       shares = shares.map((x) => (x.id === s.id ? updated : x));
       toast.success(`Share link ${s.slug} revoked.`);
+      refreshBilling();
     } catch (e) {
       actionError = shareErrorMessage(e);
     } finally {
@@ -310,6 +379,7 @@
       shares = shares.filter((x) => x.id !== s.id);
       if (createdShare?.id === s.id) createdShare = null;
       toast.success(`Share link ${s.slug} deleted.`);
+      refreshBilling();
     } catch (e) {
       actionError = shareErrorMessage(e);
     } finally {
@@ -423,9 +493,23 @@
   <!-- 2) Create share (owner/admin) ----------------------------------------->
   {#if canManage}
     {#if !showCreate}
-      <div class="mb-4">
+      <div class="mb-4 flex flex-wrap items-center gap-3">
         <Button variant="secondary" onclick={() => (showCreate = true)}>New share link</Button>
+        {#if maxLinks != null}
+          <span class="text-xs text-muted">
+            {usedLinks} of {maxLinks} active share {maxLinks === 1 ? 'link' : 'links'} used on
+            your plan
+          </span>
+        {/if}
       </div>
+      {#if atLinkCap}
+        <div class="mb-4">
+          <UpgradeNotice
+            {slug}
+            message={`Your plan allows ${maxLinks} active share ${maxLinks === 1 ? 'link' : 'links'} — revoke or delete one to free the slot, or upgrade for more.`}
+          />
+        </div>
+      {/if}
     {:else}
       <Card class="mb-4 p-6">
         <form
@@ -485,11 +569,17 @@
             <div class="grid grid-cols-2 gap-4">
               <Input
                 id="share-expiry"
-                label="Expires (days)"
+                label={maxLinkDays != null ? `Expires (days, max ${maxLinkDays})` : 'Expires (days)'}
                 bind:value={newExpiryDays}
                 inputmode="numeric"
-                placeholder="Never"
+                placeholder={maxLinkDays != null ? String(maxLinkDays) : 'Never'}
                 disabled={creating}
+                error={expiryTooLong
+                  ? `Links last up to ${maxLinkDays} days on your plan — upgrade for longer.`
+                  : undefined}
+                hint={maxLinkDays != null
+                  ? `Free links last up to ${maxLinkDays} days (the default if left blank).`
+                  : undefined}
               />
               <Input
                 id="share-sessions"
@@ -500,6 +590,22 @@
                 disabled={creating}
               />
             </div>
+
+            <label class="flex items-start gap-2.5 sm:col-span-2">
+              <input
+                type="checkbox"
+                bind:checked={newFeedback}
+                disabled={creating}
+                class="mt-0.5 h-4 w-4 accent-accent"
+              />
+              <span class="flex flex-col gap-0.5">
+                <span class="text-sm font-medium text-muted">Enable visitor feedback</span>
+                <span class="text-xs text-faint">
+                  Injects a feedback overlay into the game: testers can write notes and draw on
+                  the screen, each entry tagged with the exact round they just played.
+                </span>
+              </span>
+            </label>
           </div>
 
           {#if revisions.length === 0}
@@ -588,6 +694,9 @@
               {#if s.password_protected}
                 <Badge tone="warn">🔒 password</Badge>
               {/if}
+              {#if s.feedback_enabled}
+                <Badge tone="accent">💬 feedback</Badge>
+              {/if}
               <span class="ml-auto text-xs text-faint">created <Time iso={s.created_at} /></span>
             </div>
 
@@ -629,6 +738,14 @@
               {/if}
               {#if canManage}
                 <div class="ml-auto flex items-center gap-2">
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    disabled={busyId === s.id}
+                    onclick={() => toggleFeedback(s)}
+                  >
+                    {s.feedback_enabled ? 'Disable feedback' : 'Enable feedback'}
+                  </Button>
                   {#if !revoked}
                     <Button
                       variant="danger"

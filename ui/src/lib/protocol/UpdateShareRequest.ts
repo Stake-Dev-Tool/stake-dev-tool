@@ -31,4 +31,8 @@ max_concurrent_sessions: number | null,
 /**
  * Absent = unchanged, `true` = revoke, `false` = un-revoke.
  */
-revoked: boolean | null, };
+revoked: boolean | null, 
+/**
+ * Absent = unchanged; toggles the visitor feedback overlay.
+ */
+feedback_enabled: boolean | null, };

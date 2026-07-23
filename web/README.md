@@ -148,11 +148,15 @@ dependency, **`hash-wasm`**.
 
 ## Billing & plans (M7)
 
-Stripe-backed subscriptions. On a billing-enabled instance a workspace is
-read-only (the **Free** state) until it subscribes; self-hosting stays fully
-unlimited. The paywall moments are exactly two: the no-active-plan banner and
-quota-hit errors. The whole surface degrades to **nothing** on a self-hosted
-instance (`GET /billing` → `enabled: false`, every limit unlimited).
+Stripe-backed subscriptions. On a billing-enabled instance a workspace starts on
+the **Free** plan — fully usable solo: unlimited games and play sessions, 5 GiB
+storage, ONE revision and ONE front bundle kept per game (each push replaces the
+previous), one active share link that lives at most 7 days, no collaborators.
+Paid scales per seat (1 member + 10 GiB + 5 share links per seat) with full
+history and never-expiring links. Self-hosting stays fully unlimited. The
+paywall moments are quota-hit errors plus calm inline explanations of the Free
+rules. The whole surface degrades to **nothing** on a self-hosted instance
+(`GET /billing` → `enabled: false`, every limit unlimited).
 
 - **Client** (`src/lib/api.ts`, `api.billing.*`): `status(slug)` (member-visible,
   always reachable) and `checkout(slug, plan, interval)` (owner-only; returns the
@@ -169,10 +173,10 @@ instance (`GET /billing` → `enabled: false`, every limit unlimited).
   (`planLabel`, `statusLabel`, `intervalLabel`, `daysUntil`, and a `meter()` that
   drives the usage bars — amber at ≥ 80%, red at 100%).
 - **`PlanBanner.svelte`** (self-fetching, `{slug}`): renders **nothing** when
-  billing is disabled; a prominent banner on **free** (no active plan, writes
-  disabled — "Choose a plan →"); a warning banner on **past_due** (grace period);
-  a tiny plan **chip** on a healthy Solo/Team plan. A failed fetch renders
-  nothing — it never breaks the page.
+  billing is disabled; a calm info banner on **free** (the solo limits in one
+  line — "Upgrade for history & team →"); a warning banner on **past_due**
+  (grace period); a tiny plan **chip** on a healthy paid plan. A failed fetch
+  renders nothing — it never breaks the page.
 - **`/w/[slug]/billing`**: the current plan (label, Stripe status, interval,
   renewal date), a usage section (members, storage via `humanSize`,
   active share links vs limits, `∞` when unlimited), and an upgrade section with
@@ -342,8 +346,8 @@ error path.
   sessions, spins) and two 30-day **sparklines** (signups, pushes, each with a
   running total). Below, deep-linkable `#hash` **Tabs** (reusing `Tabs.svelte`):
   - **Workspaces** — debounced (300 ms) slug/name search; a table (slug/name,
-    created via `Time`, members, games, storage, plan badge — free=danger,
-    solo/team=accent, unlimited=info — subscription-status text,
+    created via `Time`, members, games, storage, plan badge — free=neutral,
+    paid=accent, unlimited=info — subscription-status text,
     and a `comped: <plan> → <date>` indicator when an override is active). Row
     action **Manage plan** expands an inline **Plan override (comp)** panel: plan
     select (None/Solo/Team/Unlimited — "None" clears), optional expiry days

@@ -1,9 +1,9 @@
 //! Plan limits (the single source of truth for quotas) and plan resolution.
 //!
 //! `plan_for` maps a workspace to its effective [`Plan`]; [`Plan::limits`] turns
-//! that into the frozen [`PlanLimits`]. Writes on a `Free` (unsubscribed)
-//! workspace are gated separately by [`write_allowed`] so the frozen limits
-//! struct stays untouched (a `Free` workspace keeps read limits but cannot push).
+//! that into the [`PlanLimits`] every enforcement point reads. Every plan can
+//! write: `Free` is a usable solo tier (5 GiB, one revision kept per game, one
+//! 7-day share link) rather than a read-only lock.
 
 use std::collections::HashMap;
 use std::sync::{LazyLock, Mutex};
@@ -17,49 +17,65 @@ use protocol::billing::BillingInterval;
 
 use super::PlanLimits;
 use crate::AppState;
-use crate::error::{ApiError, ApiResult};
+use crate::error::ApiResult;
 
 const GIB: u64 = 1024 * 1024 * 1024;
 /// How long a `past_due` subscription keeps its plan past `current_period_end`.
 pub const GRACE_DAYS: i64 = 7;
 /// How long the per-workspace storage total is memoized for the usage endpoint.
 const STORAGE_CACHE_TTL: StdDuration = StdDuration::from_secs(60);
+/// Free-plan storage quota (5 GiB).
+const FREE_STORAGE_BYTES: u64 = 5 * GIB;
+/// Longest lifetime (days) of a Free-plan share link. Also the SHORTEST TTL any
+/// plan imposes — the share host uses it as a fast-path: links younger than this
+/// need no plan lookup at all (see [`share_link_ttl_days_cached`]).
+pub const FREE_SHARE_LINK_DAYS: u32 = 7;
+/// How long the per-workspace share-link TTL is memoized for the share host.
+const SHARE_TTL_CACHE_TTL: StdDuration = StdDuration::from_secs(60);
 
 /// The resolved plan for a workspace at a point in time.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Plan {
     /// Billing disabled (self-host) — no limits, no gating.
     Unlimited,
-    /// Billing enabled with no active subscription and no admin override: reads
-    /// work, writes are blocked and every quota is 0. The hosted default until a
-    /// workspace subscribes.
+    /// Billing enabled with no active subscription and no admin override: the
+    /// hosted default. Fully usable solo — push, test and share for free — but
+    /// bounded: 1 member (the owner), 5 GiB, one revision and one front bundle
+    /// kept per game (each push replaces the previous), one active share link
+    /// capped at 7 days.
     Free,
     /// An active seat subscription (or comp). Quotas scale linearly per seat.
     Paid { seats: u32 },
 }
 
 impl Plan {
-    /// The quota limits for this plan. `Free` is all-zero — reads still work, but
-    /// writes are refused by [`write_allowed`] and no quota is usable (the zero
-    /// session cap is also what stops a lapsed workspace's share links from
-    /// serving new play sessions). `Paid` scales linearly — `seats` members,
-    /// `seats × 10 GiB` storage, `seats × 5` active share links — except
-    /// concurrent share sessions, which are uncapped for any paying workspace:
-    /// a demo shown to a room must never die mid-pitch over a per-seat number.
+    /// The quota limits for this plan. `Free` is the solo tier: the owner alone,
+    /// 5 GiB, a single kept revision and front bundle per game (each push
+    /// replaces the previous), and one active share link that lives at most 7
+    /// days — with UNCAPPED concurrent play sessions, same as paid (sessions
+    /// cost us nothing; a demo must never die mid-pitch). `Paid` scales linearly
+    /// — `seats` members, `seats × 10 GiB` storage, `seats × 5` active share
+    /// links — with full history and never-expiring links.
     pub fn limits(self) -> PlanLimits {
         match self {
             Plan::Unlimited => PlanLimits::UNLIMITED,
             Plan::Free => PlanLimits {
-                max_members: Some(0),
-                max_storage_bytes: Some(0),
-                max_active_share_links: Some(0),
-                max_concurrent_share_sessions: Some(0),
+                max_members: Some(1),
+                max_storage_bytes: Some(FREE_STORAGE_BYTES),
+                max_active_share_links: Some(1),
+                max_concurrent_share_sessions: None,
+                max_revisions_per_game: Some(1),
+                max_front_bundles_per_game: Some(1),
+                max_share_link_days: Some(FREE_SHARE_LINK_DAYS),
             },
             Plan::Paid { seats } => PlanLimits {
                 max_members: Some(seats),
                 max_storage_bytes: Some(u64::from(seats) * 10 * GIB),
                 max_active_share_links: Some(seats * 5),
                 max_concurrent_share_sessions: None,
+                max_revisions_per_game: None,
+                max_front_bundles_per_game: None,
+                max_share_link_days: None,
             },
         }
     }
@@ -79,11 +95,6 @@ impl Plan {
             Plan::Paid { seats } => Some(seats),
             _ => None,
         }
-    }
-
-    /// Writes (pushes, new shares, invites) are allowed on every plan except `Free`.
-    pub fn writes_allowed(self) -> bool {
-        !matches!(self, Plan::Free)
     }
 }
 
@@ -168,7 +179,7 @@ pub async fn extra_storage_units(pool: &PgPool, workspace_id: Uuid) -> ApiResult
 /// self-host short-circuit, kept FIRST so overrides never touch a self-hosted
 /// instance). Otherwise a non-expired instance-admin plan override wins next;
 /// failing that, an active/trialing (or within-grace `past_due`) subscription
-/// grants its plan; failing all of that, the workspace is `Free` (read-only).
+/// grants its plan; failing all of that, the workspace is `Free` (the solo tier).
 pub async fn plan_for(state: &AppState, workspace_id: Uuid) -> ApiResult<Plan> {
     if state.config.stripe.is_none() {
         return Ok(Plan::Unlimited);
@@ -217,7 +228,7 @@ async fn active_override(
 }
 
 /// Pure resolution given a loaded subscription. A subscription that currently
-/// grants a plan wins; failing that, the workspace is `Free` (read-only).
+/// grants a plan wins; failing that, the workspace is `Free` (the solo tier).
 fn resolve_plan(subscription: Option<&SubscriptionRow>, now: DateTime<Utc>) -> Plan {
     if let Some(sub) = subscription
         && let Some(plan) = active_plan(sub, now)
@@ -254,17 +265,40 @@ fn active_plan(sub: &SubscriptionRow, now: DateTime<Utc>) -> Option<Plan> {
     }
 }
 
-/// 403 `upgrade_required` when the workspace has no active plan (`Free`);
-/// `Ok(())` on every other plan (including billing disabled).
-pub async fn write_allowed(state: &AppState, workspace_id: Uuid) -> ApiResult<()> {
-    if plan_for(state, workspace_id).await?.writes_allowed() {
-        Ok(())
-    } else {
-        Err(ApiError::forbidden(
-            "upgrade_required",
-            "this workspace has no active plan; subscribe to make changes",
-        ))
+/// A memoized share-link TTL (days; `None` = unlimited) and when it was read.
+type CachedTtl = (Option<u32>, Instant);
+
+/// In-process cache of the per-workspace share-link TTL, one entry per workspace.
+static SHARE_TTL_CACHE: LazyLock<Mutex<HashMap<Uuid, CachedTtl>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+
+/// The workspace's share-link TTL cap in days (`None` = links may live forever),
+/// memoized for 60s. This runs on the public share host for links older than
+/// [`FREE_SHARE_LINK_DAYS`], so it must stay cheap and must never take a link
+/// down on a transient DB error — failures resolve to `None` (serve the link).
+/// The 60s staleness window means an upgrade revives an age-expired link within
+/// a minute, which is fine.
+pub async fn share_link_ttl_days_cached(state: &AppState, workspace_id: Uuid) -> Option<u32> {
+    {
+        let cache = SHARE_TTL_CACHE.lock().expect("share ttl cache mutex");
+        if let Some(&(ttl, at)) = cache.get(&workspace_id)
+            && at.elapsed() < SHARE_TTL_CACHE_TTL
+        {
+            return ttl;
+        }
     }
+    let ttl = match plan_for(state, workspace_id).await {
+        Ok(plan) => plan.limits().max_share_link_days,
+        Err(e) => {
+            tracing::warn!(error = %e, %workspace_id, "share ttl: plan lookup failed, serving");
+            return None;
+        }
+    };
+    SHARE_TTL_CACHE
+        .lock()
+        .expect("share ttl cache mutex")
+        .insert(workspace_id, (ttl, Instant::now()));
+    ttl
 }
 
 // ---------------------------------------------------------------------------
@@ -317,10 +351,16 @@ pub async fn storage_bytes_cached(pool: &PgPool, workspace_id: Uuid) -> ApiResul
     Ok(bytes)
 }
 
-/// Count of active (non-revoked, non-expired) share links. Returns 0 when the M5
+/// Count of active (non-revoked, non-expired) share links. On a TTL-limited plan
+/// pass `ttl_days` so links past their plan lifetime (which the share host no
+/// longer serves) don't count against the quota. Returns 0 when the M5
 /// `share_links` table is not present yet, so the usage endpoint is robust to the
 /// share migration landing independently.
-pub async fn active_share_links(pool: &PgPool, workspace_id: Uuid) -> ApiResult<i64> {
+pub async fn active_share_links(
+    pool: &PgPool,
+    workspace_id: Uuid,
+    ttl_days: Option<u32>,
+) -> ApiResult<i64> {
     let table_exists: bool =
         sqlx::query_scalar("SELECT to_regclass('public.share_links') IS NOT NULL")
             .fetch_one(pool)
@@ -331,9 +371,11 @@ pub async fn active_share_links(pool: &PgPool, workspace_id: Uuid) -> ApiResult<
     Ok(sqlx::query_scalar::<_, i64>(
         "SELECT count(*) FROM share_links \
          WHERE workspace_id = $1 AND revoked_at IS NULL \
-           AND (expires_at IS NULL OR expires_at > now())",
+           AND (expires_at IS NULL OR expires_at > now()) \
+           AND ($2::int IS NULL OR created_at + make_interval(days => $2::int) > now())",
     )
     .bind(workspace_id)
+    .bind(ttl_days.map(|d| d as i32))
     .fetch_one(pool)
     .await?)
 }
@@ -366,21 +408,31 @@ mod tests {
     }
 
     #[test]
-    fn free_limits_are_all_zero() {
-        assert_eq!(Plan::Free.limits().max_members, Some(0));
-        assert_eq!(Plan::Free.limits().max_storage_bytes, Some(0));
-        assert_eq!(Plan::Free.limits().max_active_share_links, Some(0));
-        assert_eq!(Plan::Free.limits().max_concurrent_share_sessions, Some(0));
+    fn free_limits_are_the_solo_tier() {
+        let free = Plan::Free.limits();
+        // Solo: the owner alone, 5 GiB, one 7-day share link.
+        assert_eq!(free.max_members, Some(1));
+        assert_eq!(free.max_storage_bytes, Some(5 * GIB));
+        assert_eq!(free.max_active_share_links, Some(1));
+        assert_eq!(free.max_share_link_days, Some(7));
+        // History collapses to the latest push of each kind.
+        assert_eq!(free.max_revisions_per_game, Some(1));
+        assert_eq!(free.max_front_bundles_per_game, Some(1));
+        // Play sessions are uncapped on every plan.
+        assert_eq!(free.max_concurrent_share_sessions, None);
     }
 
     #[test]
     fn paid_limits_scale_linearly_per_seat() {
-        // 1 seat: 1 member, 10 GiB, 5 links, uncapped sessions.
+        // 1 seat: 1 member, 10 GiB, 5 links, uncapped sessions, full history.
         let one = Plan::Paid { seats: 1 }.limits();
         assert_eq!(one.max_members, Some(1));
         assert_eq!(one.max_storage_bytes, Some(10 * GIB));
         assert_eq!(one.max_active_share_links, Some(5));
         assert_eq!(one.max_concurrent_share_sessions, None);
+        assert_eq!(one.max_revisions_per_game, None);
+        assert_eq!(one.max_front_bundles_per_game, None);
+        assert_eq!(one.max_share_link_days, None);
 
         // 10 seats: 10 members, 100 GiB, 50 links, uncapped sessions.
         let ten = Plan::Paid { seats: 10 }.limits();
@@ -391,13 +443,6 @@ mod tests {
 
         // Unlimited is all-None.
         assert_eq!(Plan::Unlimited.limits(), PlanLimits::UNLIMITED);
-    }
-
-    #[test]
-    fn free_is_the_only_write_gated_plan() {
-        assert!(Plan::Unlimited.writes_allowed());
-        assert!(Plan::Paid { seats: 1 }.writes_allowed());
-        assert!(!Plan::Free.writes_allowed());
     }
 
     #[test]

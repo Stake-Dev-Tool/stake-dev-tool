@@ -63,7 +63,8 @@ async fn setup() -> Option<Ctx> {
 }
 
 /// Billing-enabled variant: plan resolution runs (Free/Paid) instead of
-/// short-circuiting to Unlimited, so the share host enforces the 0-session Free cap.
+/// short-circuiting to Unlimited, so the share host enforces the Free plan's
+/// 7-day link lifetime.
 async fn setup_billing() -> Option<Ctx> {
     setup_with(Some(StripeConfig {
         secret_key: "sk_test_share".to_string(),
@@ -130,7 +131,7 @@ async fn insert_paid_subscription(state: &AppState, ws_id: Uuid) {
     .unwrap();
 }
 
-/// Drop a workspace's subscription, returning it to the read-only Free state.
+/// Drop a workspace's subscription, returning it to the Free solo tier.
 async fn delete_subscription(state: &AppState, ws_id: Uuid) {
     sqlx::query("DELETE FROM subscriptions WHERE workspace_id = $1")
         .bind(ws_id)
@@ -834,11 +835,12 @@ async fn concurrent_session_cap() {
     assert_eq!(existing.status, StatusCode::OK);
 }
 
-/// A workspace that drops to Free (no active plan) stops serving NEW play
-/// sessions on its existing share links — a clean 403, never a 500 — because the
-/// Free plan's concurrent-session cap is 0. Existing content stays readable.
+/// A workspace that drops to Free keeps serving its share links — play sessions
+/// are uncapped on every plan — but the Free plan's 7-day link lifetime kicks in
+/// lazily: once a link is older than 7 days the share host serves the branded
+/// expired page instead of the game.
 #[tokio::test]
-async fn free_workspace_refuses_new_share_sessions() {
+async fn free_workspace_links_serve_until_the_plan_ttl() {
     let Some(ctx) = setup_billing().await else {
         return;
     };
@@ -846,7 +848,7 @@ async fn free_workspace_refuses_new_share_sessions() {
     let ws = create_workspace(&ctx.state, &token).await;
     let ws_id = workspace_id(&ctx.state, &ws).await;
 
-    // Paid while seeding (writes need an active plan on a billing-enabled instance).
+    // Paid while seeding, then create the (never-expiring) share link.
     insert_paid_subscription(&ctx.state, ws_id).await;
     push_math(&ctx.state, &ws, &rev_files(INDEX_1MODE), None, &token).await;
     push_bundle(&ctx.state, &ws, &bundle_files(), &token).await;
@@ -868,11 +870,10 @@ async fn free_workspace_refuses_new_share_sessions() {
         ok.json()
     );
 
-    // Drop the subscription → Free (0 concurrent-session cap).
+    // Drop the subscription → Free (sessions stay uncapped; the link is fresh,
+    // so it keeps serving — including brand-new sessions).
     delete_subscription(&ctx.state, ws_id).await;
-
-    // A brand-new session is refused cleanly (403 JSON, not a 500).
-    let refused = share_post_json(
+    let still_ok = share_post_json(
         &ctx.state,
         &host,
         &format!("/api/rgs/{GAME}/wallet/authenticate"),
@@ -880,20 +881,28 @@ async fn free_workspace_refuses_new_share_sessions() {
     )
     .await;
     assert_eq!(
-        refused.status,
-        StatusCode::FORBIDDEN,
-        "free workspace must refuse new sessions: {:?}",
-        refused.json()
-    );
-    assert_eq!(
-        refused.json()["error"]["code"].as_str(),
-        Some("unavailable")
+        still_ok.status,
+        StatusCode::OK,
+        "a fresh link keeps serving new sessions on Free: {:?}",
+        still_ok.json()
     );
 
-    // The static bundle is still readable (deletion/reads stay allowed).
-    let root = share_get(&ctx.state, &host, "/?sessionID=probe", None).await;
-    assert_eq!(root.status, StatusCode::OK);
-    assert_eq!(root.body, INDEX_HTML);
+    // Age the link past the 7-day Free lifetime: the lazy plan-TTL check winds
+    // it down with the branded expired page (404), even though its stored
+    // expiry is NULL (never).
+    sqlx::query(
+        "UPDATE share_links SET created_at = now() - interval '8 days' WHERE workspace_id = $1",
+    )
+    .bind(ws_id)
+    .execute(&ctx.state.pool)
+    .await
+    .unwrap();
+    let gone = share_get(&ctx.state, &host, "/?sessionID=probe", None).await;
+    assert_eq!(
+        gone.status,
+        StatusCode::NOT_FOUND,
+        "an over-TTL Free link serves the expired page"
+    );
 }
 
 /// A front bundle without a root index.html is rejected.
@@ -972,6 +981,227 @@ async fn list_reports_counters() {
     assert_eq!(entry["total_bet"].as_f64(), Some(2.0));
     // observed_rtp is present (total_bet > 0).
     assert!(entry["observed_rtp"].is_number());
+}
+
+/// A 1x1 transparent PNG as a data URL (the widget's screenshot wire format).
+const TINY_PNG_DATA_URL: &str = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==";
+
+/// Feedback flow: the toggle gates injection + both public endpoints; a
+/// submission is stamped with the last played round (server-side fallback when
+/// the widget sends none); the dashboard lists, serves screenshots, and deletes.
+#[tokio::test]
+async fn feedback_flow() {
+    let Some(ctx) = setup().await else { return };
+    let (ws, token) = seed(&ctx.state).await;
+
+    // --- disabled by default: no injection, endpoints 404 --------------------
+    let plain = create_share(&ctx.state, &ws, &token, json!({})).await;
+    let plain_host = host_for(plain["slug"].as_str().unwrap());
+    assert_eq!(plain["feedback_enabled"].as_bool(), Some(false));
+    let root = share_get(&ctx.state, &plain_host, "/?sessionID=probe", None).await;
+    assert_eq!(root.status, StatusCode::OK);
+    assert_eq!(root.body, INDEX_HTML, "no widget tag when disabled");
+    let js = share_get(&ctx.state, &plain_host, "/__share/feedback.js", None).await;
+    assert_eq!(js.status, StatusCode::NOT_FOUND);
+    let refused = share_post_json(
+        &ctx.state,
+        &plain_host,
+        "/__share/feedback",
+        json!({ "sessionID": "x", "message": "hi" }),
+    )
+    .await;
+    assert_eq!(refused.status, StatusCode::NOT_FOUND);
+    assert_eq!(
+        refused.json()["error"]["code"].as_str(),
+        Some("feedback_disabled")
+    );
+
+    // --- enabled at create: injection + widget served -------------------------
+    let share = create_share(&ctx.state, &ws, &token, json!({ "feedback_enabled": true })).await;
+    let host = host_for(share["slug"].as_str().unwrap());
+    assert_eq!(share["feedback_enabled"].as_bool(), Some(true));
+
+    let root = share_get(&ctx.state, &host, "/?sessionID=probe", None).await;
+    assert_eq!(root.status, StatusCode::OK);
+    let html = String::from_utf8_lossy(&root.body).to_string();
+    assert!(
+        html.contains("/__share/feedback.js"),
+        "widget tag injected: {html}"
+    );
+    let js = share_get(&ctx.state, &host, "/__share/feedback.js", None).await;
+    assert_eq!(js.status, StatusCode::OK);
+    assert!(js.content_type().starts_with("text/javascript"));
+    assert!(String::from_utf8_lossy(&js.body).contains("__sdtFeedback"));
+
+    // --- play once so the server records the session's last round -------------
+    let sid = format!("vis-{}", Uuid::new_v4());
+    let _ = share_post_json(
+        &ctx.state,
+        &host,
+        &format!("/api/rgs/{GAME}/wallet/authenticate"),
+        json!({ "sessionID": sid, "language": "en" }),
+    )
+    .await;
+    let play = share_post_json(
+        &ctx.state,
+        &host,
+        &format!("/api/rgs/{GAME}/wallet/play"),
+        json!({ "sessionID": sid, "mode": "base", "amount": 1 }),
+    )
+    .await;
+    assert_eq!(play.status, StatusCode::OK, "play: {:?}", play.json());
+    let played_event: i64 = play.json()["round"]["event"]
+        .as_str()
+        .unwrap()
+        .parse()
+        .unwrap();
+
+    // Submission WITHOUT a client round: the server fallback stamps the last
+    // played one. Includes a drawing + screenshot.
+    let submitted = share_post_json(
+        &ctx.state,
+        &host,
+        "/__share/feedback",
+        json!({
+            "sessionID": sid,
+            "name": "Tester",
+            "message": "The win popup hides the reels",
+            "drawing": { "shapes": [ { "t": "ellipse", "c": "#ff4d4f", "s": 3, "x": 10.0, "y": 20.0, "w": 100.0, "h": 50.0 } ] },
+            "screenshot": TINY_PNG_DATA_URL,
+            "viewport": { "w": 1280, "h": 720 }
+        }),
+    )
+    .await;
+    assert_eq!(
+        submitted.status,
+        StatusCode::CREATED,
+        "submit: {:?}",
+        submitted.json()
+    );
+
+    // Submission WITH an explicit client round is stored verbatim; empty ones
+    // are refused.
+    let explicit = share_post_json(
+        &ctx.state,
+        &host,
+        "/__share/feedback",
+        json!({ "sessionID": sid, "message": "bonus feels slow", "mode": "base", "eventId": 1 }),
+    )
+    .await;
+    assert_eq!(explicit.status, StatusCode::CREATED);
+    let empty = share_post_json(
+        &ctx.state,
+        &host,
+        "/__share/feedback",
+        json!({ "sessionID": sid, "message": "   " }),
+    )
+    .await;
+    assert_eq!(empty.status, StatusCode::UNPROCESSABLE_ENTITY);
+    assert_eq!(
+        empty.json()["error"]["code"].as_str(),
+        Some("empty_feedback")
+    );
+
+    // --- dashboard list (newest first) -----------------------------------------
+    let list = api(
+        &ctx.state,
+        Method::GET,
+        &format!("/api/workspaces/{ws}/games/{GAME}/feedback"),
+        None,
+        Some(&token),
+    )
+    .await;
+    assert_eq!(list.status, StatusCode::OK, "list: {:?}", list.json());
+    let entries = list.json()["feedback"].as_array().unwrap().clone();
+    assert_eq!(entries.len(), 2);
+    let newest = &entries[0];
+    assert_eq!(newest["message"].as_str(), Some("bonus feels slow"));
+    assert_eq!(newest["mode"].as_str(), Some("base"));
+    assert_eq!(newest["event_id"].as_i64(), Some(1));
+    let oldest = &entries[1];
+    assert_eq!(oldest["share_slug"], share["slug"]);
+    assert_eq!(oldest["author_name"].as_str(), Some("Tester"));
+    assert_eq!(oldest["mode"].as_str(), Some("base"));
+    assert_eq!(
+        oldest["event_id"].as_i64(),
+        Some(played_event),
+        "server fallback stamps the last played round"
+    );
+    // The link tracks latest, and the seed pushed rev 1 + rev 2.
+    assert_eq!(oldest["revision_number"].as_i64(), Some(2));
+    assert_eq!(oldest["has_screenshot"].as_bool(), Some(true));
+    assert_eq!(newest["has_screenshot"].as_bool(), Some(false));
+    assert!(oldest["drawing"]["shapes"].is_array());
+
+    // --- screenshot roundtrip ---------------------------------------------------
+    let shot = api(
+        &ctx.state,
+        Method::GET,
+        &format!(
+            "/api/workspaces/{ws}/games/{GAME}/feedback/{}/screenshot",
+            oldest["id"].as_str().unwrap()
+        ),
+        None,
+        Some(&token),
+    )
+    .await;
+    assert_eq!(shot.status, StatusCode::OK);
+    assert_eq!(shot.content_type(), "image/png");
+    assert!(!shot.body.is_empty());
+
+    // --- toggle off via PATCH: injection + endpoints stop ------------------------
+    let patched = api(
+        &ctx.state,
+        Method::PATCH,
+        &format!(
+            "/api/workspaces/{ws}/games/{GAME}/shares/{}",
+            share["id"].as_str().unwrap()
+        ),
+        Some(json!({ "feedback_enabled": false })),
+        Some(&token),
+    )
+    .await;
+    assert_eq!(patched.status, StatusCode::OK);
+    assert_eq!(patched.json()["feedback_enabled"].as_bool(), Some(false));
+    let root = share_get(&ctx.state, &host, "/?sessionID=probe", None).await;
+    assert_eq!(root.body, INDEX_HTML, "tag gone after toggle-off");
+    let js = share_get(&ctx.state, &host, "/__share/feedback.js", None).await;
+    assert_eq!(js.status, StatusCode::NOT_FOUND);
+
+    // --- delete (owner/admin) -----------------------------------------------------
+    let deleted = api(
+        &ctx.state,
+        Method::DELETE,
+        &format!(
+            "/api/workspaces/{ws}/games/{GAME}/feedback/{}",
+            oldest["id"].as_str().unwrap()
+        ),
+        None,
+        Some(&token),
+    )
+    .await;
+    assert_eq!(deleted.status, StatusCode::NO_CONTENT);
+    let again = api(
+        &ctx.state,
+        Method::DELETE,
+        &format!(
+            "/api/workspaces/{ws}/games/{GAME}/feedback/{}",
+            oldest["id"].as_str().unwrap()
+        ),
+        None,
+        Some(&token),
+    )
+    .await;
+    assert_eq!(again.status, StatusCode::NOT_FOUND);
+    let list = api(
+        &ctx.state,
+        Method::GET,
+        &format!("/api/workspaces/{ws}/games/{GAME}/feedback"),
+        None,
+        Some(&token),
+    )
+    .await;
+    assert_eq!(list.json()["feedback"].as_array().unwrap().len(), 1);
 }
 
 /// Pull the `sessionID` value out of a redirect `Location` query.

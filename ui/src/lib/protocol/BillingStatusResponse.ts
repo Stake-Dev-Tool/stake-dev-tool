@@ -14,9 +14,9 @@ export type BillingStatusResponse = {
 enabled: boolean, 
 /**
  * The resolved plan label: `"free"` (billing enabled, no active subscription
- * — reads still work, writes are blocked with `upgrade_required`), `"paid"`
- * (an active seat subscription or comp), or `"unlimited"` (billing disabled,
- * self-host).
+ * — fully usable within the Free limits: solo, 1 revision kept per game,
+ * 1 share link capped at 7 days), `"paid"` (an active seat subscription or
+ * comp), or `"unlimited"` (billing disabled, self-host).
  */
 plan: string, 
 /**

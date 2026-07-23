@@ -4,4 +4,21 @@
  * Effective quota limits for a workspace. `null` on any field means unlimited
  * (self-hosted instances with billing disabled report every field `null`).
  */
-export type BillingLimits = { max_members: number | null, max_storage_bytes: bigint | null, max_active_share_links: number | null, max_concurrent_share_sessions: number | null, };
+export type BillingLimits = { max_members: number | null, max_storage_bytes: bigint | null, max_active_share_links: number | null, max_concurrent_share_sessions: number | null, 
+/**
+ * Math revisions kept per game: each push past the cap prunes the oldest
+ * (the Free plan keeps 1 — every push replaces the previous revision).
+ * `null` = full history.
+ */
+max_revisions_per_game: number | null, 
+/**
+ * Front bundles kept per game, pruned the same way on each front push.
+ * `null` = all kept.
+ */
+max_front_bundles_per_game: number | null, 
+/**
+ * Longest lifetime of a share link, in days from creation (the Free plan
+ * caps links at 7 days; enforced at create/update AND lazily at serve
+ * time). `null` = links may live forever.
+ */
+max_share_link_days: number | null, };

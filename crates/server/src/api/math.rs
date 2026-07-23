@@ -254,8 +254,6 @@ pub async fn put_blob(
     request: Request,
 ) -> ApiResult<Response> {
     let workspace = authorize_write(&state, &user, &slug).await?;
-    // M7: block writes on a Free (unsubscribed) workspace before touching the body.
-    crate::billing::write_allowed(&state, workspace.id).await?;
     if !blobs::is_hex64_lower(&hash_hex) {
         return Err(ApiError::unprocessable(
             "invalid_hash",
@@ -445,8 +443,7 @@ pub async fn create_revision(
     let workspace = authorize_write(&state, &user, &slug).await?;
     validate_game_slug(&game_slug)?;
     validate_manifest(&req.files)?;
-    // M7: block commits on a Free (unsubscribed) workspace; resolve the storage cap once.
-    crate::billing::write_allowed(&state, workspace.id).await?;
+    // M7: resolve the plan limits once (storage cap + per-game history cap).
     let limits = crate::billing::limits_for(&state, workspace.id).await?;
 
     let pairs = distinct_pairs(&req.files);
@@ -562,7 +559,58 @@ pub async fn create_revision(
     .execute(&mut *tx)
     .await?;
 
+    // 4b. Plan history cap: keep only the newest `keep` revisions (the Free plan
+    //     keeps 1 — every push replaces the previous). Share links pinned to a
+    //     pruned number fall back to tracking latest: on a single-revision plan
+    //     the pin can only reference history that no longer exists. Orphaned
+    //     blobs are GC'd inside the same tx (bytes shared with the new revision
+    //     or a front bundle survive), mirroring `delete_revision`.
+    let mut pruned_numbers: Vec<i32> = Vec::new();
+    let mut freed: Vec<(Vec<u8>, i64)> = Vec::new();
+    if let Some(keep) = limits.max_revisions_per_game {
+        let cutoff = number - keep as i32;
+        if cutoff >= 1 {
+            sqlx::query(
+                "UPDATE share_links SET revision_number = NULL \
+                 WHERE game_id = $1 AND revision_number <= $2",
+            )
+            .bind(game_id)
+            .bind(cutoff)
+            .execute(&mut *tx)
+            .await?;
+            pruned_numbers = sqlx::query_scalar(
+                "DELETE FROM revisions WHERE game_id = $1 AND number <= $2 RETURNING number",
+            )
+            .bind(game_id)
+            .bind(cutoff)
+            .fetch_all(&mut *tx)
+            .await?;
+            if !pruned_numbers.is_empty() {
+                freed = blobs::gc_orphaned_blobs(&mut tx, workspace.id).await?;
+            }
+        }
+    }
+
     tx.commit().await?;
+
+    // Post-commit best-effort cleanup for the pruned history: freed store bytes
+    // and each pruned revision's materialized cache dir (LRU evicts leftovers).
+    if !freed.is_empty() {
+        blobs::delete_blob_objects(&state.store, workspace.id, &freed).await;
+    }
+    for pruned in &pruned_numbers {
+        let cache_dir =
+            crate::lgs_host::revision_cache_dir(&state.config, workspace.id, game_id, *pruned);
+        if let Err(e) = tokio::fs::remove_dir_all(&cache_dir).await
+            && e.kind() != std::io::ErrorKind::NotFound
+        {
+            tracing::warn!(
+                error = %e,
+                dir = %cache_dir.display(),
+                "revision prune: cache dir cleanup failed (LRU will evict it)"
+            );
+        }
+    }
 
     // M3 hook: nudge the workspace's SSE subscribers that a revision landed.
     state.events.publish(

@@ -51,19 +51,20 @@ pub(super) async fn dispatch_rgs(
     // Visitor-session accounting on wallet traffic: the client-provided
     // `sessionID` is the visitor identity. New sessions are capped + rate-limited
     // and bump the lifetime `sessions_count`.
+    let session_id = if is_wallet {
+        extract_session_id(&body_bytes)
+    } else {
+        None
+    };
     let mut forward_body = body_bytes.to_vec();
-    if is_wallet && let Some(session_id) = extract_session_id(&body_bytes) {
-        match runtime().note_session(link.id, &session_id, link.max_concurrent_sessions) {
+    if is_wallet && let Some(session_id) = session_id.as_deref() {
+        match runtime().note_session(link.id, session_id, link.max_concurrent_sessions) {
             Admit::OverCap => return too_many_json(),
             Admit::Created => {
-                // A brand-new session must clear the workspace's live plan cap: an
-                // unpaid (Free) workspace has a 0 concurrent-session cap, so its
-                // existing links stop serving new play sessions cleanly. Checked
-                // only on Created so the lookup fires once per visitor, not per call.
-                if workspace_sessions_blocked(state, link.workspace_id).await {
-                    runtime().forget_session(link.id, &session_id);
-                    return unavailable_json();
-                }
+                // Concurrent play sessions are uncapped on every plan (only the
+                // per-link cap above and the per-IP rate limit apply); a lapsed
+                // workspace's links are instead wound down by the plan-TTL check
+                // in `resolve` — every request here already passed it.
                 if !runtime().allow_new_session(link.id, client_ip) {
                     return too_many_json();
                 }
@@ -73,7 +74,7 @@ pub(super) async fn dispatch_rgs(
         }
         // Namespace the id so a visitor can never present a workbench session id
         // (defense in depth — the share registry is separate regardless).
-        if let Some(rewritten) = namespace_session(&body_bytes, &session_id) {
+        if let Some(rewritten) = namespace_session(&body_bytes, session_id) {
             forward_body = rewritten;
         }
     }
@@ -96,7 +97,7 @@ pub(super) async fn dispatch_rgs(
     };
 
     if is_play && response.status() == StatusCode::OK {
-        return account_play(&state.pool, link.id, response).await;
+        return account_play(&state.pool, link.id, session_id.as_deref(), response).await;
     }
     response.into_response()
 }
@@ -193,14 +194,20 @@ fn namespace_session(body: &[u8], session_id: &str) -> Option<Vec<u8>> {
     serde_json::to_vec(&value).ok()
 }
 
-/// Buffer a wallet `/play` response, fold its bet/win into the link counters, and
+/// Buffer a wallet `/play` response, fold its bet/win into the link counters,
+/// note the round as the session's last played one (for feedback stamping), and
 /// return the (byte-identical) response. Counter fidelity: `round.amount` is the
 /// player's selected base stake and `round.payout` the win, both in wallet units
 /// — exact for standard base-mode play (cost 1); for bonus-buy modes (cost > 1)
 /// the charged total is `amount × mode_cost`, so `total_bet` aggregates base
 /// stakes rather than charged totals. This is a documented, best-effort analytics
 /// approximation (per the M5 contract).
-async fn account_play(pool: &PgPool, share_id: Uuid, response: Response) -> Response {
+async fn account_play(
+    pool: &PgPool,
+    share_id: Uuid,
+    session_id: Option<&str>,
+    response: Response,
+) -> Response {
     let (parts, body) = response.into_parts();
     let bytes = match axum::body::to_bytes(body, MAX_BODY).await {
         Ok(bytes) => bytes,
@@ -212,6 +219,12 @@ async fn account_play(pool: &PgPool, share_id: Uuid, response: Response) -> Resp
 
     let (bet, win) = parse_bet_win(&bytes);
     increment_play(pool, share_id, bet, win).await;
+
+    if let Some(session_id) = session_id
+        && let Some((mode, event_id)) = parse_round_ref(&bytes)
+    {
+        runtime().note_round(share_id, session_id, &mode, event_id);
+    }
 
     Response::from_parts(parts, Body::from(bytes))
 }
@@ -231,6 +244,16 @@ fn parse_bet_win(body: &[u8]) -> (i64, i64) {
         .and_then(|p| p.as_i64())
         .unwrap_or(0);
     (bet.max(0), win.max(0))
+}
+
+/// Extract the round reference `(mode, event id)` from a play response JSON.
+/// `round.event` is the book line's eventId serialized as a string by the LGS.
+fn parse_round_ref(body: &[u8]) -> Option<(String, i64)> {
+    let value: Value = serde_json::from_slice(body).ok()?;
+    let round = value.get("round")?;
+    let mode = round.get("mode")?.as_str()?.to_string();
+    let event_id = round.get("event")?.as_str()?.parse::<i64>().ok()?;
+    Some((mode, event_id))
 }
 
 async fn increment_sessions(pool: &PgPool, share_id: Uuid) {
@@ -272,28 +295,6 @@ fn too_many_json() -> Response {
     )
 }
 
-/// A brand-new visitor session is refused because the workspace's live plan
-/// forbids new sessions (a 0 concurrent-session cap — the Free/unpaid state). A
-/// clean 403 JSON body, never a 500.
-fn unavailable_json() -> Response {
-    pages::api_error(
-        StatusCode::FORBIDDEN,
-        "unavailable",
-        "this demo is not currently available",
-    )
-}
-
-/// True when the workspace's resolved plan forbids new visitor sessions — its
-/// concurrent-session cap is `Some(0)`, which is the Free (unpaid) state.
-/// Self-hosted instances (billing disabled) resolve to Unlimited → always false,
-/// with no DB hit.
-async fn workspace_sessions_blocked(state: &AppState, workspace_id: Uuid) -> bool {
-    matches!(
-        crate::billing::plan_for(state, workspace_id).await,
-        Ok(plan) if plan.limits().max_concurrent_share_sessions == Some(0)
-    )
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -319,5 +320,18 @@ mod tests {
         // Missing round -> zeros.
         assert_eq!(parse_bet_win(br#"{"balance":{"amount":9}}"#), (0, 0));
         assert_eq!(parse_bet_win(b"nope"), (0, 0));
+    }
+
+    #[test]
+    fn parse_round_ref_reads_mode_and_event() {
+        let body = br#"{"round":{"mode":"base","event":"17","amount":1,"payout":0}}"#;
+        assert_eq!(parse_round_ref(body), Some(("base".to_string(), 17)));
+        // No event (or a non-numeric one) -> None.
+        assert_eq!(parse_round_ref(br#"{"round":{"mode":"base"}}"#), None);
+        assert_eq!(
+            parse_round_ref(br#"{"round":{"mode":"base","event":"x"}}"#),
+            None
+        );
+        assert_eq!(parse_round_ref(b"nope"), None);
     }
 }

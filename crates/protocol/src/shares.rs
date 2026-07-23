@@ -74,6 +74,9 @@ pub struct CreateShareRequest {
     pub expires_in_days: Option<i64>,
     /// Concurrent visitor-session cap; omit for the default of 25.
     pub max_concurrent_sessions: Option<i32>,
+    /// Enable the visitor feedback overlay (written notes + annotations tied to
+    /// the last played round). Omit for the default of `false`.
+    pub feedback_enabled: Option<bool>,
 }
 
 /// `PATCH /workspaces/:slug/games/:game/shares/:id` request body.
@@ -104,6 +107,8 @@ pub struct UpdateShareRequest {
     pub max_concurrent_sessions: Option<i32>,
     /// Absent = unchanged, `true` = revoke, `false` = un-revoke.
     pub revoked: Option<bool>,
+    /// Absent = unchanged; toggles the visitor feedback overlay.
+    pub feedback_enabled: Option<bool>,
 }
 
 /// A share link as returned by create/list. `url` is the full
@@ -124,6 +129,8 @@ pub struct ShareLinkView {
     pub password_protected: bool,
     pub expires_at: Option<DateTime<Utc>>,
     pub max_concurrent_sessions: i32,
+    /// Whether the visitor feedback overlay is injected into the served front.
+    pub feedback_enabled: bool,
     pub revoked_at: Option<DateTime<Utc>>,
     pub created_at: DateTime<Utc>,
     pub sessions_count: i64,

@@ -3,11 +3,13 @@
 //! (via [`super::pages`]) rather than an error envelope, since these are served
 //! straight to a browser on the share subdomain.
 
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, Duration, Utc};
 use serde_json::Value;
 use sqlx::PgPool;
 use uuid::Uuid;
 
+use crate::AppState;
+use crate::billing::plan::{FREE_SHARE_LINK_DAYS, share_link_ttl_days_cached};
 use crate::error::ApiResult;
 
 use super::pages;
@@ -25,6 +27,8 @@ pub(super) struct ResolvedShare {
     pub expires_at: Option<DateTime<Utc>>,
     pub max_concurrent_sessions: i32,
     pub revoked_at: Option<DateTime<Utc>>,
+    pub feedback_enabled: bool,
+    pub created_at: DateTime<Utc>,
 }
 
 impl ResolvedShare {
@@ -37,7 +41,7 @@ impl ResolvedShare {
 /// clause is appended when the request arrived on a custom domain.
 const LOAD_BY_SLUG: &str = "SELECT s.id, s.workspace_id, s.game_id, g.slug AS game_slug, \
             s.revision_number, s.front_bundle_id, s.password_hash, s.expires_at, \
-            s.max_concurrent_sessions, s.revoked_at \
+            s.max_concurrent_sessions, s.revoked_at, s.feedback_enabled, s.created_at \
      FROM share_links s JOIN games g ON g.id = s.game_id \
      WHERE s.slug = $1";
 
@@ -75,11 +79,11 @@ async fn load_by_slug(
 /// constrains the lookup to a workspace for custom-domain requests (see
 /// [`load_by_slug`]).
 pub(super) async fn resolve(
-    pool: &PgPool,
+    state: &AppState,
     slug: &str,
     scope: Option<Uuid>,
 ) -> Result<ResolvedShare, axum::response::Response> {
-    let link = match load_by_slug(pool, slug, scope).await {
+    let link = match load_by_slug(&state.pool, slug, scope).await {
         Ok(link) => link,
         Err(e) => {
             tracing::error!(error = %e, slug, "share: failed to load link");
@@ -95,6 +99,17 @@ pub(super) async fn resolve(
     }
     if let Some(expires_at) = link.expires_at
         && expires_at <= Utc::now()
+    {
+        return Err(pages::expired());
+    }
+    // Plan TTL (lazy): on a TTL-capped plan (Free = 7 days) a link serves for at
+    // most `max_share_link_days` after creation, whatever its stored expiry —
+    // this is what winds down never-expiring links minted on a since-lapsed paid
+    // plan. The lookup is memoized per workspace (60s) and skipped entirely for
+    // links younger than the shortest TTL any plan imposes, i.e. every fresh link.
+    if link.created_at + Duration::days(i64::from(FREE_SHARE_LINK_DAYS)) <= Utc::now()
+        && let Some(ttl_days) = share_link_ttl_days_cached(state, link.workspace_id).await
+        && link.created_at + Duration::days(i64::from(ttl_days)) <= Utc::now()
     {
         return Err(pages::expired());
     }

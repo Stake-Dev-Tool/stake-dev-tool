@@ -108,6 +108,28 @@ export function meterFill(tone: MeterTone): string {
 }
 
 // ---------------------------------------------------------------------------
+// Free plan (mirrors the server's billing/plan.rs Free limits)
+// ---------------------------------------------------------------------------
+
+/**
+ * What the Free plan includes. Everything works — game creation, pushes, test
+ * view, share links — within these solo-sized limits. The numbers here are the
+ * marketing mirror of `crates/server/src/billing/plan.rs`; the enforced values
+ * always come from the server via `BillingStatus.limits`.
+ */
+export const FREE_PLAN = {
+  /** Just you — collaborators need a paid seat. */
+  members: 1,
+  storageGib: 5,
+  /** One active share link at a time. */
+  shareLinks: 1,
+  /** A share link lives at most this many days. */
+  shareLinkDays: 7,
+  /** Revisions kept per game: each push replaces the previous one. */
+  revisionsPerGame: 1
+} as const;
+
+// ---------------------------------------------------------------------------
 // Seat pricing (the single paid plan: €3 first seat, €2 each additional)
 // ---------------------------------------------------------------------------
 

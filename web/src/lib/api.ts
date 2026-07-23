@@ -316,9 +316,10 @@ export type BillingInterval = 'monthly' | 'yearly';
 /**
  * The resolved plan label the status endpoint reports. `unlimited` = billing
  * disabled (self-host, everything unlimited); `free` = billing enabled with no
- * active subscription (reads work, writes are blocked with `upgrade_required`);
- * `paid` = an active seat subscription (or comp). Kept open to `string` so an
- * unknown server value is never a runtime throw.
+ * active subscription — fully usable within the Free limits (solo, latest
+ * revision kept per game, 1 share link capped at 7 days); `paid` = an active
+ * seat subscription (or comp). Kept open to `string` so an unknown server value
+ * is never a runtime throw.
  */
 export type PlanLabel = 'free' | 'paid' | 'unlimited';
 
@@ -339,6 +340,12 @@ export interface BillingLimits {
   max_storage_bytes: number | null;
   max_active_share_links: number | null;
   max_concurrent_share_sessions: number | null;
+  /** Revisions kept per game — each push past the cap replaces the oldest. */
+  max_revisions_per_game: number | null;
+  /** Front bundles kept per game, pruned the same way on each front push. */
+  max_front_bundles_per_game: number | null;
+  /** Longest lifetime of a share link in days from creation (Free = 7). */
+  max_share_link_days: number | null;
 }
 
 /** `GET /workspaces/:slug/billing` — member-visible, always reachable. */
@@ -392,6 +399,8 @@ export interface ShareLink {
   password_protected: boolean;
   expires_at: string | null;
   max_concurrent_sessions: number;
+  /** Whether the visitor feedback overlay is injected into the served front. */
+  feedback_enabled: boolean;
   revoked_at: string | null;
   created_at: string;
   sessions_count: number;
@@ -418,6 +427,8 @@ export interface CreateShareInput {
   expires_in_days?: number;
   /** Concurrent visitor-session cap; omit for the default of 25. */
   max_concurrent_sessions?: number;
+  /** Enable the visitor feedback overlay; omit for the default of `false`. */
+  feedback_enabled?: boolean;
 }
 
 /**
@@ -434,6 +445,7 @@ export interface UpdateShareInput {
   expires_in_days?: number | null;
   max_concurrent_sessions?: number;
   revoked?: boolean;
+  feedback_enabled?: boolean;
 }
 
 /** `201` payload after a front bundle commits. */
@@ -464,6 +476,51 @@ export interface FrontBundleSummary {
 export interface DeletionResult {
   freed_bytes: number;
   freed_blobs: number;
+}
+
+/**
+ * One annotation shape drawn by a share-link visitor over the game viewport,
+ * in CSS pixels of the recorded `(viewport_w, viewport_h)`:
+ * `pen` freehand polyline (`p`), `rect`/`ellipse` bounding boxes (`x,y,w,h`),
+ * `arrow` segments (`x1,y1 → x2,y2`). `c` is the stroke color, `s` its width.
+ */
+export interface FeedbackShape {
+  t: 'pen' | 'rect' | 'ellipse' | 'arrow';
+  c: string;
+  s: number;
+  p?: [number, number][];
+  x?: number;
+  y?: number;
+  w?: number;
+  h?: number;
+  x1?: number;
+  y1?: number;
+  x2?: number;
+  y2?: number;
+}
+
+/**
+ * One visitor feedback entry on a share link. `mode` + `event_id` +
+ * `revision_number` reference the last round the visitor played — the book
+ * line, addressed exactly like a saved round `(revision, mode, eventId)`; all
+ * three are null when feedback arrived before the first spin. When
+ * `has_screenshot` is true the capture is served by
+ * `api.feedback.screenshotUrl(...)` (cookie-auth, same-origin).
+ */
+export interface ShareFeedback {
+  id: string;
+  share_id: string;
+  share_slug: string;
+  author_name: string | null;
+  message: string;
+  drawing: { shapes: FeedbackShape[] } | null;
+  has_screenshot: boolean;
+  mode: string | null;
+  event_id: number | null;
+  revision_number: number | null;
+  viewport_w: number | null;
+  viewport_h: number | null;
+  created_at: string;
 }
 
 // ---------------------------------------------------------------------------
@@ -979,7 +1036,10 @@ function normalizeBillingLimits(raw: unknown): BillingLimits {
     max_members: numOrNull(l.max_members),
     max_storage_bytes: numOrNull(l.max_storage_bytes),
     max_active_share_links: numOrNull(l.max_active_share_links),
-    max_concurrent_share_sessions: numOrNull(l.max_concurrent_share_sessions)
+    max_concurrent_share_sessions: numOrNull(l.max_concurrent_share_sessions),
+    max_revisions_per_game: numOrNull(l.max_revisions_per_game),
+    max_front_bundles_per_game: numOrNull(l.max_front_bundles_per_game),
+    max_share_link_days: numOrNull(l.max_share_link_days)
   };
 }
 
@@ -1015,6 +1075,7 @@ function normalizeShareLink(raw: unknown): ShareLink {
     password_protected: Boolean(s.password_protected),
     expires_at: strOrNull(s.expires_at),
     max_concurrent_sessions: num(s.max_concurrent_sessions, 25),
+    feedback_enabled: Boolean(s.feedback_enabled),
     revoked_at: strOrNull(s.revoked_at),
     created_at: String(s.created_at ?? ''),
     sessions_count: num(s.sessions_count),
@@ -1040,6 +1101,29 @@ function normalizeFrontBundleSummary(raw: unknown): FrontBundleSummary {
 function normalizeDeletionResult(raw: unknown): DeletionResult {
   const r = (raw ?? {}) as Record<string, unknown>;
   return { freed_bytes: num(r.freed_bytes), freed_blobs: num(r.freed_blobs) };
+}
+
+function normalizeShareFeedback(raw: unknown): ShareFeedback {
+  const f = (raw ?? {}) as Record<string, unknown>;
+  const drawing = f.drawing as { shapes?: unknown } | null | undefined;
+  return {
+    id: String(f.id ?? ''),
+    share_id: String(f.share_id ?? ''),
+    share_slug: String(f.share_slug ?? ''),
+    author_name: strOrNull(f.author_name),
+    message: String(f.message ?? ''),
+    drawing:
+      drawing && Array.isArray(drawing.shapes)
+        ? { shapes: drawing.shapes as FeedbackShape[] }
+        : null,
+    has_screenshot: Boolean(f.has_screenshot),
+    mode: strOrNull(f.mode),
+    event_id: numOrNull(f.event_id),
+    revision_number: numOrNull(f.revision_number),
+    viewport_w: numOrNull(f.viewport_w),
+    viewport_h: numOrNull(f.viewport_h),
+    created_at: String(f.created_at ?? '')
+  };
 }
 
 // ---- Admin console ---------------------------------------------------------
@@ -1590,6 +1674,40 @@ export const api = {
         'DELETE',
         `/workspaces/${encodeURIComponent(slug)}/games/${encodeURIComponent(game)}/shares/${encodeURIComponent(id)}`
       );
+    }
+  },
+
+  feedback: {
+    /**
+     * A game's visitor feedback across all of its share links, newest first
+     * (server cap: 200). Any member can read; deletion is owner/admin.
+     */
+    async list(slug: string, game: string, shareId?: string): Promise<ShareFeedback[]> {
+      const filter = shareId ? `?share=${encodeURIComponent(shareId)}` : '';
+      const raw = await request<unknown>(
+        'GET',
+        `/workspaces/${encodeURIComponent(slug)}/games/${encodeURIComponent(game)}/feedback${filter}`
+      );
+      const arr = Array.isArray(raw)
+        ? raw
+        : ((raw as { feedback?: unknown[] } | undefined)?.feedback ?? []);
+      return arr.map(normalizeShareFeedback);
+    },
+
+    /** Permanently delete one feedback entry (owner/admin). */
+    async remove(slug: string, game: string, id: string): Promise<void> {
+      await request<void>(
+        'DELETE',
+        `/workspaces/${encodeURIComponent(slug)}/games/${encodeURIComponent(game)}/feedback/${encodeURIComponent(id)}`
+      );
+    },
+
+    /**
+     * The URL of a feedback entry's screenshot — same-origin and cookie-auth,
+     * so it can be used directly as an `<img src>` / SVG `<image href>`.
+     */
+    screenshotUrl(slug: string, game: string, id: string): string {
+      return `${BASE}/workspaces/${encodeURIComponent(slug)}/games/${encodeURIComponent(game)}/feedback/${encodeURIComponent(id)}/screenshot`;
     }
   },
 

@@ -82,6 +82,20 @@ pub struct BillingLimits {
     pub max_storage_bytes: Option<u64>,
     pub max_active_share_links: Option<u32>,
     pub max_concurrent_share_sessions: Option<u32>,
+    /// Math revisions kept per game: each push past the cap prunes the oldest
+    /// (the Free plan keeps 1 — every push replaces the previous revision).
+    /// `null` = full history.
+    #[serde(default)]
+    pub max_revisions_per_game: Option<u32>,
+    /// Front bundles kept per game, pruned the same way on each front push.
+    /// `null` = all kept.
+    #[serde(default)]
+    pub max_front_bundles_per_game: Option<u32>,
+    /// Longest lifetime of a share link, in days from creation (the Free plan
+    /// caps links at 7 days; enforced at create/update AND lazily at serve
+    /// time). `null` = links may live forever.
+    #[serde(default)]
+    pub max_share_link_days: Option<u32>,
 }
 
 /// Current resource usage, counted cheaply for the billing page. `storage_bytes`
@@ -104,9 +118,9 @@ pub struct BillingStatusResponse {
     /// never enforced and every limit is unlimited.
     pub enabled: bool,
     /// The resolved plan label: `"free"` (billing enabled, no active subscription
-    /// — reads still work, writes are blocked with `upgrade_required`), `"paid"`
-    /// (an active seat subscription or comp), or `"unlimited"` (billing disabled,
-    /// self-host).
+    /// — fully usable within the Free limits: solo, 1 revision kept per game,
+    /// 1 share link capped at 7 days), `"paid"` (an active seat subscription or
+    /// comp), or `"unlimited"` (billing disabled, self-host).
     pub plan: String,
     /// The seat count backing a `"paid"` plan (the subscription quantity or the
     /// comp's seat count). `null` when the plan is not `"paid"`.

@@ -2,7 +2,15 @@
   import { onMount } from 'svelte';
   import { page } from '$app/state';
   import { goto } from '$app/navigation';
-  import { api, ApiError, type Game, type RevisionSummary, type StatsStatus } from '$lib/api';
+  import {
+    api,
+    ApiError,
+    type BillingStatus,
+    type Game,
+    type RevisionSummary,
+    type StatsStatus
+  } from '$lib/api';
+  import { billingStatus } from '$lib/billing';
   import { errorText, humanSize } from '$lib/format';
   import { workspaceName } from '$lib/workspaces.svelte';
   import Button from '$lib/components/Button.svelte';
@@ -13,6 +21,7 @@
   import FrontUrlDialog from '$lib/components/FrontUrlDialog.svelte';
   import PlanBanner from '$lib/components/PlanBanner.svelte';
   import SharePanel from '$lib/components/SharePanel.svelte';
+  import FeedbackPanel from '$lib/components/FeedbackPanel.svelte';
   import Breadcrumbs from '$lib/components/Breadcrumbs.svelte';
   import Skeleton from '$lib/components/Skeleton.svelte';
   import EmptyState from '$lib/components/EmptyState.svelte';
@@ -26,8 +35,8 @@
   let showPush = $state(false);
   let testOpen = $state(false);
 
-  // Client-side tabs (deep-linkable via #revisions / #share).
-  type GameTab = 'revisions' | 'share';
+  // Client-side tabs (deep-linkable via #revisions / #share / #feedback).
+  type GameTab = 'revisions' | 'share' | 'feedback';
   let activeTab = $state<GameTab>('revisions');
   function selectTab(id: string) {
     activeTab = id as GameTab;
@@ -35,7 +44,7 @@
   }
   onMount(() => {
     const h = location.hash.replace('#', '');
-    if (h === 'revisions' || h === 'share') activeTab = h;
+    if (h === 'revisions' || h === 'share' || h === 'feedback') activeTab = h;
   });
 
   let gameMeta = $state<Game | null>(null);
@@ -43,6 +52,29 @@
   let loading = $state(true);
   let loadError = $state('');
   let notFound = $state(false);
+
+  // Plan awareness (shared billing cache): on a single-revision plan the
+  // revisions tab explains the replace-on-push behavior instead of surprising.
+  let billing = $state<BillingStatus | null>(null);
+  $effect(() => {
+    const s = slug;
+    billing = null;
+    if (!s) return;
+    let cancelled = false;
+    billingStatus(s)
+      .then((r) => {
+        if (!cancelled) billing = r;
+      })
+      .catch(() => {
+        if (!cancelled) billing = null;
+      });
+    return () => {
+      cancelled = true;
+    };
+  });
+  let singleRevisionPlan = $derived(
+    billing?.enabled === true && billing.limits.max_revisions_per_game === 1
+  );
 
   // Compare picker (after / before revision numbers).
   let cmpAfter = $state<number | null>(null);
@@ -156,7 +188,8 @@
       class="mb-6"
       tabs={[
         { id: 'revisions', label: 'Revisions', badge: revisions.length },
-        { id: 'share', label: 'Share' }
+        { id: 'share', label: 'Share' },
+        { id: 'feedback', label: 'Feedback' }
       ]}
       active={activeTab}
       onselect={selectTab}
@@ -170,6 +203,15 @@
           {/if}
         {/snippet}
       </SectionHeader>
+
+      {#if singleRevisionPlan}
+        <p class="mb-4 rounded-md border border-border bg-surface-2/60 px-3 py-2 text-xs text-muted">
+          <span class="font-medium text-text">Free plan</span> — this game keeps only its latest
+          revision: each push replaces the previous one, and share links always serve the
+          latest. <a href={`/w/${slug}/billing`} class="text-accent underline-offset-4 hover:underline">Upgrade</a>
+          to keep full history and compare revisions.
+        </p>
+      {/if}
 
       {#if showPush}
         <div class="mb-6">
@@ -280,8 +322,10 @@
         </div>
         </Card>
       {/if}
-    {:else}
+    {:else if activeTab === 'share'}
       <SharePanel {slug} {game} {revisions} {headNumber} />
+    {:else}
+      <FeedbackPanel {slug} {game} />
     {/if}
   {/if}
 </main>

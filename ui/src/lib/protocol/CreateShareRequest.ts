@@ -29,4 +29,9 @@ expires_in_days: bigint | null,
 /**
  * Concurrent visitor-session cap; omit for the default of 25.
  */
-max_concurrent_sessions: number | null, };
+max_concurrent_sessions: number | null, 
+/**
+ * Enable the visitor feedback overlay (written notes + annotations tied to
+ * the last played round). Omit for the default of `false`.
+ */
+feedback_enabled: boolean | null, };

@@ -25,6 +25,12 @@ const UNLOCK_TTL: Duration = Duration::from_secs(12 * 60 * 60);
 /// `(link, IP)`.
 const RL_MAX_NEW_SESSIONS: u32 = 60;
 const RL_WINDOW: Duration = Duration::from_secs(60);
+/// Feedback-submission rate limit: at most this many entries per window per
+/// `(link, IP)`.
+const FB_MAX_SUBMISSIONS: u32 = 10;
+const FB_WINDOW: Duration = Duration::from_secs(10 * 60);
+/// Lazily purge the last-round map once it grows past this many entries.
+const ROUNDS_PURGE_LEN: usize = 8192;
 
 static RUNTIME: OnceLock<ShareRuntime> = OnceLock::new();
 
@@ -54,6 +60,14 @@ struct RlWindow {
     count: u32,
 }
 
+/// The last wallet round a visitor session played: what a feedback entry is
+/// stamped with when the widget could not read it client-side.
+struct LastRound {
+    mode: String,
+    event_id: i64,
+    seen: Instant,
+}
+
 pub(super) struct ShareRuntime {
     /// share_id -> (visitor session id -> last_seen).
     sessions: DashMap<Uuid, Arc<DashMap<String, Instant>>>,
@@ -61,6 +75,10 @@ pub(super) struct ShareRuntime {
     unlocks: DashMap<String, Unlock>,
     /// (share_id, client ip) -> new-session window.
     ratelimit: DashMap<(Uuid, String), RlWindow>,
+    /// (share_id, raw visitor session id) -> last played round.
+    rounds: DashMap<(Uuid, String), LastRound>,
+    /// (share_id, client ip) -> feedback-submission window.
+    feedback_rl: DashMap<(Uuid, String), RlWindow>,
 }
 
 impl ShareRuntime {
@@ -69,6 +87,8 @@ impl ShareRuntime {
             sessions: DashMap::new(),
             unlocks: DashMap::new(),
             ratelimit: DashMap::new(),
+            rounds: DashMap::new(),
+            feedback_rl: DashMap::new(),
         }
     }
 
@@ -97,15 +117,6 @@ impl ShareRuntime {
         Admit::Created
     }
 
-    /// Drop a visitor session that was just admitted by [`note_session`] but must
-    /// not be counted after all (e.g. the workspace's plan forbids new sessions).
-    /// Idempotent — a no-op when the id is absent.
-    pub(super) fn forget_session(&self, share_id: Uuid, session_id: &str) {
-        if let Some(sessions) = self.sessions.get(&share_id) {
-            sessions.remove(session_id);
-        }
-    }
-
     /// Live (non-stale) visitor-session count for a link, for the dashboard.
     pub(super) fn active_sessions(&self, share_id: Uuid) -> usize {
         match self.sessions.get(&share_id) {
@@ -132,6 +143,49 @@ impl ShareRuntime {
             window.count = 0;
         }
         if window.count >= RL_MAX_NEW_SESSIONS {
+            return false;
+        }
+        window.count += 1;
+        true
+    }
+
+    /// Record the last round a visitor session played (server-side fallback for
+    /// stamping feedback when the widget's fetch/XHR patch saw nothing).
+    pub(super) fn note_round(&self, share_id: Uuid, session_id: &str, mode: &str, event_id: i64) {
+        if self.rounds.len() > ROUNDS_PURGE_LEN {
+            self.rounds.retain(|_, r| r.seen.elapsed() < SESSION_TTL);
+        }
+        self.rounds.insert(
+            (share_id, session_id.to_string()),
+            LastRound {
+                mode: mode.to_string(),
+                event_id,
+                seen: Instant::now(),
+            },
+        );
+    }
+
+    /// The last (mode, event id) a visitor session played, if still fresh.
+    pub(super) fn last_round(&self, share_id: Uuid, session_id: &str) -> Option<(String, i64)> {
+        let entry = self.rounds.get(&(share_id, session_id.to_string()))?;
+        (entry.seen.elapsed() < SESSION_TTL).then(|| (entry.mode.clone(), entry.event_id))
+    }
+
+    /// Fixed-window per-`(link, IP)` limiter for feedback submissions. Returns
+    /// `true` when the attempt is within budget (and records it).
+    pub(super) fn allow_feedback(&self, share_id: Uuid, ip: &str) -> bool {
+        let mut window = self
+            .feedback_rl
+            .entry((share_id, ip.to_string()))
+            .or_insert_with(|| RlWindow {
+                started: Instant::now(),
+                count: 0,
+            });
+        if window.started.elapsed() >= FB_WINDOW {
+            window.started = Instant::now();
+            window.count = 0;
+        }
+        if window.count >= FB_MAX_SUBMISSIONS {
             return false;
         }
         window.count += 1;
@@ -229,6 +283,33 @@ mod tests {
         assert!(rt.is_unlocked(&token, a));
         assert!(!rt.is_unlocked(&token, b));
         assert!(!rt.is_unlocked("not-a-token", a));
+    }
+
+    #[test]
+    fn last_round_tracks_per_session() {
+        let rt = ShareRuntime::new();
+        let a = Uuid::new_v4();
+        assert_eq!(rt.last_round(a, "s1"), None);
+        rt.note_round(a, "s1", "base", 7);
+        rt.note_round(a, "s2", "bonus", 42);
+        assert_eq!(rt.last_round(a, "s1"), Some(("base".to_string(), 7)));
+        assert_eq!(rt.last_round(a, "s2"), Some(("bonus".to_string(), 42)));
+        // A later spin overwrites.
+        rt.note_round(a, "s1", "base", 9);
+        assert_eq!(rt.last_round(a, "s1"), Some(("base".to_string(), 9)));
+        // Another link's sessions are independent.
+        assert_eq!(rt.last_round(Uuid::new_v4(), "s1"), None);
+    }
+
+    #[test]
+    fn feedback_rate_limit_blocks_past_budget() {
+        let rt = ShareRuntime::new();
+        let id = Uuid::new_v4();
+        for _ in 0..FB_MAX_SUBMISSIONS {
+            assert!(rt.allow_feedback(id, "1.2.3.4"));
+        }
+        assert!(!rt.allow_feedback(id, "1.2.3.4"));
+        assert!(rt.allow_feedback(id, "5.6.7.8"));
     }
 
     #[test]

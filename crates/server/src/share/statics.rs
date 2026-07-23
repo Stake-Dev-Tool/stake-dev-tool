@@ -16,43 +16,70 @@ use crate::blobs;
 use super::pages;
 use super::resolve::ResolvedBundle;
 
+/// The tag injected into a feedback-enabled link's `index.html`. The script is
+/// served by [`super::feedback`] on this same host (same-origin, no CSP cross
+/// concern) and 404s if feedback is later toggled off.
+const FEEDBACK_TAG: &[u8] = b"<script src=\"/__share/feedback.js\" defer></script>";
+
 /// Serve the manifest path for a `GET`/`HEAD` request path (already stripped of
 /// its leading slash). Applies the `index.html` fallback and blocks API-ish
-/// prefixes from resolving to the shell.
+/// prefixes from resolving to the shell. `inject_feedback` splices the feedback
+/// widget tag into any served `index.html`.
 pub(super) async fn serve(
     state: &AppState,
     workspace_id: Uuid,
     bundle: &ResolvedBundle,
     request_path: &str,
+    inject_feedback: bool,
 ) -> Response {
     let rel = request_path.trim_start_matches('/');
     let key = if rel.is_empty() { "index.html" } else { rel };
 
     if let Some(entry) = bundle.entries.get(key) {
-        return stream(state, workspace_id, key, &entry.hash, entry.size).await;
+        return stream(
+            state,
+            workspace_id,
+            key,
+            &entry.hash,
+            entry.size,
+            inject_feedback,
+        )
+        .await;
     }
 
     // Unknown API/replay paths must never fall back to the SPA shell.
-    if rel.starts_with("api/") || rel.starts_with("bet/") || rel == "__share/unlock" {
+    if rel.starts_with("api/") || rel.starts_with("bet/") || rel.starts_with("__share/") {
         return pages::api_error(StatusCode::NOT_FOUND, "not_found", "no such endpoint");
     }
 
     // SPA fallback: any other unknown path serves index.html so client routing
     // resolves deep links.
     match bundle.entries.get("index.html") {
-        Some(entry) => stream(state, workspace_id, "index.html", &entry.hash, entry.size).await,
+        Some(entry) => {
+            stream(
+                state,
+                workspace_id,
+                "index.html",
+                &entry.hash,
+                entry.size,
+                inject_feedback,
+            )
+            .await
+        }
         None => pages::no_bundle(),
     }
 }
 
 /// Stream one bundle file from the object store with the right content-type and
-/// cache policy.
+/// cache policy. A feedback-enabled `index.html` is buffered (it is small — the
+/// mutable entry point, never a hashed asset) so the widget tag can be spliced in.
 async fn stream(
     state: &AppState,
     workspace_id: Uuid,
     path: &str,
     hash_hex: &str,
     size: i64,
+    inject_feedback: bool,
 ) -> Response {
     let key = blobs::blob_key(workspace_id, hash_hex);
     let result = match state.store.get(&key).await {
@@ -66,7 +93,24 @@ async fn stream(
         }
     };
 
-    let mut response = Response::new(Body::from_stream(result.into_stream()));
+    let inject = inject_feedback && is_index(path);
+    let (body, size) = if inject {
+        match result.bytes().await {
+            Ok(bytes) => {
+                let html = inject_widget_tag(bytes.to_vec());
+                let len = html.len() as i64;
+                (Body::from(html), len)
+            }
+            Err(e) => {
+                tracing::error!(error = %e, path, "share: failed to buffer index for injection");
+                return pages::internal();
+            }
+        }
+    } else {
+        (Body::from_stream(result.into_stream()), size)
+    };
+
+    let mut response = Response::new(body);
     let headers = response.headers_mut();
     headers.insert(
         header::CONTENT_TYPE,
@@ -87,6 +131,31 @@ async fn stream(
         header::HeaderValue::from_static(cache),
     );
     response.into_response()
+}
+
+/// Splice [`FEEDBACK_TAG`] into an HTML document: before the last `</body>`
+/// (ASCII case-insensitive), else appended at the end — bundles are arbitrary
+/// third-party builds, so never assume a well-formed skeleton.
+fn inject_widget_tag(html: Vec<u8>) -> Vec<u8> {
+    let at = find_last_ci(&html, b"</body>").unwrap_or(html.len());
+    let mut out = Vec::with_capacity(html.len() + FEEDBACK_TAG.len());
+    out.extend_from_slice(&html[..at]);
+    out.extend_from_slice(FEEDBACK_TAG);
+    out.extend_from_slice(&html[at..]);
+    out
+}
+
+/// Byte-wise ASCII case-insensitive search for the LAST occurrence of `needle`.
+fn find_last_ci(haystack: &[u8], needle: &[u8]) -> Option<usize> {
+    if needle.is_empty() || haystack.len() < needle.len() {
+        return None;
+    }
+    (0..=haystack.len() - needle.len()).rev().find(|&i| {
+        haystack[i..i + needle.len()]
+            .iter()
+            .zip(needle)
+            .all(|(a, b)| a.eq_ignore_ascii_case(b))
+    })
 }
 
 fn is_index(path: &str) -> bool {
@@ -126,5 +195,32 @@ fn content_type(path: &str) -> &'static str {
         "webm" => "video/webm",
         "pdf" => "application/pdf",
         _ => "application/octet-stream",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn widget_tag_splices_before_body_close() {
+        let html = b"<html><body><div>game</div></body></html>".to_vec();
+        let out = inject_widget_tag(html);
+        let out = String::from_utf8(out).unwrap();
+        assert!(out.contains("feedback.js"));
+        assert!(out.ends_with("</body></html>"));
+        let tag_at = out.find("<script src=\"/__share/feedback.js\"").unwrap();
+        assert!(tag_at < out.find("</body>").unwrap() + "</body>".len());
+
+        // Case-insensitive close tag.
+        let upper = inject_widget_tag(b"<BODY>x</BODY>".to_vec());
+        let upper = String::from_utf8(upper).unwrap();
+        assert!(upper.ends_with("</BODY>"));
+        assert!(upper.contains("feedback.js"));
+
+        // No </body> at all -> appended.
+        let bare = inject_widget_tag(b"<div>fragment</div>".to_vec());
+        let bare = String::from_utf8(bare).unwrap();
+        assert!(bare.starts_with("<div>fragment</div><script"));
     }
 }

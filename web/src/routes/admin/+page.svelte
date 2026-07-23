@@ -116,7 +116,8 @@
   function planTone(plan: string): 'neutral' | 'accent' | 'info' | 'danger' {
     if (plan === 'unlimited') return 'info';
     if (plan === 'paid') return 'accent';
-    if (plan === 'free') return 'danger';
+    // Free is a normal, usable tier now — not an alarm state.
+    if (plan === 'free') return 'neutral';
     return 'neutral'; // anything unexpected
   }
 

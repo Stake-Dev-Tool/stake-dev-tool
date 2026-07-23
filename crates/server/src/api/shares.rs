@@ -68,6 +68,15 @@ pub fn router() -> Router<AppState> {
             "/workspaces/:slug/games/:game/shares/:id",
             axum::routing::patch(update_share).delete(delete_share),
         )
+        .route("/workspaces/:slug/games/:game/feedback", get(list_feedback))
+        .route(
+            "/workspaces/:slug/games/:game/feedback/:id",
+            axum::routing::delete(delete_feedback),
+        )
+        .route(
+            "/workspaces/:slug/games/:game/feedback/:id/screenshot",
+            get(feedback_screenshot),
+        )
 }
 
 // ---------------------------------------------------------------------------
@@ -139,7 +148,9 @@ async fn front_bundle_check(
 /// `POST .../front-bundles` — commit a front bundle. Validates the manifest
 /// (index.html at root, <= 2000 files, path rules), 409s with the shared
 /// `missing_blobs` shape if any referenced blob is absent, then stores the
-/// `path -> {hash,size}` manifest.
+/// `path -> {hash,size}` manifest. On a history-capped plan (Free keeps 1) the
+/// older bundles are pruned in the same transaction — shares pinned to a pruned
+/// bundle fall back to serving the latest.
 async fn create_front_bundle(
     State(state): State<AppState>,
     user: CurrentUser,
@@ -147,10 +158,9 @@ async fn create_front_bundle(
     Json(req): Json<CreateFrontBundleRequest>,
 ) -> ApiResult<Response> {
     let workspace = authorize_push(&state, &user, &slug).await?;
-    // M7: committing a front bundle is a write — refuse it on a Free (unsubscribed) workspace.
-    billing::write_allowed(&state, workspace.id).await?;
     validate_bundle_manifest(&req.files)?;
     let game_id = game_id_by_slug(&state.pool, workspace.id, &game_slug).await?;
+    let limits = billing::limits_for(&state, workspace.id).await?;
 
     let missing = missing_hashes(&state.pool, workspace.id, &req.files).await?;
     if !missing.is_empty() {
@@ -168,6 +178,7 @@ async fn create_front_bundle(
     }
 
     let manifest = build_manifest(&req.files);
+    let mut tx = state.pool.begin().await?;
     let row: (Uuid, DateTime<Utc>) = sqlx::query_as(
         "INSERT INTO front_bundles (game_id, manifest, created_by) VALUES ($1, $2, $3) \
          RETURNING id, created_at",
@@ -175,8 +186,44 @@ async fn create_front_bundle(
     .bind(game_id)
     .bind(Value::Object(manifest))
     .bind(user.user_id)
-    .fetch_one(&state.pool)
+    .fetch_one(&mut *tx)
     .await?;
+
+    // Plan history cap: keep only the newest `keep` bundles (the Free plan keeps
+    // 1 — every front push replaces the previous build). Pinned shares fall back
+    // to latest, then the workspace's now-orphaned blobs are GC'd in the same tx.
+    let mut freed: Vec<(Vec<u8>, i64)> = Vec::new();
+    if let Some(keep) = limits.max_front_bundles_per_game {
+        let stale: Vec<Uuid> = sqlx::query_scalar(
+            "SELECT id FROM front_bundles WHERE game_id = $1 \
+             ORDER BY created_at DESC, id DESC OFFSET $2",
+        )
+        .bind(game_id)
+        .bind(i64::from(keep))
+        .fetch_all(&mut *tx)
+        .await?;
+        if !stale.is_empty() {
+            sqlx::query(
+                "UPDATE share_links SET front_bundle_id = NULL \
+                 WHERE game_id = $1 AND front_bundle_id = ANY($2)",
+            )
+            .bind(game_id)
+            .bind(&stale)
+            .execute(&mut *tx)
+            .await?;
+            sqlx::query("DELETE FROM front_bundles WHERE id = ANY($1)")
+                .bind(&stale)
+                .execute(&mut *tx)
+                .await?;
+            freed = blobs::gc_orphaned_blobs(&mut tx, workspace.id).await?;
+        }
+    }
+    tx.commit().await?;
+
+    // Post-commit best-effort cleanup of the pruned bundles' store bytes.
+    if !freed.is_empty() {
+        blobs::delete_blob_objects(&state.store, workspace.id, &freed).await;
+    }
 
     // Nudge the workspace's SSE subscribers that a front bundle landed (mirrors
     // the M2 `revision_pushed` hook), so the test view's version picker refreshes.
@@ -461,19 +508,21 @@ async fn create_share(
     Json(req): Json<CreateShareRequest>,
 ) -> ApiResult<Response> {
     let workspace = authorize_admin(&state, &user, &slug).await?;
-    // M7: a new share is a write — refuse it on a Free (unsubscribed) workspace (see plan.rs).
-    billing::write_allowed(&state, workspace.id).await?;
     let game_id = game_id_by_slug(&state.pool, workspace.id, &game_slug).await?;
     let limits = billing::limits_for(&state, workspace.id).await?;
 
-    // Active-link quota (no-op under the frozen UNLIMITED default).
+    // Active-link quota (no-op under the UNLIMITED default). Free allows 1.
     if let Some(max) = limits.max_active_share_links {
-        let active = active_link_count(&state.pool, workspace.id).await?;
+        let active =
+            active_link_count(&state.pool, workspace.id, limits.max_share_link_days).await?;
         if active >= max as i64 {
             return Err(ApiError::new(
                 StatusCode::FORBIDDEN,
                 "upgrade_required",
-                format!("this plan allows at most {max} active share links"),
+                format!(
+                    "this plan allows at most {max} active share link(s) — \
+                     revoke or delete one, or upgrade for more"
+                ),
             ));
         }
     }
@@ -490,7 +539,7 @@ async fn create_share(
         Some(pw) if !pw.is_empty() => Some(passwords::hash_password(pw)?),
         _ => None,
     };
-    let expires_at = req.expires_in_days.map(days_from_now);
+    let expires_at = plan_expiry(req.expires_in_days, &limits)?;
     let max_sessions = clamp_sessions(req.max_concurrent_sessions.unwrap_or(25), &limits);
 
     let id = insert_share(
@@ -591,8 +640,9 @@ async fn try_insert(
     let result = sqlx::query_scalar::<_, Uuid>(
         "INSERT INTO share_links \
            (workspace_id, game_id, slug, revision_number, front_bundle_id, \
-            password_hash, expires_at, max_concurrent_sessions, created_by) \
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) RETURNING id",
+            password_hash, expires_at, max_concurrent_sessions, created_by, \
+            feedback_enabled) \
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10) RETURNING id",
     )
     .bind(workspace_id)
     .bind(game_id)
@@ -603,6 +653,7 @@ async fn try_insert(
     .bind(expires_at)
     .bind(max_sessions)
     .bind(created_by)
+    .bind(req.feedback_enabled.unwrap_or(false))
     .fetch_one(&state.pool)
     .await;
     match result {
@@ -681,7 +732,9 @@ async fn update_share(
             .await?;
     }
     if let Some(expires_in_days) = req.expires_in_days {
-        let expires_at = expires_in_days.map(days_from_now);
+        // Same plan rule as create: on a TTL-capped plan the expiry can never be
+        // cleared (`null`) nor pushed past the cap.
+        let expires_at = plan_expiry(expires_in_days, &limits)?;
         sqlx::query("UPDATE share_links SET expires_at = $2 WHERE id = $1")
             .bind(id)
             .bind(expires_at)
@@ -710,6 +763,13 @@ async fn update_share(
                 .execute(&mut *tx)
                 .await?;
         }
+    }
+    if let Some(enabled) = req.feedback_enabled {
+        sqlx::query("UPDATE share_links SET feedback_enabled = $2 WHERE id = $1")
+            .bind(id)
+            .bind(enabled)
+            .execute(&mut *tx)
+            .await?;
     }
     tx.commit().await?;
 
@@ -740,6 +800,33 @@ fn days_from_now(days: i64) -> DateTime<Utc> {
     Utc::now() + Duration::days(days)
 }
 
+/// Resolve a requested expiry (`None` = "never") against the plan's share-link
+/// TTL cap. Uncapped plans keep the request verbatim. On a capped plan (Free =
+/// 7 days) an omitted/cleared expiry gets the plan maximum — links on that plan
+/// ALWAYS expire — and a request beyond the cap is refused with a clear
+/// `upgrade_required` so scripts and the UI can explain rather than guess.
+fn plan_expiry(
+    requested_days: Option<i64>,
+    limits: &billing::PlanLimits,
+) -> ApiResult<Option<DateTime<Utc>>> {
+    let Some(max_days) = limits.max_share_link_days else {
+        return Ok(requested_days.map(days_from_now));
+    };
+    let max_days = i64::from(max_days);
+    match requested_days {
+        Some(days) if days > max_days => Err(ApiError::new(
+            StatusCode::FORBIDDEN,
+            "upgrade_required",
+            format!(
+                "share links on this plan last at most {max_days} days — \
+                 upgrade to keep a link longer"
+            ),
+        )),
+        Some(days) => Ok(Some(days_from_now(days))),
+        None => Ok(Some(days_from_now(max_days))),
+    }
+}
+
 /// Clamp a requested session cap to `>= 1` and to the plan's per-link cap.
 fn clamp_sessions(requested: i32, limits: &billing::PlanLimits) -> i32 {
     let value = requested.max(1);
@@ -750,13 +837,21 @@ fn clamp_sessions(requested: i32, limits: &billing::PlanLimits) -> i32 {
 }
 
 /// Non-revoked, non-expired links in a workspace (the quota's "active" count).
-async fn active_link_count(pool: &PgPool, workspace_id: Uuid) -> ApiResult<i64> {
+/// On a TTL-capped plan links past their plan lifetime (which the share host no
+/// longer serves) don't count, so a dead grandfathered link can't hold the slot.
+async fn active_link_count(
+    pool: &PgPool,
+    workspace_id: Uuid,
+    ttl_days: Option<u32>,
+) -> ApiResult<i64> {
     Ok(sqlx::query_scalar(
         "SELECT COUNT(*) FROM share_links \
          WHERE workspace_id = $1 AND revoked_at IS NULL \
-           AND (expires_at IS NULL OR expires_at > now())",
+           AND (expires_at IS NULL OR expires_at > now()) \
+           AND ($2::int IS NULL OR created_at + make_interval(days => $2::int) > now())",
     )
     .bind(workspace_id)
+    .bind(ttl_days.map(|d| d as i32))
     .fetch_one(pool)
     .await?)
 }
@@ -807,6 +902,7 @@ fn share_select(where_order: &str) -> String {
                 s.max_concurrent_sessions, s.revoked_at, s.created_at, \
                 s.sessions_count, s.spins_count, \
                 s.total_bet::float8 AS total_bet, s.total_win::float8 AS total_win, \
+                s.feedback_enabled, \
                 w.custom_play_domain AS custom_play_domain \
          FROM share_links s JOIN games g ON g.id = s.game_id \
          JOIN workspaces w ON w.id = s.workspace_id {where_order}"
@@ -829,6 +925,7 @@ struct ShareRow {
     spins_count: i64,
     total_bet: f64,
     total_win: f64,
+    feedback_enabled: bool,
     custom_play_domain: Option<String>,
 }
 
@@ -863,6 +960,7 @@ impl ShareRow {
             spins_count: self.spins_count,
             total_bet: self.total_bet,
             total_win: self.total_win,
+            feedback_enabled: self.feedback_enabled,
         }
     }
 }
@@ -873,4 +971,157 @@ async fn load_share_view(state: &AppState, id: Uuid) -> ApiResult<ShareLinkView>
         .fetch_one(&state.pool)
         .await?;
     Ok(row.into_view(state.config.play_domain.as_deref()))
+}
+
+// ---------------------------------------------------------------------------
+// visitor feedback (read/delete surface; submission is public, in crate::share)
+// ---------------------------------------------------------------------------
+// These wire types live here (not in `protocol`) because `drawing` is a
+// free-form `serde_json::Value` and `protocol` deliberately has no serde_json
+// dependency — the same trade-off as the documents wire types.
+
+/// Newest-first page size for the feedback list.
+const FEEDBACK_LIST_LIMIT: i64 = 200;
+
+/// One feedback entry as listed by `GET .../feedback`. `mode` + `event_id` +
+/// `revision_number` address the book line the visitor was reacting to (the
+/// same `(revision, mode, eventId)` triplet as saved rounds); all three are
+/// null when feedback arrived before the first spin. The screenshot bytes are
+/// NOT inlined — fetch them via `GET .../feedback/:id/screenshot` when
+/// `has_screenshot` is true.
+#[derive(serde::Serialize, sqlx::FromRow)]
+struct FeedbackView {
+    id: Uuid,
+    share_id: Uuid,
+    share_slug: String,
+    session_id: Option<String>,
+    author_name: Option<String>,
+    message: String,
+    drawing: Option<Value>,
+    has_screenshot: bool,
+    mode: Option<String>,
+    event_id: Option<i32>,
+    revision_number: Option<i32>,
+    viewport_w: Option<i32>,
+    viewport_h: Option<i32>,
+    created_at: DateTime<Utc>,
+}
+
+#[derive(serde::Serialize)]
+struct FeedbackListResponse {
+    feedback: Vec<FeedbackView>,
+}
+
+#[derive(serde::Deserialize)]
+struct FeedbackListQuery {
+    /// Optional share-link id filter.
+    share: Option<Uuid>,
+}
+
+const FEEDBACK_SELECT: &str = "SELECT f.id, f.share_link_id AS share_id, s.slug AS share_slug, \
+            f.session_id, f.author_name, f.message, f.drawing, \
+            (f.screenshot IS NOT NULL) AS has_screenshot, \
+            f.mode, f.event_id, f.revision_number, f.viewport_w, f.viewport_h, \
+            f.created_at \
+     FROM share_feedback f JOIN share_links s ON s.id = f.share_link_id";
+
+/// `GET .../feedback[?share=<id>]` — a game's visitor feedback across all of
+/// its share links, newest first (membership; read-only like the shares list).
+async fn list_feedback(
+    State(state): State<AppState>,
+    user: CurrentUser,
+    Path((slug, game_slug)): Path<(String, String)>,
+    axum::extract::Query(query): axum::extract::Query<FeedbackListQuery>,
+) -> ApiResult<Json<FeedbackListResponse>> {
+    let workspace = authorize_read(&state, &user, &slug).await?;
+    let game_id = game_id_by_slug(&state.pool, workspace.id, &game_slug).await?;
+    let feedback = match query.share {
+        Some(share_id) => {
+            sqlx::query_as::<_, FeedbackView>(&format!(
+                "{FEEDBACK_SELECT} WHERE s.game_id = $1 AND f.share_link_id = $3 \
+                 ORDER BY f.created_at DESC LIMIT $2"
+            ))
+            .bind(game_id)
+            .bind(FEEDBACK_LIST_LIMIT)
+            .bind(share_id)
+            .fetch_all(&state.pool)
+            .await?
+        }
+        None => {
+            sqlx::query_as::<_, FeedbackView>(&format!(
+                "{FEEDBACK_SELECT} WHERE s.game_id = $1 \
+                 ORDER BY f.created_at DESC LIMIT $2"
+            ))
+            .bind(game_id)
+            .bind(FEEDBACK_LIST_LIMIT)
+            .fetch_all(&state.pool)
+            .await?
+        }
+    };
+    Ok(Json(FeedbackListResponse { feedback }))
+}
+
+/// `DELETE .../feedback/:id` — owner/admin, like the rest of share management.
+async fn delete_feedback(
+    State(state): State<AppState>,
+    user: CurrentUser,
+    Path((slug, game_slug, id)): Path<(String, String, Uuid)>,
+) -> ApiResult<StatusCode> {
+    let workspace = authorize_admin(&state, &user, &slug).await?;
+    let game_id = game_id_by_slug(&state.pool, workspace.id, &game_slug).await?;
+    let deleted = sqlx::query(
+        "DELETE FROM share_feedback f USING share_links s \
+         WHERE f.id = $1 AND s.id = f.share_link_id AND s.game_id = $2",
+    )
+    .bind(id)
+    .bind(game_id)
+    .execute(&state.pool)
+    .await?;
+    if deleted.rows_affected() == 0 {
+        return Err(ApiError::not_found(
+            "feedback_not_found",
+            "no such feedback entry",
+        ));
+    }
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// `GET .../feedback/:id/screenshot` — the stored capture bytes (membership).
+async fn feedback_screenshot(
+    State(state): State<AppState>,
+    user: CurrentUser,
+    Path((slug, game_slug, id)): Path<(String, String, Uuid)>,
+) -> ApiResult<Response> {
+    let workspace = authorize_read(&state, &user, &slug).await?;
+    let game_id = game_id_by_slug(&state.pool, workspace.id, &game_slug).await?;
+    let row: Option<(Option<Vec<u8>>, Option<String>)> = sqlx::query_as(
+        "SELECT f.screenshot, f.screenshot_mime \
+         FROM share_feedback f JOIN share_links s ON s.id = f.share_link_id \
+         WHERE f.id = $1 AND s.game_id = $2",
+    )
+    .bind(id)
+    .bind(game_id)
+    .fetch_optional(&state.pool)
+    .await?;
+    let Some((Some(bytes), mime)) = row else {
+        return Err(ApiError::not_found(
+            "screenshot_not_found",
+            "this feedback entry has no screenshot",
+        ));
+    };
+    // Only the mimes the public submit endpoint accepts are ever stored.
+    let content_type = match mime.as_deref() {
+        Some("image/png") => "image/png",
+        Some("image/webp") => "image/webp",
+        _ => "image/jpeg",
+    };
+    Ok((
+        [
+            (axum::http::header::CONTENT_TYPE, content_type),
+            // Immutable per entry; private since it sits behind membership.
+            (axum::http::header::CACHE_CONTROL, "private, max-age=86400"),
+        ],
+        bytes,
+    )
+        .into_response())
 }

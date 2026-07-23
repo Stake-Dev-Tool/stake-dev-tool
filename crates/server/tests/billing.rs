@@ -479,7 +479,9 @@ async fn plan_matrix_resolves_expected_limits() {
         return;
     };
 
-    // Fresh workspace, no subscription → Free (all limits 0), writes gated.
+    // Fresh workspace, no subscription → Free: the usable solo tier (1 member,
+    // 5 GiB, 1 share link capped at 7 days, single-revision history, uncapped
+    // play sessions).
     let (mut owner, ws, _t) = bootstrap(&ctx.state).await;
     let (status, body) = owner.get(&format!("/api/workspaces/{ws}/billing")).await;
     assert_eq!(status, StatusCode::OK, "{body}");
@@ -487,10 +489,16 @@ async fn plan_matrix_resolves_expected_limits() {
     assert_eq!(s(&body["plan"]), "free");
     assert_eq!(body["seats"], json!(null));
     assert_eq!(body["status"], json!(null));
-    assert_eq!(body["limits"]["max_members"], json!(0));
-    assert_eq!(body["limits"]["max_storage_bytes"], json!(0));
-    assert_eq!(body["limits"]["max_active_share_links"], json!(0));
-    assert_eq!(body["limits"]["max_concurrent_share_sessions"], json!(0));
+    assert_eq!(body["limits"]["max_members"], json!(1));
+    assert_eq!(
+        body["limits"]["max_storage_bytes"],
+        json!(5u64 * 1024 * 1024 * 1024)
+    );
+    assert_eq!(body["limits"]["max_active_share_links"], json!(1));
+    assert_eq!(body["limits"]["max_concurrent_share_sessions"], json!(null));
+    assert_eq!(body["limits"]["max_revisions_per_game"], json!(1));
+    assert_eq!(body["limits"]["max_front_bundles_per_game"], json!(1));
+    assert_eq!(body["limits"]["max_share_link_days"], json!(7));
     // No subscription → no period end.
     assert_eq!(body["current_period_end"], json!(null));
 
@@ -566,41 +574,209 @@ async fn plan_matrix_resolves_expected_limits() {
     assert_eq!(s(&body["status"]), "past_due");
 }
 
-#[tokio::test]
-async fn free_workspace_blocks_writes_with_upgrade_required() {
-    let Some(ctx) = setup(Some(stripe_config())).await else {
-        return;
-    };
-    // A fresh workspace on a billing-enabled instance is Free (no subscription).
-    let (mut owner, ws, token) = bootstrap(&ctx.state).await;
-
-    let (_, body) = owner.get(&format!("/api/workspaces/{ws}/billing")).await;
-    assert_eq!(s(&body["plan"]), "free", "{body}");
-
-    // A blob PUT (a write) is refused with 403 upgrade_required.
-    let bytes = b"hello world";
-    let hash = sha_hex(bytes);
-    let (status, err) = owner
+/// Uploads a blob and commits it as the game's next revision (Free-flow helper).
+async fn push_revision(
+    client: &mut Client,
+    ws: &str,
+    game: &str,
+    token: &str,
+    content: &[u8],
+    message: &str,
+) -> (StatusCode, Value) {
+    let hash = sha_hex(content);
+    let (status, _) = client
         .raw(
             Method::PUT,
-            &format!("/api/workspaces/{ws}/games/demo/blobs/{hash}"),
+            &format!("/api/workspaces/{ws}/games/{game}/blobs/{hash}"),
             Some("application/octet-stream"),
-            bytes.to_vec(),
-            Some(&token),
+            content.to_vec(),
+            Some(token),
             &[],
         )
         .await;
-    assert_eq!(
-        status,
-        StatusCode::FORBIDDEN,
-        "{:?}",
-        String::from_utf8_lossy(&err)
+    assert!(
+        status == StatusCode::CREATED || status == StatusCode::OK,
+        "blob upload failed: {status}"
     );
-    assert_eq!(s(&parse_json(&err)["error"]["code"]), "upgrade_required");
+    let manifest = json!([{ "path": "index.json", "hash": hash, "size": content.len() }]);
+    client
+        .send(
+            Method::POST,
+            &format!("/api/workspaces/{ws}/games/{game}/revisions"),
+            Some(json!({ "message": message, "files": manifest })),
+            Some(token),
+        )
+        .await
+}
+
+#[tokio::test]
+async fn free_workspace_pushes_and_keeps_a_single_revision() {
+    let Some(ctx) = setup(Some(stripe_config())).await else {
+        return;
+    };
+    // A fresh workspace on a billing-enabled instance is Free — and can push.
+    let (mut owner, ws, token) = bootstrap(&ctx.state).await;
+
+    let (status, body) =
+        push_revision(&mut owner, &ws, "demo", &token, br#"{"modes":[1]}"#, "one").await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    assert_eq!(body["number"], json!(1));
+
+    // Pin a share link to revision 1 (also proves Free can create shares).
+    let (status, share) = owner
+        .post(
+            &format!("/api/workspaces/{ws}/games/demo/shares"),
+            json!({ "revision_number": 1 }),
+        )
+        .await;
+    assert_eq!(status, StatusCode::CREATED, "{share}");
+    assert_eq!(share["revision_number"], json!(1));
+
+    // The second push replaces revision 1: only revision 2 survives, and the
+    // pinned share falls back to tracking latest instead of breaking.
+    let (status, body) =
+        push_revision(&mut owner, &ws, "demo", &token, br#"{"modes":[2]}"#, "two").await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    assert_eq!(body["number"], json!(2));
+
+    let (status, list) = owner
+        .get(&format!("/api/workspaces/{ws}/games/demo/revisions"))
+        .await;
+    assert_eq!(status, StatusCode::OK, "{list}");
+    let numbers: Vec<i64> = list["revisions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|r| r["number"].as_i64().unwrap())
+        .collect();
+    assert_eq!(numbers, vec![2], "free keeps only the latest revision");
+
+    let (_, shares) = owner
+        .get(&format!("/api/workspaces/{ws}/games/demo/shares"))
+        .await;
+    assert_eq!(
+        shares["shares"][0]["revision_number"],
+        json!(null),
+        "a share pinned to pruned history now tracks latest: {shares}"
+    );
+}
+
+#[tokio::test]
+async fn free_share_links_are_capped_at_one_and_seven_days() {
+    let Some(ctx) = setup(Some(stripe_config())).await else {
+        return;
+    };
+    let (mut owner, ws, token) = bootstrap(&ctx.state).await;
+    // A share needs the game row to exist — push one revision first.
+    let (status, _) = push_revision(&mut owner, &ws, "demo", &token, br#"{"modes":[]}"#, "m").await;
+    assert_eq!(status, StatusCode::CREATED);
+
+    // Asking for more than the 7-day Free cap is refused with a clear error.
+    let (status, body) = owner
+        .post(
+            &format!("/api/workspaces/{ws}/games/demo/shares"),
+            json!({ "expires_in_days": 30 }),
+        )
+        .await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
+    assert_eq!(s(&body["error"]["code"]), "upgrade_required");
+
+    // Omitting the expiry gets the plan default: 7 days from now, never "never".
+    let (status, share) = owner
+        .post(
+            &format!("/api/workspaces/{ws}/games/demo/shares"),
+            json!({}),
+        )
+        .await;
+    assert_eq!(status, StatusCode::CREATED, "{share}");
+    let expires: DateTime<Utc> = s(&share["expires_at"]).parse().unwrap();
+    let days = (expires - Utc::now()).num_hours();
+    assert!((6 * 24..=7 * 24).contains(&days), "expiry ~7 days: {days}h");
+
+    // The single Free share-link slot is now taken.
+    let (status, body) = owner
+        .post(
+            &format!("/api/workspaces/{ws}/games/demo/shares"),
+            json!({}),
+        )
+        .await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
+    assert_eq!(s(&body["error"]["code"]), "upgrade_required");
+}
+
+#[tokio::test]
+async fn free_front_pushes_keep_a_single_bundle() {
+    let Some(ctx) = setup(Some(stripe_config())).await else {
+        return;
+    };
+    let (mut owner, ws, token) = bootstrap(&ctx.state).await;
+    // The game row must exist before a bundle can commit.
+    let (status, _) = push_revision(&mut owner, &ws, "demo", &token, br#"{"modes":[]}"#, "m").await;
+    assert_eq!(status, StatusCode::CREATED);
+
+    for content in [b"<html>v1</html>".as_slice(), b"<html>v2</html>".as_slice()] {
+        let hash = sha_hex(content);
+        let (status, _) = owner
+            .raw(
+                Method::PUT,
+                &format!("/api/workspaces/{ws}/games/demo/blobs/{hash}"),
+                Some("application/octet-stream"),
+                content.to_vec(),
+                Some(&token),
+                &[],
+            )
+            .await;
+        assert!(status == StatusCode::CREATED || status == StatusCode::OK);
+        let (status, body) = owner
+            .send(
+                Method::POST,
+                &format!("/api/workspaces/{ws}/games/demo/front-bundles"),
+                Some(json!({
+                    "files": [{ "path": "index.html", "hash": hash, "size": content.len() }]
+                })),
+                Some(&token),
+            )
+            .await;
+        assert_eq!(status, StatusCode::CREATED, "{body}");
+    }
+
+    // Only the newest bundle survives on Free.
+    let (status, list) = owner
+        .get(&format!("/api/workspaces/{ws}/games/demo/front-bundles"))
+        .await;
+    assert_eq!(status, StatusCode::OK, "{list}");
+    assert_eq!(
+        list["bundles"].as_array().map(Vec::len),
+        Some(1),
+        "free keeps only the latest front bundle: {list}"
+    );
+}
+
+#[tokio::test]
+async fn free_member_cap_blocks_invite_accept() {
+    let Some(ctx) = setup(Some(stripe_config())).await else {
+        return;
+    };
+    // Free caps members at 1 — the owner already fills the workspace.
+    let (mut owner, ws, _t) = bootstrap(&ctx.state).await;
+    let (_, invite) = owner
+        .post(
+            &format!("/api/workspaces/{ws}/invites"),
+            json!({ "role": "member" }),
+        )
+        .await;
+    let token = s(&invite["token"]).to_string();
+
+    let mut bob = register(&ctx.state, &unique_email(), "Bob").await;
+    let (status, body) = bob
+        .post(&format!("/api/invites/{token}/accept"), json!({}))
+        .await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
+    assert_eq!(s(&body["error"]["code"]), "upgrade_required");
 }
 
 // ===========================================================================
-// Workspace creation is uncapped (every fresh workspace is read-only Free)
+// Workspace creation is uncapped (every fresh workspace starts on Free)
 // ===========================================================================
 
 #[tokio::test]
@@ -611,7 +787,7 @@ async fn free_user_can_create_multiple_workspaces() {
     let mut owner = register(&ctx.state, &unique_email(), "Owner").await;
 
     // A user with zero subscriptions can create several workspaces in a row;
-    // each one resolves to the read-only Free state, so there is nothing to cap.
+    // each one resolves to the Free solo tier, so there is nothing to cap.
     for n in 0..3 {
         let (status, body) = owner
             .post(
@@ -714,7 +890,7 @@ async fn storage_cap_blocks_commit_over_quota() {
     };
     let (mut owner, ws, token) = bootstrap(&ctx.state).await;
     let ws_id = workspace_id(&ctx.state, &ws).await;
-    // A 1-seat paid plan (10 GiB cap) so writes are allowed — Free blocks writes outright.
+    // A 1-seat paid plan pins the storage cap at exactly 10 GiB.
     insert_subscription(
         &ctx.state,
         ws_id,
@@ -764,7 +940,7 @@ async fn storage_cap_blocks_upload_via_content_length() {
     };
     let (mut owner, ws, token) = bootstrap(&ctx.state).await;
     let ws_id = workspace_id(&ctx.state, &ws).await;
-    // A 1-seat paid plan (10 GiB cap) so writes are allowed — Free blocks writes outright.
+    // A 1-seat paid plan pins the storage cap at exactly 10 GiB.
     insert_subscription(
         &ctx.state,
         ws_id,
@@ -811,7 +987,7 @@ async fn storage_cap_blocks_upload_without_content_length() {
     };
     let (mut owner, ws, token) = bootstrap(&ctx.state).await;
     let ws_id = workspace_id(&ctx.state, &ws).await;
-    // A 1-seat paid plan (10 GiB cap) so writes are allowed — Free blocks writes outright.
+    // A 1-seat paid plan pins the storage cap at exactly 10 GiB.
     insert_subscription(
         &ctx.state,
         ws_id,
@@ -870,7 +1046,7 @@ async fn usage_endpoint_counts_members_and_storage() {
     };
     let (mut owner, ws, token) = bootstrap(&ctx.state).await;
     let ws_id = workspace_id(&ctx.state, &ws).await;
-    // An active plan so the blob PUTs are allowed — the Free state blocks writes.
+    // A 1-seat paid plan; the usage counters read the same on any plan.
     insert_subscription(
         &ctx.state,
         ws_id,
@@ -1150,7 +1326,7 @@ async fn webhook_storage_only_adds_storage_without_granting_a_plan() {
     let Some(ctx) = setup(Some(stripe_config())).await else {
         return;
     };
-    let (mut owner, ws, _t) = bootstrap(&ctx.state).await; // fresh → Free (0 GiB)
+    let (mut owner, ws, _t) = bootstrap(&ctx.state).await; // fresh → Free (5 GiB)
     let ws_id = workspace_id(&ctx.state, &ws).await;
 
     // A storage-only subscription: two units (+20 GiB), no plan price.
@@ -1169,15 +1345,14 @@ async fn webhook_storage_only_adds_storage_without_granting_a_plan() {
     assert_eq!(status, StatusCode::OK);
 
     // The plan stays Free (storage_only never grants a plan), and seats is null.
-    // The Free 0 GiB cap is lifted to 0 + 20 = 20 GiB and the add-on is surfaced
-    // (though writes stay blocked while Free).
+    // The Free 5 GiB cap is lifted to 5 + 20 = 25 GiB and the add-on is surfaced.
     let (_, view) = owner.get(&format!("/api/workspaces/{ws}/billing")).await;
     assert_eq!(s(&view["plan"]), "free", "{view}");
     assert_eq!(view["seats"], json!(null));
     assert_eq!(view["extra_storage_gib"], json!(20));
     assert_eq!(
         view["limits"]["max_storage_bytes"],
-        json!(20u64 * 1024 * 1024 * 1024)
+        json!(25u64 * 1024 * 1024 * 1024)
     );
 }
 
@@ -1373,6 +1548,14 @@ async fn webhook_combined_seat_and_storage_upserts_plan_and_storage_in_one_event
 /// targets), whose price is `price_seat_m` from [`stripe_config`].
 const MOCK_SEAT_ITEM_ID: &str = "si_mock_seat";
 
+/// Serializes the tests that point `STRIPE_API_BASE` at a local mock (the seat
+/// change and the portal happy paths). They run as parallel threads of one test
+/// binary, so an unguarded set/remove pair races: one test's `remove_var` can
+/// land between the other's `set_var` and its HTTP call. Async-aware because the
+/// guard must span the `.await`ed request; tokio's mutex does not poison, so a
+/// panicked holder never cascades into the other test.
+static STRIPE_ENV_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
 /// Captured request body from the mock's subscription-update call.
 type Captured = std::sync::Arc<std::sync::Mutex<Option<String>>>;
 
@@ -1562,8 +1745,10 @@ async fn seats_update_happy_path_prorates_and_updates_db() {
 
     // Point the Stripe client at the local mock for the duration of the call.
     let (base, captured) = spawn_stripe_mock().await;
-    // SAFETY: this is the only test that issues outbound Stripe HTTP; on Windows
-    // (the gate platform) std env access is lock-protected.
+    // Hold the env lock across set → call → remove so the portal test's identical
+    // dance can never interleave. SAFETY: env access itself is additionally
+    // lock-protected by std on Windows (the gate platform).
+    let env_guard = STRIPE_ENV_LOCK.lock().await;
     unsafe {
         std::env::set_var("STRIPE_API_BASE", &base);
     }
@@ -1578,6 +1763,7 @@ async fn seats_update_happy_path_prorates_and_updates_db() {
     unsafe {
         std::env::remove_var("STRIPE_API_BASE");
     }
+    drop(env_guard);
 
     assert_eq!(status, StatusCode::OK, "{body}");
     // The fresh status reflects the new seat count and its scaled limits.
@@ -1659,8 +1845,10 @@ async fn portal_happy_path_returns_url_with_customer_and_config() {
     insert_subscription_with_customer(&ctx.state, ws_id, "cus_portal_123").await;
 
     let (base, captured) = spawn_portal_mock().await;
-    // SAFETY: single-threaded env mutation for the duration of this call; on
-    // Windows (the gate platform) std env access is lock-protected.
+    // Hold the env lock across set → call → remove so the seat-change test's
+    // identical dance can never interleave. SAFETY: env access itself is
+    // additionally lock-protected by std on Windows (the gate platform).
+    let env_guard = STRIPE_ENV_LOCK.lock().await;
     unsafe {
         std::env::set_var("STRIPE_API_BASE", &base);
     }
@@ -1672,6 +1860,7 @@ async fn portal_happy_path_returns_url_with_customer_and_config() {
     unsafe {
         std::env::remove_var("STRIPE_API_BASE");
     }
+    drop(env_guard);
 
     assert_eq!(status, StatusCode::OK, "{body}");
     assert_eq!(s(&body["url"]), MOCK_PORTAL_URL);

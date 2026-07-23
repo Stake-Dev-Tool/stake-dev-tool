@@ -17,7 +17,11 @@ revision_number: number | null,
 /**
  * `null` = serves the latest bundle.
  */
-front_bundle_id: string | null, password_protected: boolean, expires_at: string | null, max_concurrent_sessions: number, revoked_at: string | null, created_at: string, sessions_count: bigint, spins_count: bigint, total_bet: number, total_win: number, 
+front_bundle_id: string | null, password_protected: boolean, expires_at: string | null, max_concurrent_sessions: number, 
+/**
+ * Whether the visitor feedback overlay is injected into the served front.
+ */
+feedback_enabled: boolean, revoked_at: string | null, created_at: string, sessions_count: bigint, spins_count: bigint, total_bet: number, total_win: number, 
 /**
  * `total_win / total_bet` when `total_bet > 0`, else `null`.
  */

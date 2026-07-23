@@ -304,12 +304,6 @@ async fn billing_status_payload(
     let resolved = plan::plan_for(state, workspace_id).await?;
     let subscription = plan::load_subscription(&state.pool, workspace_id).await?;
 
-    let usage = BillingUsage {
-        members: plan::member_count(&state.pool, workspace_id).await?,
-        storage_bytes: plan::storage_bytes_cached(&state.pool, workspace_id).await?,
-        active_share_links: plan::active_share_links(&state.pool, workspace_id).await?,
-    };
-
     // The storage add-on (if any) is reflected both as a standalone GiB figure and
     // folded into the effective storage cap — matching what enforcement sees.
     let extra_units = subscription
@@ -321,6 +315,18 @@ async fn billing_status_payload(
         resolved.limits().with_extra_storage_units(extra_units)
     } else {
         resolved.limits()
+    };
+
+    let usage = BillingUsage {
+        members: plan::member_count(&state.pool, workspace_id).await?,
+        storage_bytes: plan::storage_bytes_cached(&state.pool, workspace_id).await?,
+        // TTL-aware so a link the share host no longer serves reads as inactive.
+        active_share_links: plan::active_share_links(
+            &state.pool,
+            workspace_id,
+            limits.max_share_link_days,
+        )
+        .await?,
     };
 
     let (status, interval, current_period_end) = match &subscription {
@@ -358,5 +364,8 @@ fn billing_limits(limits: crate::billing::PlanLimits) -> BillingLimits {
         max_storage_bytes: limits.max_storage_bytes,
         max_active_share_links: limits.max_active_share_links,
         max_concurrent_share_sessions: limits.max_concurrent_share_sessions,
+        max_revisions_per_game: limits.max_revisions_per_game,
+        max_front_bundles_per_game: limits.max_front_bundles_per_game,
+        max_share_link_days: limits.max_share_link_days,
     }
 }

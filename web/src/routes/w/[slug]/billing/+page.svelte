@@ -14,6 +14,7 @@
     clampSeats,
     seatEntitlements,
     priceSummary,
+    FREE_PLAN,
     PER_SEAT,
     SEATS_MIN,
     SEATS_MAX,
@@ -394,11 +395,15 @@
 
   {#if activating}
     <div class="mb-8">
-      <h1 class="text-2xl font-semibold tracking-tight">Activate {wsName || workspaceName(slug)}</h1>
+      <h1 class="text-2xl font-semibold tracking-tight">
+        {wsName || workspaceName(slug)} is ready
+      </h1>
       <p class="mt-2 max-w-prose text-sm leading-relaxed text-muted">
-        Subscribe to start pushing math, inviting your team and sharing games.
+        You're on the Free plan — create games, push math and share them right away, no card
+        required. Upgrade whenever you need teammates, full revision history, or share links
+        that outlive {FREE_PLAN.shareLinkDays} days.
       </p>
-      <Button variant="outline" size="sm" class="mt-4" onclick={payLater}>Pay later</Button>
+      <Button size="sm" class="mt-4" onclick={payLater}>Start building →</Button>
     </div>
   {:else}
     <h1 class="mb-8 text-2xl font-semibold tracking-tight">Billing</h1>
@@ -435,7 +440,7 @@
               {statusLabel(status.status)}
             </Badge>
           {:else if isFree}
-            <Badge tone="danger">No plan</Badge>
+            <Badge tone="accent">Active</Badge>
           {/if}
           {#if status.interval}
             <span class="text-sm text-muted">· {intervalLabel(status.interval)}</span>
@@ -458,36 +463,9 @@
     <!-- Usage -->
     <section class="mb-8">
       <h2 class="mb-3 text-sm font-semibold uppercase tracking-wide text-faint">Usage</h2>
-      {#if isFree}
-        <!-- Free: no caps to show (all limits are 0). Report plain facts, then a
-             single line explaining that everything is locked until subscribed. -->
-        <Card class="flex flex-col gap-4 p-6">
-          <ul class="flex flex-col gap-2 text-sm">
-            <li class="flex items-baseline justify-between gap-3">
-              <span class="text-muted">Members</span>
-              <span class="font-mono-tab text-text">{plural(status.usage.members, 'member')}</span>
-            </li>
-            <li class="flex items-baseline justify-between gap-3">
-              <span class="text-muted">Storage</span>
-              <span class="font-mono-tab text-text">{humanSize(status.usage.storage_bytes)} used</span>
-            </li>
-            <li class="flex items-baseline justify-between gap-3">
-              <span class="text-muted">Share links</span>
-              <span class="font-mono-tab text-text">
-                {plural(status.usage.active_share_links, 'share link')}
-                <span class="text-faint">(inactive)</span>
-              </span>
-            </li>
-          </ul>
-          <p class="rounded-md border border-danger/30 bg-danger/10 px-3 py-2 text-sm text-danger">
-            No active plan — pushes, invites and new share links are locked, and existing share
-            links stop serving new play sessions until you subscribe. Your content stays readable.
-          </p>
-        </Card>
-      {:else}
-        <!-- Active plan: meters against the seat-derived caps. -->
-        <Card class="flex flex-col gap-5 p-6">
-          {#each meters as m (m.label)}
+      <Card class="flex flex-col gap-5 p-6">
+        {#each meters as m (m.label)}
+          {#if !(isFree && m.label === 'Members')}
             {@const mt = meter(m.usage, m.limit)}
             <div>
               <div class="mb-1.5 flex items-baseline justify-between gap-3 text-sm">
@@ -506,9 +484,37 @@
                 {/if}
               </div>
             </div>
-          {/each}
-        </Card>
-      {/if}
+          {/if}
+        {/each}
+        {#if isFree}
+          <!-- The Free rules, stated as plain facts rather than alarming meters:
+               a fresh solo workspace is at "capacity" on members by design. -->
+          <ul class="flex flex-col gap-2 border-t border-border/60 pt-4 text-sm">
+            <li class="flex items-baseline justify-between gap-3">
+              <span class="text-muted">Members</span>
+              <span class="text-text">
+                Just you <span class="text-faint">— seats add teammates</span>
+              </span>
+            </li>
+            <li class="flex items-baseline justify-between gap-3">
+              <span class="text-muted">Revisions per game</span>
+              <span class="text-text">
+                Latest only <span class="text-faint">— each push replaces the previous</span>
+              </span>
+            </li>
+            <li class="flex items-baseline justify-between gap-3">
+              <span class="text-muted">Share link lifetime</span>
+              <span class="text-text">
+                Up to {status.limits.max_share_link_days ?? FREE_PLAN.shareLinkDays} days
+              </span>
+            </li>
+            <li class="flex items-baseline justify-between gap-3">
+              <span class="text-muted">Play sessions</span>
+              <span class="text-text">Unlimited</span>
+            </li>
+          </ul>
+        {/if}
+      </Card>
     </section>
 
     {#if isPaid}
@@ -664,9 +670,9 @@
         </p>
       </section>
     {:else}
-      <!-- Subscribe: seats + interval + optional storage, all in one checkout. -->
+      <!-- Upgrade: seats + interval + optional storage, all in one checkout. -->
       <section>
-        <h2 class="mb-3 text-sm font-semibold uppercase tracking-wide text-faint">Subscribe</h2>
+        <h2 class="mb-3 text-sm font-semibold uppercase tracking-wide text-faint">Upgrade</h2>
 
         {#if !isOwner}
           <p class="mb-4 rounded-md border border-border bg-surface-2/60 px-3 py-2 text-sm text-muted">
@@ -680,11 +686,28 @@
         {/if}
 
         <Card class="flex flex-col gap-6 p-6">
+          {#if isFree}
+            <!-- What a seat unlocks beyond the Free tier, before the pricing. -->
+            <div>
+              <div class="text-sm font-medium text-text">What upgrading unlocks</div>
+              <ul class="mt-2 grid gap-x-6 gap-y-1.5 text-sm text-muted sm:grid-cols-2">
+                <li>✓ Full revision history — nothing gets replaced</li>
+                <li>✓ Share links that never expire</li>
+                <li>✓ {PER_SEAT.shareLinks} active share links per seat</li>
+                <li>✓ Teammates — 1 member per seat</li>
+                <li>✓ {PER_SEAT.storageGib} GiB storage per seat</li>
+                <li>✓ Storage add-ons when you need more</li>
+              </ul>
+            </div>
+            <hr class="border-border" />
+          {/if}
+
           <div>
             <div class="text-base font-semibold">Seat plan</div>
             <p class="mt-1 max-w-prose text-sm text-muted">
               €{SEAT_FIRST_EUR}/mo for the first seat, €{SEAT_ADDITIONAL_EUR}/mo for each additional
-              seat. Scale up or down anytime.
+              seat. Scale up or down anytime — your Free workspace and everything in it carries
+              over.
             </p>
           </div>
 

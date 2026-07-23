@@ -9,6 +9,8 @@
 //!
 //! ## Request surface (per resolved, valid link)
 //! - `POST /__share/unlock` — password interstitial submit.
+//! - `POST /__share/feedback` + `GET /__share/feedback.js` — visitor feedback
+//!   overlay, only when the link has it enabled ([`feedback`]).
 //! - `/api/rgs/*` — visitor wallet + RGS traffic → the tenant LGS ([`rgs`]).
 //! - `/bet/replay/*` — round replay → the tenant LGS ([`rgs`]).
 //! - everything else — front-bundle static files with an `index.html` SPA
@@ -18,6 +20,7 @@
 //! branded [`pages`] response — never a redirect back to the app.
 
 pub mod custom;
+mod feedback;
 mod pages;
 mod resolve;
 mod rgs;
@@ -31,7 +34,7 @@ use std::collections::HashSet;
 use axum::extract::{Request, State};
 use axum::http::{HeaderMap, Method, StatusCode, header};
 use axum::response::{IntoResponse, Response};
-use axum::routing::{any, post};
+use axum::routing::{any, get, post};
 use axum::{Extension, Form, Router};
 use axum_extra::extract::cookie::CookieJar;
 use serde::Deserialize;
@@ -65,6 +68,8 @@ pub struct ShareWorkspace(pub Uuid);
 pub fn router() -> Router<AppState> {
     Router::new()
         .route("/__share/unlock", post(unlock))
+        .route("/__share/feedback", post(feedback_entry))
+        .route("/__share/feedback.js", get(feedback_widget_entry))
         .route("/api/rgs/*rest", any(rgs_entry))
         .route("/bet/replay/*rest", any(replay_entry))
         .fallback(static_entry)
@@ -119,7 +124,7 @@ async fn rgs_entry(
     ClientIp(ip): ClientIp,
     req: Request,
 ) -> Response {
-    let link = match resolve::resolve(&state.pool, &label, workspace_scope(scope)).await {
+    let link = match resolve::resolve(&state, &label, workspace_scope(scope)).await {
         Ok(link) => link,
         Err(page) => return page,
     };
@@ -135,7 +140,7 @@ async fn replay_entry(
     State(state): State<AppState>,
     req: Request,
 ) -> Response {
-    let link = match resolve::resolve(&state.pool, &label, workspace_scope(scope)).await {
+    let link = match resolve::resolve(&state, &label, workspace_scope(scope)).await {
         Ok(link) => link,
         Err(page) => return page,
     };
@@ -151,7 +156,7 @@ async fn static_entry(
     State(state): State<AppState>,
     req: Request,
 ) -> Response {
-    let link = match resolve::resolve(&state.pool, &label, workspace_scope(scope)).await {
+    let link = match resolve::resolve(&state, &label, workspace_scope(scope)).await {
         Ok(link) => link,
         Err(page) => return page,
     };
@@ -170,7 +175,57 @@ async fn static_entry(
         Ok(bundle) => bundle,
         Err(page) => return page,
     };
-    statics::serve(&state, link.workspace_id, &bundle, req.uri().path()).await
+    statics::serve(
+        &state,
+        link.workspace_id,
+        &bundle,
+        req.uri().path(),
+        link.feedback_enabled,
+    )
+    .await
+}
+
+/// `POST /__share/feedback` — a visitor feedback submission ([`feedback`]).
+async fn feedback_entry(
+    Extension(ShareHost(label)): Extension<ShareHost>,
+    scope: Option<Extension<ShareWorkspace>>,
+    State(state): State<AppState>,
+    ClientIp(ip): ClientIp,
+    req: Request,
+) -> Response {
+    let link = match resolve::resolve(&state, &label, workspace_scope(scope)).await {
+        Ok(link) => link,
+        Err(page) => return page,
+    };
+    if let Some(locked) = locked_api(&link, req.headers()) {
+        return locked;
+    }
+    // Buffer the body here (extractor-free handler, same idiom as the RGS
+    // dispatch); axum's default 2 MiB body limit still applies upstream.
+    let body = match axum::body::to_bytes(req.into_body(), 2 << 20).await {
+        Ok(bytes) => bytes,
+        Err(_) => {
+            return pages::api_error(
+                StatusCode::BAD_REQUEST,
+                "body_read_error",
+                "could not read the request body",
+            );
+        }
+    };
+    feedback::submit(&state, &link, &ip, body).await
+}
+
+/// `GET /__share/feedback.js` — the injected overlay widget ([`feedback`]).
+async fn feedback_widget_entry(
+    Extension(ShareHost(label)): Extension<ShareHost>,
+    scope: Option<Extension<ShareWorkspace>>,
+    State(state): State<AppState>,
+) -> Response {
+    let link = match resolve::resolve(&state, &label, workspace_scope(scope)).await {
+        Ok(link) => link,
+        Err(page) => return page,
+    };
+    feedback::widget(&link)
 }
 
 #[derive(Deserialize)]
@@ -184,7 +239,7 @@ async fn unlock(
     State(state): State<AppState>,
     Form(form): Form<UnlockForm>,
 ) -> Response {
-    let link = match resolve::resolve(&state.pool, &label, workspace_scope(scope)).await {
+    let link = match resolve::resolve(&state, &label, workspace_scope(scope)).await {
         Ok(link) => link,
         Err(page) => return page,
     };

@@ -3,7 +3,8 @@
    * PlanBanner — the per-workspace billing nudge. Self-fetches (once per slug per
    * session, via the shared `billingStatus` cache) and renders:
    *   • nothing            when billing is disabled (self-host) or unknown;
-   *   • a prominent banner when the workspace has no active plan (Free — writes blocked);
+   *   • a calm info chip   on the Free plan (fully usable — links to billing
+   *     where the solo limits are spelled out);
    *   • a warning banner   when the subscription is past_due (grace period);
    *   • a tiny plan chip   on a healthy Paid plan (no banner).
    *
@@ -41,17 +42,18 @@
 {#if st && st.enabled}
   {#if st.plan === 'free'}
     <div
-      class="mb-6 flex flex-wrap items-center justify-between gap-x-4 gap-y-2 rounded-lg border border-danger/40 bg-danger/10 px-4 py-3 text-sm"
+      class="mb-6 flex flex-wrap items-center justify-between gap-x-4 gap-y-2 rounded-lg border border-border bg-surface-2/60 px-4 py-3 text-sm"
     >
-      <span class="text-danger">
-        <span class="font-semibold">No active plan</span>
-        — pushes, invites and new share links require a subscription.
+      <span class="text-muted">
+        <span class="font-semibold text-text">Free plan</span>
+        — every push replaces the previous revision · 1 share link, up to
+        {st.limits.max_share_link_days ?? 7} days · solo.
       </span>
       <a
         href={billingHref}
-        class="font-semibold text-danger underline-offset-4 hover:underline"
+        class="font-medium text-accent underline-offset-4 hover:underline"
       >
-        Choose a plan →
+        Upgrade for history &amp; team →
       </a>
     </div>
   {:else if st.status === 'past_due'}

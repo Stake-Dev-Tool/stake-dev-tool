@@ -6,6 +6,7 @@
     api,
     ApiError,
     isValidPlayDomain,
+    type BillingStatus,
     type Role,
     type InviteRole,
     type Member,
@@ -15,7 +16,7 @@
     type Game
   } from '$lib/api';
   import { session } from '$lib/session.svelte';
-  import { invalidateBillingStatus } from '$lib/billing';
+  import { billingStatus, invalidateBillingStatus } from '$lib/billing';
   import { toast } from '$lib/toasts.svelte';
   import { roleTone, formatDate, formatExpiry, errorText } from '$lib/format';
   import Button from '$lib/components/Button.svelte';
@@ -25,6 +26,7 @@
   import CopyField from '$lib/components/CopyField.svelte';
   import MathPushPanel from '$lib/components/MathPushPanel.svelte';
   import PlanBanner from '$lib/components/PlanBanner.svelte';
+  import UpgradeNotice from '$lib/components/UpgradeNotice.svelte';
   import Breadcrumbs from '$lib/components/Breadcrumbs.svelte';
   import Skeleton from '$lib/components/Skeleton.svelte';
   import EmptyState from '$lib/components/EmptyState.svelte';
@@ -58,6 +60,27 @@
     activeTab = id as WsTab;
     if (typeof history !== 'undefined') history.replaceState(history.state, '', `#${id}`);
   }
+
+  // Plan awareness (shared billing cache): on Free the invite form is replaced
+  // by an explanation — invites would be accepted into a full (1-member) house.
+  let billing = $state<BillingStatus | null>(null);
+  $effect(() => {
+    const s = slug;
+    billing = null;
+    if (!s) return;
+    let cancelled = false;
+    billingStatus(s)
+      .then((r) => {
+        if (!cancelled) billing = r;
+      })
+      .catch(() => {
+        if (!cancelled) billing = null;
+      });
+    return () => {
+      cancelled = true;
+    };
+  });
+  let isFreePlan = $derived(billing?.enabled === true && billing.plan === 'free');
 
   // Derived permission context
   let myId = $derived(session.user?.id ?? '');
@@ -478,6 +501,16 @@
       <section class="mb-10">
         <SectionHeader title="Invites" />
 
+        {#if isFreePlan}
+          <!-- Free is solo (1 member = you): an invite could be created but never
+               accepted, so explain instead of offering a dead-end form. -->
+          <div class="mb-4">
+            <UpgradeNotice
+              {slug}
+              message="The Free plan is solo — collaborators need a seat. Upgrade to invite your team (1 member per seat)."
+            />
+          </div>
+        {:else}
         <Card class="mb-4 p-6">
           <form class="flex flex-col gap-4" onsubmit={createInvite}>
             <div class="grid gap-4 sm:grid-cols-3">
@@ -533,7 +566,9 @@
             </div>
           {/if}
         </Card>
+        {/if}
 
+        {#if !isFreePlan || invites.length > 0}
         <Card class="overflow-hidden">
           {#if invites.length === 0}
             <p class="px-4 py-8 text-center text-sm text-muted">No invites yet.</p>
@@ -576,6 +611,7 @@
             </div>
           {/if}
         </Card>
+        {/if}
       </section>
     {/if}
 
