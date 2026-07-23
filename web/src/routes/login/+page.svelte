@@ -264,5 +264,9 @@
         </button>
       </p>
     {/if}
+
+    <p class="mt-6 text-center text-xs text-faint">
+      Independent open-source tool for Stake Engine developers. Not affiliated with Stake.com.
+    </p>
   </div>
 </main>
