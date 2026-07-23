@@ -171,6 +171,7 @@
     cursor: 'pointer', boxShadow: '0 4px 18px rgba(0,0,0,.4)'
   }, '💬 Feedback');
   fbBtn.type = 'button';
+  fbBtn.setAttribute('data-sdt-feedback', 'btn');
   fbBtn.addEventListener('click', openOverlay);
 
   // --- toast ---------------------------------------------------------------------
@@ -185,6 +186,7 @@
         boxShadow: '0 8px 30px rgba(0,0,0,.5)', transition: 'opacity .25s', opacity: '0'
       });
       node.id = '__sdt-fb-toast';
+      node.setAttribute('data-sdt-feedback', 'toast');
       document.body.appendChild(node);
     }
     node.textContent = text;
@@ -193,8 +195,19 @@
     toastTimer = setTimeout(function () { node.style.opacity = '0'; }, 3200);
   }
 
-  // --- screenshot (best effort) ----------------------------------------------------
-  function captureScreenshot() {
+  // --- screenshot (best effort, two layers) -----------------------------------
+  // Layer 1 (sync): composite every game <canvas> via drawImage — the WebGL
+  // frame (preserveDrawingBuffer is forced above). Layer 2 (async): the game's
+  // HTML/CSS UI. DOM pixels cannot be read directly (browser security), so the
+  // body is cloned into an SVG <foreignObject> with the page's same-origin CSS
+  // inlined and <img> sources converted to data URLs, rasterized through an
+  // Image, and drawn ON TOP of the canvas layer (game UIs stack above the
+  // reels). Known limits of SVG-as-image: no external fetches inside the
+  // snapshot, so custom fonts fall back and CSS background-image urls stay
+  // empty; cross-origin stylesheets are skipped.
+
+  /** Layer 1: viewport-sized canvas with the page bg + every game canvas. */
+  function captureBase() {
     try {
       var w = window.innerWidth, h = window.innerHeight;
       if (!w || !h) return null;
@@ -217,12 +230,144 @@
           g.drawImage(src, rect.left * scale, rect.top * scale, rect.width * scale, rect.height * scale);
         } catch (e) { /* tainted or gone — skip */ }
       }
-      var url = canvas.toDataURL('image/jpeg', 0.6);
+      return { canvas: canvas, g: g, w: w, h: h, scale: scale };
+    } catch (e) {
+      return null;
+    }
+  }
+
+  /** Encode a capture as a JPEG data URL, or null when it cannot be sent. */
+  function encodeCapture(cap) {
+    try {
+      var url = cap.canvas.toDataURL('image/jpeg', 0.6);
       // Keep the request comfortably under the server's body limit.
       return url.length > 900000 ? null : url;
     } catch (e) {
       return null;
     }
+  }
+
+  /** Every same-origin stylesheet's rules as one CSS string. */
+  function collectCss() {
+    var css = '';
+    var sheets = document.styleSheets;
+    for (var i = 0; i < sheets.length; i++) {
+      try {
+        var rules = sheets[i].cssRules;
+        for (var j = 0; j < rules.length; j++) css += rules[j].cssText + '\n';
+      } catch (e) { /* cross-origin sheet — skip */ }
+    }
+    return css;
+  }
+
+  /**
+   * Rewrite the clone's <img> tags to data URLs (external fetches are blocked
+   * inside an SVG image). Resolves after every fetch settles or the timeout.
+   */
+  function inlineImages(clone, timeoutMs) {
+    var jobs = [];
+    try {
+      var src = document.body.querySelectorAll('img');
+      var dst = clone.querySelectorAll('img');
+      var count = Math.min(src.length, dst.length);
+      for (var i = 0; i < count; i++) {
+        (function (from, to) {
+          var url = from.currentSrc || from.src;
+          if (!url || url.indexOf('data:') === 0) return;
+          var job = (origFetch || window.fetch)(url, { credentials: 'same-origin' })
+            .then(function (res) {
+              if (!res.ok) throw new Error('img fetch failed');
+              return res.blob();
+            })
+            .then(function (blob) {
+              return new Promise(function (resolve, reject) {
+                var reader = new FileReader();
+                reader.onload = function () {
+                  to.setAttribute('src', String(reader.result));
+                  resolve();
+                };
+                reader.onerror = reject;
+                reader.readAsDataURL(blob);
+              });
+            })
+            .catch(function () { to.removeAttribute('src'); });
+          jobs.push(job);
+        })(src[i], dst[i]);
+      }
+    } catch (e) { /* best effort */ }
+    return new Promise(function (resolve) {
+      var timer = setTimeout(resolve, timeoutMs);
+      Promise.all(jobs).then(
+        function () { clearTimeout(timer); resolve(); },
+        function () { clearTimeout(timer); resolve(); }
+      );
+    });
+  }
+
+  /** Layer 2: rasterize the DOM UI over `cap.canvas`. Rejects on any failure. */
+  function captureDomLayer(cap) {
+    var clone;
+    try {
+      clone = document.body.cloneNode(true);
+      // Strip our own UI and anything non-visual; canvases/videos stay as
+      // empty boxes so the layout they anchor is preserved.
+      var junk = clone.querySelectorAll('[data-sdt-feedback], script, noscript');
+      for (var i = junk.length - 1; i >= 0; i--) {
+        if (junk[i].parentNode) junk[i].parentNode.removeChild(junk[i]);
+      }
+      // Reflect live form state (bet amount inputs etc.) into attributes, since
+      // cloneNode copies attributes but not current values.
+      var liveFields = document.body.querySelectorAll('input, textarea');
+      var cloneFields = clone.querySelectorAll('input, textarea');
+      var fields = Math.min(liveFields.length, cloneFields.length);
+      for (var f = 0; f < fields; f++) {
+        if (cloneFields[f].tagName === 'TEXTAREA') {
+          cloneFields[f].textContent = liveFields[f].value;
+        } else {
+          cloneFields[f].setAttribute('value', liveFields[f].value);
+          if (liveFields[f].checked) cloneFields[f].setAttribute('checked', 'checked');
+        }
+      }
+      var style = document.createElement('style');
+      style.textContent = collectCss();
+      clone.insertBefore(style, clone.firstChild);
+      clone.setAttribute('xmlns', 'http://www.w3.org/1999/xhtml');
+      clone.style.margin = '0';
+      clone.style.width = cap.w + 'px';
+      clone.style.height = cap.h + 'px';
+    } catch (e) {
+      return Promise.reject(e);
+    }
+    return inlineImages(clone, 1500).then(function () {
+      return new Promise(function (resolve, reject) {
+        var svg;
+        try {
+          var html = new XMLSerializer().serializeToString(clone);
+          svg =
+            '<svg xmlns="http://www.w3.org/2000/svg" width="' + cap.w + '" height="' + cap.h + '">' +
+            '<foreignObject width="100%" height="100%">' + html + '</foreignObject></svg>';
+        } catch (e) {
+          reject(e);
+          return;
+        }
+        var img = new Image();
+        var timer = setTimeout(function () { reject(new Error('svg raster timeout')); }, 3000);
+        img.onload = function () {
+          clearTimeout(timer);
+          try {
+            cap.g.drawImage(img, 0, 0, cap.w * cap.scale, cap.h * cap.scale);
+            resolve();
+          } catch (e) {
+            reject(e);
+          }
+        };
+        img.onerror = function () {
+          clearTimeout(timer);
+          reject(new Error('svg raster failed'));
+        };
+        img.src = 'data:image/svg+xml;charset=utf-8,' + encodeURIComponent(svg);
+      });
+    });
   }
 
   // --- overlay -------------------------------------------------------------------
@@ -496,12 +641,23 @@
     // callback in the same frame, when the WebGL drawing buffer is still valid
     // — the fallback for contexts created before the preserveDrawingBuffer
     // patch installed. Only then show the overlay (so it is never captured).
+    // The DOM UI layer rasterizes asynchronously and upgrades the screenshot in
+    // place when it lands (users take longer than that to write/draw).
     requestAnimationFrame(function () {
       if (!overlayOpen) return;
-      screenshot = captureScreenshot();
+      var cap = captureBase();
+      screenshot = cap ? encodeCapture(cap) : null;
       overlay.style.display = 'block';
       fbBtn.style.display = 'none';
       sizeCanvas();
+      if (cap) {
+        captureDomLayer(cap).then(
+          function () {
+            if (overlayOpen) screenshot = encodeCapture(cap) || screenshot;
+          },
+          function () { /* keep the canvas-only capture */ }
+        );
+      }
     });
   }
 
