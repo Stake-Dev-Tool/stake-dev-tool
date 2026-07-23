@@ -15,6 +15,26 @@
   if (window.__sdtFeedback) return;
   window.__sdtFeedback = true;
 
+  // Force preserveDrawingBuffer on every WebGL context the game creates, so the
+  // screenshot capture can read its pixels — without it, drawImage() on a
+  // PIXI/Three canvas outside the render cycle reads a black frame. This script
+  // is injected at the end of <head> WITHOUT defer precisely so this patch
+  // installs before any game module/deferred script runs.
+  try {
+    var origGetContext = HTMLCanvasElement.prototype.getContext;
+    HTMLCanvasElement.prototype.getContext = function (type, attrs) {
+      if (type === 'webgl' || type === 'webgl2' || type === 'experimental-webgl') {
+        var patched = {};
+        if (attrs) for (var k in attrs) patched[k] = attrs[k];
+        patched.preserveDrawingBuffer = true;
+        return origGetContext.call(this, type, patched);
+      }
+      return arguments.length > 1
+        ? origGetContext.call(this, type, attrs)
+        : origGetContext.call(this, type);
+    };
+  } catch (e) { /* capture degrades to best-effort */ }
+
   var Z = 2147483600;
   var FONT = "13px/1.45 system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif";
   var COLORS = ['#ff4d4f', '#ffd43b', '#51cf66', '#4dabf7'];
@@ -467,14 +487,22 @@
   function openOverlay() {
     if (overlayOpen) return;
     overlayOpen = true;
-    screenshot = captureScreenshot();
     shapes = [];
     drawing = null;
+    screenshot = null;
     errorText.style.display = 'none';
     updateRoundNote();
-    overlay.style.display = 'block';
-    fbBtn.style.display = 'none';
-    sizeCanvas();
+    // Capture inside a rAF callback: it runs right AFTER the game's own render
+    // callback in the same frame, when the WebGL drawing buffer is still valid
+    // — the fallback for contexts created before the preserveDrawingBuffer
+    // patch installed. Only then show the overlay (so it is never captured).
+    requestAnimationFrame(function () {
+      if (!overlayOpen) return;
+      screenshot = captureScreenshot();
+      overlay.style.display = 'block';
+      fbBtn.style.display = 'none';
+      sizeCanvas();
+    });
   }
 
   function closeOverlay() {

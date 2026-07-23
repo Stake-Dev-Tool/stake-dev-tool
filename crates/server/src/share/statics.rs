@@ -19,7 +19,14 @@ use super::resolve::ResolvedBundle;
 /// The tag injected into a feedback-enabled link's `index.html`. The script is
 /// served by [`super::feedback`] on this same host (same-origin, no CSP cross
 /// concern) and 404s if feedback is later toggled off.
-const FEEDBACK_TAG: &[u8] = b"<script src=\"/__share/feedback.js\" defer></script>";
+///
+/// Deliberately NOT `defer`: the widget must execute before the game's own
+/// (module/deferred) scripts so its `getContext` patch can force
+/// `preserveDrawingBuffer: true` on the game's WebGL context — without it the
+/// screenshot capture reads a black frame. That is also why the tag goes at the
+/// END of `<head>` rather than before `</body>` (module scripts always run
+/// after a parser-blocking head script, wherever they appear).
+const FEEDBACK_TAG: &[u8] = b"<script src=\"/__share/feedback.js\"></script>";
 
 /// Serve the manifest path for a `GET`/`HEAD` request path (already stripped of
 /// its leading slash). Applies the `index.html` fallback and blocks API-ish
@@ -133,11 +140,15 @@ async fn stream(
     response.into_response()
 }
 
-/// Splice [`FEEDBACK_TAG`] into an HTML document: before the last `</body>`
-/// (ASCII case-insensitive), else appended at the end — bundles are arbitrary
-/// third-party builds, so never assume a well-formed skeleton.
+/// Splice [`FEEDBACK_TAG`] into an HTML document, ASCII case-insensitive:
+/// before `</head>` (so the widget's WebGL `getContext` patch installs before
+/// any game module/deferred script runs), else before the last `</body>`, else
+/// appended at the end — bundles are arbitrary third-party builds, so never
+/// assume a well-formed skeleton.
 fn inject_widget_tag(html: Vec<u8>) -> Vec<u8> {
-    let at = find_last_ci(&html, b"</body>").unwrap_or(html.len());
+    let at = find_first_ci(&html, b"</head>")
+        .or_else(|| find_last_ci(&html, b"</body>"))
+        .unwrap_or(html.len());
     let mut out = Vec::with_capacity(html.len() + FEEDBACK_TAG.len());
     out.extend_from_slice(&html[..at]);
     out.extend_from_slice(FEEDBACK_TAG);
@@ -145,17 +156,29 @@ fn inject_widget_tag(html: Vec<u8>) -> Vec<u8> {
     out
 }
 
+fn matches_ci(haystack: &[u8], needle: &[u8], at: usize) -> bool {
+    haystack[at..at + needle.len()]
+        .iter()
+        .zip(needle)
+        .all(|(a, b)| a.eq_ignore_ascii_case(b))
+}
+
+/// Byte-wise ASCII case-insensitive search for the FIRST occurrence of `needle`.
+fn find_first_ci(haystack: &[u8], needle: &[u8]) -> Option<usize> {
+    if needle.is_empty() || haystack.len() < needle.len() {
+        return None;
+    }
+    (0..=haystack.len() - needle.len()).find(|&i| matches_ci(haystack, needle, i))
+}
+
 /// Byte-wise ASCII case-insensitive search for the LAST occurrence of `needle`.
 fn find_last_ci(haystack: &[u8], needle: &[u8]) -> Option<usize> {
     if needle.is_empty() || haystack.len() < needle.len() {
         return None;
     }
-    (0..=haystack.len() - needle.len()).rev().find(|&i| {
-        haystack[i..i + needle.len()]
-            .iter()
-            .zip(needle)
-            .all(|(a, b)| a.eq_ignore_ascii_case(b))
-    })
+    (0..=haystack.len() - needle.len())
+        .rev()
+        .find(|&i| matches_ci(haystack, needle, i))
 }
 
 fn is_index(path: &str) -> bool {
@@ -203,24 +226,23 @@ mod tests {
     use super::*;
 
     #[test]
-    fn widget_tag_splices_before_body_close() {
-        let html = b"<html><body><div>game</div></body></html>".to_vec();
-        let out = inject_widget_tag(html);
-        let out = String::from_utf8(out).unwrap();
-        assert!(out.contains("feedback.js"));
-        assert!(out.ends_with("</body></html>"));
+    fn widget_tag_prefers_head_then_body_then_append() {
+        // With a <head>: the tag lands at the END of head, before the game's
+        // module script (so the WebGL getContext patch installs first).
+        let html =
+            b"<html><head><meta charset=utf-8></head><body><div>game</div></body></html>".to_vec();
+        let out = String::from_utf8(inject_widget_tag(html)).unwrap();
         let tag_at = out.find("<script src=\"/__share/feedback.js\"").unwrap();
-        assert!(tag_at < out.find("</body>").unwrap() + "</body>".len());
+        assert!(tag_at < out.find("</head>").unwrap() + "</head>".len());
+        assert!(out.contains("<meta charset=utf-8><script"));
 
-        // Case-insensitive close tag.
-        let upper = inject_widget_tag(b"<BODY>x</BODY>".to_vec());
-        let upper = String::from_utf8(upper).unwrap();
+        // No head -> before the last </body> (case-insensitive).
+        let upper = String::from_utf8(inject_widget_tag(b"<BODY>x</BODY>".to_vec())).unwrap();
         assert!(upper.ends_with("</BODY>"));
         assert!(upper.contains("feedback.js"));
 
-        // No </body> at all -> appended.
-        let bare = inject_widget_tag(b"<div>fragment</div>".to_vec());
-        let bare = String::from_utf8(bare).unwrap();
+        // Neither -> appended.
+        let bare = String::from_utf8(inject_widget_tag(b"<div>fragment</div>".to_vec())).unwrap();
         assert!(bare.starts_with("<div>fragment</div><script"));
     }
 }
