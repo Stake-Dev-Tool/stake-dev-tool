@@ -201,12 +201,24 @@
   // HTML/CSS UI. DOM pixels cannot be read directly (browser security), so the
   // body is cloned into an SVG <foreignObject> with the page's same-origin CSS
   // inlined and <img> sources converted to data URLs, rasterized through an
-  // Image, and drawn ON TOP of the canvas layer (game UIs stack above the
-  // reels). Known limits of SVG-as-image: no external fetches inside the
-  // snapshot, so custom fonts fall back and CSS background-image urls stay
-  // empty; cross-origin stylesheets are skipped.
+  // Image, and drawn over the base. Each cloned game canvas gets its OWN
+  // captured frame as a CSS background, so the snapshot stacks exactly like
+  // the real page — backdrops behind the reels, UI above — with no guessing
+  // about paint order. Known limits of SVG-as-image: no external fetches
+  // inside the snapshot, so custom fonts fall back and CSS background-image
+  // urls stay empty; cross-origin stylesheets are skipped.
 
-  /** Layer 1: viewport-sized canvas with the page bg + every game canvas. */
+  /** Compact diagnostics — paste these when reporting a bad capture. */
+  function dbg() {
+    try {
+      console.log.apply(console, ['[sdt-feedback]'].concat([].slice.call(arguments)));
+    } catch (e) { /* consoles can be stubbed */ }
+  }
+
+  /**
+   * Layer 1: viewport-sized canvas with the page bg + every game canvas, plus
+   * a downscaled per-canvas frame (`shots`) for the DOM raster to embed.
+   */
   function captureBase() {
     try {
       var w = window.innerWidth, h = window.innerHeight;
@@ -220,6 +232,7 @@
       try { bg = getComputedStyle(document.body).backgroundColor || '#000'; } catch (e) { /* keep */ }
       g.fillStyle = bg;
       g.fillRect(0, 0, canvas.width, canvas.height);
+      var shots = [];
       var sources = document.querySelectorAll('canvas');
       for (var i = 0; i < sources.length; i++) {
         var src = sources[i];
@@ -228,10 +241,28 @@
         if (rect.width <= 0 || rect.height <= 0) continue;
         try {
           g.drawImage(src, rect.left * scale, rect.top * scale, rect.width * scale, rect.height * scale);
-        } catch (e) { /* tainted or gone — skip */ }
+        } catch (e) {
+          dbg('base: drawImage failed for canvas', i, e);
+        }
+        // Per-canvas frame for the DOM raster (webp keeps alpha; png fallback).
+        try {
+          var shot = document.createElement('canvas');
+          shot.width = Math.max(1, Math.round(rect.width * scale));
+          shot.height = Math.max(1, Math.round(rect.height * scale));
+          shot.getContext('2d').drawImage(src, 0, 0, shot.width, shot.height);
+          var url = shot.toDataURL('image/webp', 0.8);
+          if (url.indexOf('data:image/webp') !== 0) url = shot.toDataURL('image/png');
+          shots.push({ el: src, url: url });
+          dbg('base: canvas', i, Math.round(rect.width) + 'x' + Math.round(rect.height),
+            'shot', url.slice(5, url.indexOf(';')), url.length + 'ch');
+        } catch (e) {
+          dbg('base: shot failed for canvas', i, e);
+        }
       }
-      return { canvas: canvas, g: g, w: w, h: h, scale: scale };
+      dbg('base: composited', shots.length, 'canvas(es) at scale', scale.toFixed(3));
+      return { canvas: canvas, g: g, w: w, h: h, scale: scale, shots: shots };
     } catch (e) {
+      dbg('base: capture failed', e);
       return null;
     }
   }
@@ -241,8 +272,13 @@
     try {
       var url = cap.canvas.toDataURL('image/jpeg', 0.6);
       // Keep the request comfortably under the server's body limit.
-      return url.length > 900000 ? null : url;
+      if (url.length > 900000) {
+        dbg('encode: capture too large to send (', url.length, 'chars )');
+        return null;
+      }
+      return url;
     } catch (e) {
+      dbg('encode: toDataURL failed (tainted canvas?)', e);
       return null;
     }
   }
@@ -314,55 +350,24 @@
       clone = document.body.cloneNode(true);
       var cloneAll = clone.querySelectorAll('*');
 
-      // This raster paints ON TOP of the WebGL layer, so whatever the real
-      // page paints BEHIND the game canvas must not repaint here and cover it:
-      // the canvas + its ancestor chain lose their backgrounds, and elements
-      // the hit-test stack reports underneath the canvas (full-screen backdrop
-      // siblings) are hidden outright — they are invisible on the real page
-      // anyway, covered by the canvas.
-      var transparent = new Set();
-      var hidden = new Set();
-      var canvases = document.body.querySelectorAll('canvas');
-      for (var c = 0; c < canvases.length; c++) {
-        var cv = canvases[c];
-        if (cv.getAttribute('data-sdt-feedback')) continue;
-        var rect = cv.getBoundingClientRect();
-        if (rect.width <= 0 || rect.height <= 0) continue;
-        transparent.add(cv);
-        for (var anc = cv.parentElement; anc && anc !== document.body; anc = anc.parentElement) {
-          transparent.add(anc);
+      // Embed each captured canvas frame INTO its clone as a CSS background:
+      // a <canvas> rasters as an empty box in a foreignObject, but its CSS
+      // background paints normally — so the reels land at their exact spot in
+      // the page's own stacking order (backdrops behind, UI above).
+      var embedded = 0;
+      for (var sh = 0; sh < cap.shots.length; sh++) {
+        var at = Array.prototype.indexOf.call(liveAll, cap.shots[sh].el);
+        if (at < 0 || at >= cloneAll.length) {
+          dbg('dom: no clone counterpart for canvas shot', sh);
+          continue;
         }
-        var points = [
-          [rect.left + rect.width / 2, rect.top + rect.height / 2],
-          [rect.left + rect.width / 4, rect.top + rect.height / 4],
-          [rect.left + (3 * rect.width) / 4, rect.top + rect.height / 4],
-          [rect.left + rect.width / 4, rect.top + (3 * rect.height) / 4],
-          [rect.left + (3 * rect.width) / 4, rect.top + (3 * rect.height) / 4]
-        ];
-        for (var p = 0; p < points.length; p++) {
-          var stack;
-          try { stack = document.elementsFromPoint(points[p][0], points[p][1]); } catch (e) { stack = []; }
-          var belowCanvas = false;
-          for (var st = 0; st < stack.length; st++) {
-            if (stack[st] === cv) { belowCanvas = true; continue; }
-            if (!belowCanvas) continue;
-            var under = stack[st];
-            if (under === document.body || under === document.documentElement) continue;
-            if (under.contains(cv)) continue; // ancestor — handled above
-            hidden.add(under);
-          }
-        }
+        var cloneCanvas = cloneAll[at];
+        cloneCanvas.style.setProperty('background-image', 'url("' + cap.shots[sh].url + '")', 'important');
+        cloneCanvas.style.setProperty('background-size', '100% 100%', 'important');
+        cloneCanvas.style.setProperty('background-repeat', 'no-repeat', 'important');
+        embedded++;
       }
-      for (var m = 0; m < liveAll.length && m < cloneAll.length; m++) {
-        if (transparent.has(liveAll[m])) {
-          cloneAll[m].style.setProperty('background', 'transparent', 'important');
-          cloneAll[m].style.setProperty('background-image', 'none', 'important');
-          cloneAll[m].style.setProperty('box-shadow', 'none', 'important');
-        }
-        if (hidden.has(liveAll[m])) {
-          cloneAll[m].style.setProperty('visibility', 'hidden', 'important');
-        }
-      }
+      dbg('dom: embedded', embedded, 'of', cap.shots.length, 'canvas frame(s) into the clone');
 
       // Strip our own UI and anything non-visual; canvases/videos stay as
       // empty boxes so the layout they anchor is preserved.
@@ -383,17 +388,15 @@
           if (liveFields[f].checked) cloneFields[f].setAttribute('checked', 'checked');
         }
       }
+      var css = collectCss();
       var style = document.createElement('style');
-      style.textContent = collectCss();
+      style.textContent = css;
       clone.insertBefore(style, clone.firstChild);
       clone.setAttribute('xmlns', 'http://www.w3.org/1999/xhtml');
       clone.style.margin = '0';
       clone.style.width = cap.w + 'px';
       clone.style.height = cap.h + 'px';
-      // The page background is already the base layer's fill — repainting it
-      // here would sit on top of the WebGL frame.
-      clone.style.setProperty('background', 'transparent', 'important');
-      clone.style.setProperty('background-image', 'none', 'important');
+      dbg('dom: inlined', css.length, 'chars of same-origin css');
     } catch (e) {
       return Promise.reject(e);
     }
@@ -409,6 +412,7 @@
           reject(e);
           return;
         }
+        dbg('dom: svg snapshot is', svg.length, 'chars');
         var img = new Image();
         var timer = setTimeout(function () { reject(new Error('svg raster timeout')); }, 3000);
         img.onload = function () {
@@ -706,6 +710,7 @@
       if (!overlayOpen) return;
       var cap = captureBase();
       screenshot = cap ? encodeCapture(cap) : null;
+      dbg('capture: base layer', screenshot ? 'ready (' + screenshot.length + 'ch)' : 'unavailable');
       overlay.style.display = 'block';
       fbBtn.style.display = 'none';
       sizeCanvas();
@@ -713,8 +718,11 @@
         captureDomLayer(cap).then(
           function () {
             if (overlayOpen) screenshot = encodeCapture(cap) || screenshot;
+            dbg('capture: dom layer composited', screenshot ? '(' + screenshot.length + 'ch)' : '');
           },
-          function () { /* keep the canvas-only capture */ }
+          function (err) {
+            dbg('capture: dom layer failed — keeping canvas-only capture', err);
+          }
         );
       }
     });
