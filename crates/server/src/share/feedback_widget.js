@@ -245,6 +245,8 @@
           dbg('base: drawImage failed for canvas', i, e);
         }
         // Per-canvas frame for the DOM raster (webp keeps alpha; png fallback).
+        // Tiny probe canvases (feature detection) aren't worth a shot.
+        if (rect.width < 8 || rect.height < 8) continue;
         try {
           var shot = document.createElement('canvas');
           shot.width = Math.max(1, Math.round(rect.width * scale));
@@ -304,7 +306,9 @@
     var jobs = [];
     try {
       var src = document.body.querySelectorAll('img');
-      var dst = clone.querySelectorAll('img');
+      // Our injected canvas-frame imgs are not in the live tree — exclude them
+      // so the index pairing with the live list stays aligned.
+      var dst = clone.querySelectorAll('img:not([data-sdt-shot])');
       var count = Math.min(src.length, dst.length);
       for (var i = 0; i < count; i++) {
         (function (from, to) {
@@ -350,10 +354,14 @@
       clone = document.body.cloneNode(true);
       var cloneAll = clone.querySelectorAll('*');
 
-      // Embed each captured canvas frame INTO its clone as a CSS background:
-      // a <canvas> rasters as an empty box in a foreignObject, but its CSS
-      // background paints normally — so the reels land at their exact spot in
-      // the page's own stacking order (backdrops behind, UI above).
+      // Swap each cloned game canvas for an <img> carrying its captured frame.
+      // NOT a CSS background: Chromium's SVG-image rasterizer waits for <img>
+      // subresources (data URLs decode inline) but does NOT wait for CSS
+      // background-images, which simply miss the raster. The live canvas's
+      // computed style is frozen onto the img inline so layout and stacking
+      // stay identical even though canvas-targeting CSS no longer matches —
+      // the reels land at their exact spot in the page's own paint order
+      // (backdrops behind, UI above).
       var embedded = 0;
       for (var sh = 0; sh < cap.shots.length; sh++) {
         var at = Array.prototype.indexOf.call(liveAll, cap.shots[sh].el);
@@ -361,13 +369,27 @@
           dbg('dom: no clone counterpart for canvas shot', sh);
           continue;
         }
+        var frame = document.createElement('img');
+        frame.setAttribute('data-sdt-shot', '1');
+        frame.src = cap.shots[sh].url;
+        try {
+          var computed = getComputedStyle(cap.shots[sh].el);
+          var cssText = '';
+          for (var cp = 0; cp < computed.length; cp++) {
+            var prop = computed[cp];
+            cssText += prop + ':' + computed.getPropertyValue(prop) + ';';
+          }
+          frame.style.cssText = cssText;
+        } catch (e) {
+          dbg('dom: computed style copy failed for canvas shot', sh, e);
+        }
         var cloneCanvas = cloneAll[at];
-        cloneCanvas.style.setProperty('background-image', 'url("' + cap.shots[sh].url + '")', 'important');
-        cloneCanvas.style.setProperty('background-size', '100% 100%', 'important');
-        cloneCanvas.style.setProperty('background-repeat', 'no-repeat', 'important');
-        embedded++;
+        if (cloneCanvas.parentNode) {
+          cloneCanvas.parentNode.replaceChild(frame, cloneCanvas);
+          embedded++;
+        }
       }
-      dbg('dom: embedded', embedded, 'of', cap.shots.length, 'canvas frame(s) into the clone');
+      dbg('dom: embedded', embedded, 'of', cap.shots.length, 'canvas frame(s) as <img>');
 
       // Strip our own UI and anything non-visual; canvases/videos stay as
       // empty boxes so the layout they anchor is preserved.
@@ -709,16 +731,29 @@
     requestAnimationFrame(function () {
       if (!overlayOpen) return;
       var cap = captureBase();
-      screenshot = cap ? encodeCapture(cap) : null;
-      dbg('capture: base layer', screenshot ? 'ready (' + screenshot.length + 'ch)' : 'unavailable');
+      var baseUrl = cap ? encodeCapture(cap) : null;
+      screenshot = baseUrl;
+      dbg('capture: base layer', baseUrl ? 'ready (' + baseUrl.length + 'ch)' : 'unavailable');
       overlay.style.display = 'block';
       fbBtn.style.display = 'none';
       sizeCanvas();
       if (cap) {
         captureDomLayer(cap).then(
           function () {
-            if (overlayOpen) screenshot = encodeCapture(cap) || screenshot;
-            dbg('capture: dom layer composited', screenshot ? '(' + screenshot.length + 'ch)' : '');
+            if (!overlayOpen) return;
+            var domUrl = encodeCapture(cap);
+            // Degenerate-raster guard: a DOM snapshot that comes out FLATTER
+            // than the canvas-only capture painted over the reels instead of
+            // adding UI on top — keep the base capture in that case.
+            if (domUrl && baseUrl && domUrl.length < baseUrl.length * 0.5) {
+              dbg('capture: dom raster looks degenerate (' + domUrl.length +
+                'ch vs base ' + baseUrl.length + 'ch) — keeping the base capture');
+            } else if (domUrl) {
+              screenshot = domUrl;
+              dbg('capture: dom layer composited (' + domUrl.length + 'ch)');
+            } else {
+              dbg('capture: dom layer unencodable — keeping the base capture');
+            }
           },
           function (err) {
             dbg('capture: dom layer failed — keeping canvas-only capture', err);
