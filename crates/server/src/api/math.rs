@@ -832,6 +832,51 @@ pub async fn delete_revision(
     }))
 }
 
+/// `DELETE .../games/:game` — owner/admin only. Deletes the game and EVERYTHING
+/// it owns in one transaction via FK cascades: revisions (files + stats), front
+/// bundles, share links, and their visitor feedback. Deliberately no
+/// pinned-share guard — unlike a single revision or bundle, deleting the game
+/// takes its share links down with it (their hosts start 404ing like unknown
+/// slugs). The workspace's now-unreferenced blobs are then GC'd (bytes deduped
+/// with another game's content survive) and the store objects + the game's
+/// whole materialized cache tree are removed best-effort.
+pub async fn delete_game(
+    State(state): State<AppState>,
+    user: CurrentUser,
+    Path((slug, game_slug)): Path<(String, String)>,
+) -> ApiResult<Json<DeletionResult>> {
+    let workspace = authorize_admin(&state, &user, &slug).await?;
+    let game_id = game_id_by_slug(&state.pool, workspace.id, &game_slug).await?;
+
+    let mut tx = state.pool.begin().await?;
+    sqlx::query("DELETE FROM games WHERE id = $1")
+        .bind(game_id)
+        .execute(&mut *tx)
+        .await?;
+    let freed = blobs::gc_orphaned_blobs(&mut tx, workspace.id).await?;
+    tx.commit().await?;
+
+    // Post-commit best-effort cleanup: store bytes + every materialized
+    // revision of this game in one sweep.
+    blobs::delete_blob_objects(&state.store, workspace.id, &freed).await;
+    let cache_dir = crate::lgs_host::game_cache_dir(&state.config, workspace.id, game_id);
+    if let Err(e) = tokio::fs::remove_dir_all(&cache_dir).await
+        && e.kind() != std::io::ErrorKind::NotFound
+    {
+        tracing::warn!(
+            error = %e,
+            dir = %cache_dir.display(),
+            "game delete: cache dir cleanup failed (LRU will evict it)"
+        );
+    }
+
+    let freed_bytes = freed.iter().map(|(_, size)| *size).sum();
+    Ok(Json(DeletionResult {
+        freed_bytes,
+        freed_blobs: freed.len() as i64,
+    }))
+}
+
 #[derive(sqlx::FromRow)]
 struct RevisionMetaRow {
     number: i32,

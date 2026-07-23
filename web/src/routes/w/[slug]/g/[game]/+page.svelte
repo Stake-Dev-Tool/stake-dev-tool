@@ -8,9 +8,12 @@
     type BillingStatus,
     type Game,
     type RevisionSummary,
+    type Role,
     type StatsStatus
   } from '$lib/api';
   import { billingStatus } from '$lib/billing';
+  import { session } from '$lib/session.svelte';
+  import { toast } from '$lib/toasts.svelte';
   import { errorText, humanSize } from '$lib/format';
   import { workspaceName } from '$lib/workspaces.svelte';
   import Button from '$lib/components/Button.svelte';
@@ -75,6 +78,59 @@
   let singleRevisionPlan = $derived(
     billing?.enabled === true && billing.limits.max_revisions_per_game === 1
   );
+
+  // Caller's role — gates the owner/admin danger zone (game deletion).
+  let role = $state<Role | null>(null);
+  let canManage = $derived(role === 'owner' || role === 'admin');
+  let deleting = $state(false);
+  $effect(() => {
+    const s = slug;
+    role = null;
+    if (!s) return;
+    let cancelled = false;
+    api.workspaces
+      .get(s)
+      .then((detail) => {
+        if (cancelled) return;
+        role =
+          detail.role ??
+          detail.members.find((m) => m.user_id === (session.user?.id ?? ''))?.role ??
+          null;
+      })
+      .catch(() => {
+        if (!cancelled) role = null;
+      });
+    return () => {
+      cancelled = true;
+    };
+  });
+
+  /** Delete the game and everything it owns; the slug must be typed to confirm. */
+  async function deleteGame() {
+    const typed = prompt(
+      `This permanently deletes "${game}" and EVERYTHING it owns: every revision, ` +
+        `front bundle, share link and its visitor feedback. This cannot be undone.\n\n` +
+        `Type the game slug to confirm:`
+    );
+    if (typed === null) return;
+    if (typed.trim() !== game) {
+      toast.error('Slug mismatch — nothing was deleted.');
+      return;
+    }
+    deleting = true;
+    try {
+      const res = await api.games.remove(slug, game);
+      toast.success(
+        res.freed_bytes > 0
+          ? `Game ${game} deleted · freed ${humanSize(res.freed_bytes)}.`
+          : `Game ${game} deleted.`
+      );
+      void goto(`/w/${slug}`);
+    } catch (e) {
+      toast.error(errorText(e));
+      deleting = false;
+    }
+  }
 
   // Compare picker (after / before revision numbers).
   let cmpAfter = $state<number | null>(null);
@@ -326,6 +382,24 @@
       <SharePanel {slug} {game} {revisions} {headNumber} />
     {:else}
       <FeedbackPanel {slug} {game} />
+    {/if}
+
+    <!-- Danger zone (owner/admin): delete the game and everything it owns. -->
+    {#if canManage}
+      <Card class="mt-10 border-danger/30 p-5">
+        <div class="flex flex-wrap items-center gap-x-4 gap-y-3">
+          <div class="min-w-0 flex-1">
+            <h2 class="text-sm font-semibold text-danger">Danger zone</h2>
+            <p class="mt-1 text-xs text-muted">
+              Deleting this game permanently removes every revision, front bundle, share link
+              and its visitor feedback, and frees the storage they used. This cannot be undone.
+            </p>
+          </div>
+          <Button variant="danger" size="sm" disabled={deleting} onclick={deleteGame}>
+            Delete game
+          </Button>
+        </div>
+      </Card>
     {/if}
   {/if}
 </main>

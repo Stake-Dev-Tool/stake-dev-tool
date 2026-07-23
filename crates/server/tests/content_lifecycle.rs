@@ -933,3 +933,102 @@ async fn front_pushed_event_on_bundle_commit() {
         "expected a `front_pushed` SSE event after the bundle commit"
     );
 }
+
+/// Game deletion removes EVERYTHING the game owns — revisions, front bundles,
+/// share links and their visitor feedback — in one cascade, frees exactly the
+/// blobs no other content still references, and leaves the workspace's other
+/// games untouched.
+#[tokio::test]
+async fn delete_game_removes_everything() {
+    let Some(ctx) = setup().await else { return };
+    let (mut owner, ws, token) = bootstrap(&ctx.state).await;
+    let ws_id = workspace_uuid(&ctx.state, &ws).await;
+
+    // The doomed game: a revision, a front bundle, and a feedback-enabled
+    // share link carrying one visitor feedback row.
+    let game = "doomed";
+    seed_game(&mut owner, &ws, game, &token).await;
+    push_bundle(
+        &mut owner,
+        &ws,
+        game,
+        &[("index.html", INDEX_HTML), ("app.js", APP_JS)],
+        &token,
+    )
+    .await;
+    let share = create_share(&mut owner, &ws, game, json!({ "feedback_enabled": true })).await;
+    let share_id = Uuid::parse_str(s(&share["id"])).unwrap();
+    sqlx::query(
+        "INSERT INTO share_feedback (share_link_id, message) VALUES ($1, 'the reels flicker')",
+    )
+    .bind(share_id)
+    .execute(&ctx.state.pool)
+    .await
+    .unwrap();
+
+    // A second game pushed from the SAME math files: its blobs are the deduped
+    // copies of the doomed game's revision bytes and must survive the delete.
+    let survivor = "survivor";
+    seed_game(&mut owner, &ws, survivor, &token).await;
+
+    let before = count_store_objects(&ctx.state, ws_id);
+    assert!(before > 0, "seeded workspace has store objects");
+
+    let (status, body) = owner
+        .send(
+            Method::DELETE,
+            &format!("/api/workspaces/{ws}/games/{game}"),
+            None,
+            None,
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "delete game: {body}");
+    // Only the bundle's two files were unique to the doomed game — the math
+    // blobs are shared with the survivor and must NOT be freed.
+    assert_eq!(body["freed_blobs"].as_i64(), Some(2), "{body}");
+    assert!(body["freed_bytes"].as_i64().unwrap() > 0);
+    assert_eq!(count_store_objects(&ctx.state, ws_id), before - 2);
+
+    // The game is gone from the listing; the survivor is not.
+    let (status, games) = owner.get(&format!("/api/workspaces/{ws}/games")).await;
+    assert_eq!(status, StatusCode::OK);
+    let slugs: Vec<&str> = games["games"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|g| s(&g["slug"]))
+        .collect();
+    assert!(!slugs.contains(&game), "{slugs:?}");
+    assert!(slugs.contains(&survivor), "{slugs:?}");
+
+    // The cascade took the share link and its feedback with it.
+    let shares: i64 = sqlx::query_scalar("SELECT count(*) FROM share_links WHERE id = $1")
+        .bind(share_id)
+        .fetch_one(&ctx.state.pool)
+        .await
+        .unwrap();
+    assert_eq!(shares, 0, "share link cascaded");
+    let feedback: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM share_feedback WHERE share_link_id = $1")
+            .bind(share_id)
+            .fetch_one(&ctx.state.pool)
+            .await
+            .unwrap();
+    assert_eq!(feedback, 0, "feedback cascaded");
+
+    // The survivor's revision still lists and a second delete 404s.
+    let (status, revs) = owner
+        .get(&format!("/api/workspaces/{ws}/games/{survivor}/revisions"))
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(revs["revisions"].as_array().unwrap().len(), 1);
+    let (status, _) = owner
+        .send(
+            Method::DELETE,
+            &format!("/api/workspaces/{ws}/games/{game}"),
+            None,
+            None,
+        )
+        .await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "second delete 404s");
+}

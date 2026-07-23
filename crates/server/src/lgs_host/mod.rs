@@ -116,6 +116,16 @@ pub fn revision_cache_dir(
         .join(number.to_string())
 }
 
+/// The materialized cache tree for a whole game — the parent of every
+/// [`revision_cache_dir`] of that game. Game deletion removes it in one sweep
+/// (same best-effort semantics as the per-revision variant).
+pub fn game_cache_dir(config: &Config, workspace_id: Uuid, game_id: Uuid) -> PathBuf {
+    cache_root_for(config)
+        .join("rev")
+        .join(workspace_id.to_string())
+        .join(game_id.to_string())
+}
+
 /// `<STORAGE_FS_ROOT>/../cache` for the fs backend; `./data/cache` for s3 (no
 /// local blob root to hang the cache off).
 fn cache_root_for(config: &Config) -> PathBuf {

@@ -1411,6 +1411,19 @@ export const api = {
         : ((raw as { games?: unknown[] } | undefined)?.games ?? []);
       return arr.map(normalizeGame);
     },
+
+    /**
+     * Permanently delete a game and EVERYTHING it owns (owner/admin): every
+     * revision, front bundle, share link and its visitor feedback. Returns the
+     * storage the blob GC reclaimed.
+     */
+    async remove(slug: string, game: string): Promise<DeletionResult> {
+      const raw = await request<unknown>(
+        'DELETE',
+        `/workspaces/${encodeURIComponent(slug)}/games/${encodeURIComponent(game)}`
+      );
+      return normalizeDeletionResult(raw);
+    },
     async revisions(slug: string, game: string): Promise<RevisionSummary[]> {
       const raw = await request<unknown>(
         'GET',
