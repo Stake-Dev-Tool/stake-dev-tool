@@ -29,15 +29,27 @@ up), so there is no separate migration step.
 
 ### Hosted instance: automatic (CI/CD)
 
-The hosted box deploys itself: every push to `v2` that touches the server
-image (crates, ui, web, Dockerfile — see the paths filter in
-`.github/workflows/server-ci.yml`) runs tests, then the `deploy` job
-SSHes into the box with a dedicated key. That key is pinned in
-`authorized_keys` to a forced command (`/usr/local/bin/sdt-deploy`) which
-only accepts a full commit sha already on `origin/v2` — it resets the
-checkout to that sha, rebuilds the `server` service, and waits until
-`/healthz` reports the new build. Secrets: `DEPLOY_SSH_KEY` +
-`DEPLOY_HOST` in the GitHub repo.
+The hosted box deploys itself: every push to `main` that touches the
+server image (crates, ui, web, Dockerfile — see the paths filter in
+`.github/workflows/server-ci.yml`) kicks off two things at once: the test
+jobs, and a `prebuild` job that SSHes into the box to build the image for
+that sha (tagged `stake-dev-server:<sha>`, nothing activated). Once the
+tests are green, the `deploy` job SSHes again to activate that image and
+waits until `/healthz` reports the new build — the box build runs in
+parallel with the tests instead of after them.
+
+The SSH key is pinned in `authorized_keys` to a forced command
+(`/usr/local/bin/sdt-deploy`, versioned at `deploy/sdt-deploy`) which
+only accepts `<sha>` or `build <sha>` for a full commit sha already on
+`origin/main` — it cannot open a shell or run anything else. After
+changing `deploy/sdt-deploy`, reinstall it on the box:
+
+```bash
+scp deploy/sdt-deploy root@<box>:/usr/local/bin/sdt-deploy
+ssh root@<box> chmod +x /usr/local/bin/sdt-deploy
+```
+
+Secrets: `DEPLOY_SSH_KEY` + `DEPLOY_HOST` in the GitHub repo.
 
 The marketing site deploys the same way via the Vercel Git integration
 (see `site/README.md`). No manual deploy step exists for either.

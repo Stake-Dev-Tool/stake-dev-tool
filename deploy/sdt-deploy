@@ -1,0 +1,77 @@
+#!/usr/bin/env bash
+# Forced-command deploy endpoint for GitHub Actions (see .github/workflows/server-ci.yml).
+# The dedicated deploy key in authorized_keys can only run this script.
+# Accepted commands (via SSH_ORIGINAL_COMMAND):
+#   <sha>          build the image if missing, activate it, wait for healthz
+#                  (what the deploy job sends — and the pre-split behavior)
+#   build <sha>    build only, never touches the running server (what the
+#                  prebuild job sends, in parallel with the test jobs)
+# The SHA must be a full commit hash reachable from origin/main. Builds and
+# activations are serialized with flock, and images are tagged per commit
+# (stake-dev-server:<short>), so a build for a newer push cannot corrupt the
+# activation of an older one.
+#
+# Install on the box: scp deploy/sdt-deploy root@<box>:/usr/local/bin/sdt-deploy
+set -euo pipefail
+exec 2>&1
+
+cmd="${SSH_ORIGINAL_COMMAND:-}"
+mode=deploy
+if [[ "$cmd" == build\ * ]]; then
+  mode=build
+  cmd="${cmd#build }"
+fi
+sha="$cmd"
+if ! [[ "$sha" =~ ^[0-9a-f]{40}$ ]]; then
+  echo "deploy: expected a full 40-char commit sha, got: $sha"
+  exit 2
+fi
+
+cd /opt/stake-dev-tool
+git fetch --quiet origin main
+if ! git merge-base --is-ancestor "$sha" origin/main; then
+  echo "deploy: $sha is not on origin/main — refusing"
+  exit 3
+fi
+short=$(git rev-parse --short "$sha")
+
+# One build/activation at a time; a concurrent caller waits here (the deploy
+# job's ssh blocks until an in-flight prebuild finishes, then skips the build).
+exec 9>/run/sdt-deploy.lock
+flock 9
+
+compose() {
+  GIT_SHA="$short" docker compose -f deploy/docker-compose.prod.yml --env-file deploy/.env.prod "$@"
+}
+
+if ! docker image inspect "stake-dev-server:$short" >/dev/null 2>&1; then
+  git reset --hard "$sha"
+  echo "deploy: building server image for $short ..."
+  compose build server
+else
+  echo "deploy: image for $short already built, skipping build"
+fi
+
+if [ "$mode" = build ]; then
+  echo "deploy: prebuild of $short done"
+  exit 0
+fi
+
+echo "deploy: activating server image for $short ..."
+compose up -d --no-build server
+
+echo "deploy: waiting for healthz to report build=$short ..."
+for i in $(seq 1 45); do
+  build=$(curl -fsS --max-time 5 https://app.stakedevtool.com/healthz 2>/dev/null | grep -o "\"build\":\"[^\"]*\"" | cut -d: -f2 | tr -d "\"" || true)
+  if [ "$build" = "$short" ]; then
+    echo "deploy: OK — prod is now running $short"
+    # Drop superseded image tags; rollback = redeploy the old sha (its
+    # rebuild is incremental thanks to the BuildKit caches).
+    docker images stake-dev-server --format '{{.Repository}}:{{.Tag}}' \
+      | grep -v ":$short\$" | xargs -r docker rmi >/dev/null 2>&1 || true
+    exit 0
+  fi
+  sleep 2
+done
+echo "deploy: FAILED — healthz still reports build=${build:-none} after 90s"
+exit 4

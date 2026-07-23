@@ -138,12 +138,45 @@ jobs:
 
       - run: pnpm --filter web build
 
-  # Continuous deployment: every green push to main rebuilds and restarts the
-  # production server. The SSH key is locked to a forced command on the box
-  # (/usr/local/bin/sdt-deploy) that only accepts a full commit sha already on
-  # origin/main — it cannot open a shell or run anything else. Caddy is left
-  # untouched (recreating it drops live connections); deploy/Caddyfile changes
-  # remain a rare manual step, see deploy/README.md.
+  # Starts the image build on the box the moment the push lands, in parallel
+  # with the test jobs. Build-only: sdt-deploy tags the image per sha and
+  # never touches the running server; nothing is activated until the deploy
+  # job (gated on green tests) flips the container over. Deliberately NOT in
+  # deploy's concurrency group: GitHub keeps only the newest pending job per
+  # group, so a queued deploy could get evicted by a newer prebuild — mutual
+  # exclusion on the box is flock's job (inside sdt-deploy), not GitHub's.
+  prebuild:
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    concurrency:
+      group: prebuild-server-production
+      cancel-in-progress: false
+    steps:
+      - name: Set up SSH
+        run: |
+          mkdir -p ~/.ssh
+          printf '%s\n' "${{ secrets.DEPLOY_SSH_KEY }}" > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+          # Pinned host key (public info) — no TOFU at deploy time.
+          echo "${{ secrets.DEPLOY_HOST }} ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIC0krTebHIHj/s+RFaCCdLfgGXXPtSa/IVfBiWCftl+8" > ~/.ssh/known_hosts
+
+      - name: Prebuild ${{ github.sha }}
+        run: |
+          ssh -i ~/.ssh/deploy_key \
+            -o IdentitiesOnly=yes \
+            -o ServerAliveInterval=30 -o ServerAliveCountMax=40 \
+            root@${{ secrets.DEPLOY_HOST }} "build ${{ github.sha }}"
+
+  # Continuous deployment: every green push to main activates the image the
+  # prebuild job built in parallel with the tests (sdt-deploy rebuilds it
+  # first if the prebuild failed or is still running — flock makes this SSH
+  # wait its turn). The SSH key is locked to a forced command on the box
+  # (/usr/local/bin/sdt-deploy, versioned at deploy/sdt-deploy) that only
+  # accepts "<sha>" or "build <sha>" where <sha> is a full commit sha already
+  # on origin/main — it cannot open a shell or run anything else. Caddy is
+  # left untouched (recreating it drops live connections); deploy/Caddyfile
+  # changes remain a rare manual step, see deploy/README.md.
   deploy:
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     needs: [server, web]

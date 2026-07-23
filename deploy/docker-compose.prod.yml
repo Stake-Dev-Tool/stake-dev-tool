@@ -18,6 +18,9 @@ services:
       retries: 10
 
   server:
+    # Tagged per commit so a prebuilt image can be activated later without
+    # rebuilding (sdt-deploy builds it during CI, activates it after tests).
+    image: stake-dev-server:${GIT_SHA:-latest}
     build:
       context: ..
       dockerfile: deploy/Dockerfile
