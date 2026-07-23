@@ -82,10 +82,7 @@ pub fn router(max_blob_bytes: usize) -> Router<AppState> {
         .route("/invites/:token/accept", post(invites::accept))
         // --- math revisions (M2) ---
         .route("/workspaces/:slug/games", get(math::list_games))
-        .route(
-            "/workspaces/:slug/games/:game",
-            delete(math::delete_game),
-        )
+        .route("/workspaces/:slug/games/:game", delete(math::delete_game))
         .route(
             "/workspaces/:slug/games/:game/revisions/check",
             post(math::check),
