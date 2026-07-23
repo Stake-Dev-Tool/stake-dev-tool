@@ -84,3 +84,7 @@ snapshots (Hetzner/Netcup) on top are cheap insurance.
   `SERVER_PUBLIC_URL` drives invite/device links — set both.
 - The wildcard `*.play` block in `Caddyfile` stays commented until share
   v2 (M5) ships.
+- The image build keeps cargo and pnpm caches in BuildKit cache mounts,
+  so repeat builds on the same host are incremental. They grow over time;
+  `docker builder prune` reclaims the space (the next deploy then pays one
+  full rebuild).

@@ -1,5 +1,8 @@
+# syntax=docker/dockerfile:1
 # Production image for the cloud server (crates/server).
 # Build from the REPO ROOT:  docker build -f deploy/Dockerfile -t stake-dev-server .
+# Requires BuildKit (the default builder since Docker 23) for the RUN cache
+# mounts below; on a persistent host they make repeat builds incremental.
 #
 # Three stages: node builds the two SvelteKit apps (ui/ is embedded into the
 # lgs crate at compile time; web/ is served at runtime via SERVER_WEB_DIR),
@@ -10,11 +13,15 @@ FROM node:20-alpine AS frontend
 # Pinned major: corepack would fetch the latest pnpm (11+), which requires
 # Node 22 built-ins and crashes on node:20.
 RUN npm i -g pnpm@10
+# PNPM_HOME moves the package store to /pnpm/store, which lives on a cache
+# mount — repeat builds hit the store instead of re-downloading.
+ENV PNPM_HOME=/pnpm
 WORKDIR /repo
 COPY pnpm-workspace.yaml package.json pnpm-lock.yaml ./
 COPY ui/package.json ui/
 COPY web/package.json web/
-RUN pnpm install --frozen-lockfile --filter ui --filter web
+RUN --mount=type=cache,id=pnpm-store,target=/pnpm/store \
+    pnpm install --frozen-lockfile --filter ui --filter web
 COPY ui/ ui/
 COPY web/ web/
 RUN pnpm --filter ui build && pnpm --filter web build
@@ -25,14 +32,20 @@ COPY Cargo.toml Cargo.lock ./
 COPY crates/ crates/
 # lgs embeds ui/build via include_dir in release builds.
 COPY --from=frontend /repo/ui/build ui/build
-RUN cargo build --release -p server
+# Registry + target dir live on cache mounts, so dependencies compile once
+# per host and later builds are incremental. Cache mounts are not part of
+# the layer, so the binary must be copied out in the same RUN.
+RUN --mount=type=cache,id=cargo-registry,target=/usr/local/cargo/registry \
+    --mount=type=cache,id=cargo-target,target=/repo/target \
+    cargo build --release -p server \
+    && cp /repo/target/release/server /repo/server
 
 FROM debian:bookworm-slim
 RUN apt-get update \
     && apt-get install -y --no-install-recommends ca-certificates curl \
     && rm -rf /var/lib/apt/lists/*
 WORKDIR /app
-COPY --from=backend /repo/target/release/server /usr/local/bin/server
+COPY --from=backend /repo/server /usr/local/bin/server
 COPY --from=frontend /repo/web/build /app/web
 # Pre-owned by the runtime user so the blobdata volume (fs storage backend)
 # initializes writable — named volumes copy ownership from the image path.
