@@ -308,7 +308,62 @@
   function captureDomLayer(cap) {
     var clone;
     try {
+      // Snapshot the element list BEFORE cloning/mutating: a deep clone has the
+      // exact same querySelectorAll('*') order, which is the live→clone map.
+      var liveAll = document.body.querySelectorAll('*');
       clone = document.body.cloneNode(true);
+      var cloneAll = clone.querySelectorAll('*');
+
+      // This raster paints ON TOP of the WebGL layer, so whatever the real
+      // page paints BEHIND the game canvas must not repaint here and cover it:
+      // the canvas + its ancestor chain lose their backgrounds, and elements
+      // the hit-test stack reports underneath the canvas (full-screen backdrop
+      // siblings) are hidden outright — they are invisible on the real page
+      // anyway, covered by the canvas.
+      var transparent = new Set();
+      var hidden = new Set();
+      var canvases = document.body.querySelectorAll('canvas');
+      for (var c = 0; c < canvases.length; c++) {
+        var cv = canvases[c];
+        if (cv.getAttribute('data-sdt-feedback')) continue;
+        var rect = cv.getBoundingClientRect();
+        if (rect.width <= 0 || rect.height <= 0) continue;
+        transparent.add(cv);
+        for (var anc = cv.parentElement; anc && anc !== document.body; anc = anc.parentElement) {
+          transparent.add(anc);
+        }
+        var points = [
+          [rect.left + rect.width / 2, rect.top + rect.height / 2],
+          [rect.left + rect.width / 4, rect.top + rect.height / 4],
+          [rect.left + (3 * rect.width) / 4, rect.top + rect.height / 4],
+          [rect.left + rect.width / 4, rect.top + (3 * rect.height) / 4],
+          [rect.left + (3 * rect.width) / 4, rect.top + (3 * rect.height) / 4]
+        ];
+        for (var p = 0; p < points.length; p++) {
+          var stack;
+          try { stack = document.elementsFromPoint(points[p][0], points[p][1]); } catch (e) { stack = []; }
+          var belowCanvas = false;
+          for (var st = 0; st < stack.length; st++) {
+            if (stack[st] === cv) { belowCanvas = true; continue; }
+            if (!belowCanvas) continue;
+            var under = stack[st];
+            if (under === document.body || under === document.documentElement) continue;
+            if (under.contains(cv)) continue; // ancestor — handled above
+            hidden.add(under);
+          }
+        }
+      }
+      for (var m = 0; m < liveAll.length && m < cloneAll.length; m++) {
+        if (transparent.has(liveAll[m])) {
+          cloneAll[m].style.setProperty('background', 'transparent', 'important');
+          cloneAll[m].style.setProperty('background-image', 'none', 'important');
+          cloneAll[m].style.setProperty('box-shadow', 'none', 'important');
+        }
+        if (hidden.has(liveAll[m])) {
+          cloneAll[m].style.setProperty('visibility', 'hidden', 'important');
+        }
+      }
+
       // Strip our own UI and anything non-visual; canvases/videos stay as
       // empty boxes so the layout they anchor is preserved.
       var junk = clone.querySelectorAll('[data-sdt-feedback], script, noscript');
@@ -335,6 +390,10 @@
       clone.style.margin = '0';
       clone.style.width = cap.w + 'px';
       clone.style.height = cap.h + 'px';
+      // The page background is already the base layer's fill — repainting it
+      // here would sit on top of the WebGL frame.
+      clone.style.setProperty('background', 'transparent', 'important');
+      clone.style.setProperty('background-image', 'none', 'important');
     } catch (e) {
       return Promise.reject(e);
     }
