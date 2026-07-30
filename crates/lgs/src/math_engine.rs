@@ -367,6 +367,18 @@ impl MathEngine {
                 // asynchronous request workers.
                 let books_path = self.file_path(&game, &mode.events);
                 let required_ids: Vec<u32> = sampler.entries.iter().map(|e| e.event_id).collect();
+                // Multi-GiB books take minutes to decompress + index, and the
+                // work sits squarely in the first request's latency. Bracket it
+                // with logs: a load that is merely slow and one that fails (and
+                // is therefore retried by every subsequent spin, since the cache
+                // cell stays empty) look identical from the outside otherwise.
+                tracing::info!(
+                    game = %game,
+                    mode = %mode.name,
+                    path = %books_path.display(),
+                    "loading books"
+                );
+                let started = std::time::Instant::now();
                 let books = tokio::task::spawn_blocking(move || {
                     let books_file = std::fs::File::open(&books_path).map_err(|e| {
                         AppError::Parse(format!("read {}: {e}", books_path.display()))
@@ -377,7 +389,24 @@ impl MathEngine {
                     )
                 })
                 .await
-                .map_err(|e| AppError::Parse(format!("books loader task failed: {e}")))??;
+                .map_err(|e| AppError::Parse(format!("books loader task failed: {e}")))?
+                .inspect_err(|e| {
+                    tracing::error!(
+                        game = %game,
+                        mode = %mode.name,
+                        secs = format!("{:.1}", started.elapsed().as_secs_f64()),
+                        error = %e,
+                        "books load FAILED — every spin will retry it from scratch"
+                    );
+                })?;
+                tracing::info!(
+                    game = %game,
+                    mode = %mode.name,
+                    decompressed_mib = books.buffer.len() / (1024 * 1024),
+                    indexed_ids = books.id_to_range.len(),
+                    secs = format!("{:.1}", started.elapsed().as_secs_f64()),
+                    "books loaded"
+                );
 
                 Ok::<Arc<ModeAssets>, AppError>(Arc::new(ModeAssets {
                     sampler: Arc::new(sampler),
@@ -683,8 +712,28 @@ fn decompress_and_index(
         unsafe { Mmap::map(&file) }.map_err(|e| AppError::Zstd(format!("mmap books: {e}")))?;
 
     if !line_index_complete || !required_ids.iter().all(|id| id_to_range.contains_key(id)) {
-        tracing::warn!("line-based books index incomplete; falling back to full JSON scan");
+        // This fallback re-parses every record as JSON. On a multi-GiB file it
+        // dwarfs the decompression it follows, so record what triggered it —
+        // a books file that trips it is the difference between a slow first
+        // spin and an unusable game.
+        let missing = required_ids
+            .iter()
+            .filter(|id| !id_to_range.contains_key(id))
+            .count();
+        tracing::warn!(
+            line_index_complete,
+            indexed_ids = id_to_range.len(),
+            missing_required_ids = missing,
+            decompressed_mib = buffer.len() / (1024 * 1024),
+            "line-based books index incomplete; falling back to a full JSON scan"
+        );
+        let started = std::time::Instant::now();
         id_to_range = index_by_json_stream(&buffer)?;
+        tracing::info!(
+            indexed_ids = id_to_range.len(),
+            secs = format!("{:.1}", started.elapsed().as_secs_f64()),
+            "books JSON scan complete"
+        );
     }
 
     Ok(BooksIndex {
