@@ -8,22 +8,147 @@ use rand::RngCore;
 use serde::Serialize;
 use serde_json::value::RawValue;
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio::fs;
 use tokio::sync::OnceCell;
 
 pub struct BooksIndex {
-    /// Decompressed books, backed by an unlinked temp file via mmap. File-backed
-    /// pages stay clean, so the OS can reclaim them under memory pressure
-    /// instead of pushing multi-GB buffers to swap.
+    /// Decompressed books, mmapped. File-backed pages stay clean, so the OS can
+    /// reclaim them under memory pressure instead of pushing multi-GB buffers to
+    /// swap.
     buffer: Mmap,
-    /// Maps each book's `id` field to its (start, end) byte range in `buffer`.
-    /// Built by scanning every line at load time — indexing by `id` rather than
-    /// by line position because math-sdk writes `library[sim+1] = Book(sim)`,
-    /// so line N contains id N-1 (not id N as the name might suggest).
-    /// Offsets are u64: decompressed books routinely exceed 4 GiB.
-    pub id_to_range: HashMap<u32, (u64, u64)>,
+    /// Maps each book's `id` field to its byte range in `buffer` — by `id`
+    /// rather than by line position, because math-sdk writes
+    /// `library[sim+1] = Book(sim)`, so line N holds id N-1.
+    index: IdIndex,
+}
+
+/// One indexed record: its `id` and byte range in the decompressed buffer.
+/// Offsets are u64 — decompressed books routinely exceed 4 GiB.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct IdRange {
+    id: u32,
+    start: u64,
+    end: u64,
+}
+
+/// Sorted id → byte-range index, binary-searched in place.
+///
+/// A `HashMap` of the same data costs several times the memory — and its growth
+/// reallocates the whole table mid-build, the peak that hurts most on a
+/// multi-GiB publish. A sorted run of fixed-size records also has the property
+/// that matters more here: it can be written to a sidecar file and later loaded
+/// by `mmap` alone, with no parsing and no heap, instead of being rebuilt from
+/// scratch every time the process starts.
+enum IdIndex {
+    /// Freshly built, or loaded where the sidecar could not be written.
+    Owned(Vec<IdRange>),
+    /// Mapped from a sidecar file: `IDX_HEADER` bytes, then `count` records.
+    Mapped { map: Mmap, count: usize },
+}
+
+const IDX_MAGIC: &[u8; 8] = b"SDTBIDX1";
+/// magic + indexed buffer length + record count.
+const IDX_HEADER: usize = 8 + 8 + 8;
+/// id + start + end, little-endian.
+const IDX_RECORD: usize = 4 + 8 + 8;
+
+impl IdIndex {
+    fn len(&self) -> usize {
+        match self {
+            IdIndex::Owned(entries) => entries.len(),
+            IdIndex::Mapped { count, .. } => *count,
+        }
+    }
+
+    fn record(&self, i: usize) -> IdRange {
+        match self {
+            IdIndex::Owned(entries) => entries[i],
+            IdIndex::Mapped { map, .. } => {
+                let at = IDX_HEADER + i * IDX_RECORD;
+                let bytes = &map[at..at + IDX_RECORD];
+                IdRange {
+                    id: u32::from_le_bytes(bytes[0..4].try_into().expect("4 bytes")),
+                    start: u64::from_le_bytes(bytes[4..12].try_into().expect("8 bytes")),
+                    end: u64::from_le_bytes(bytes[12..20].try_into().expect("8 bytes")),
+                }
+            }
+        }
+    }
+
+    fn get(&self, id: u32) -> Option<(u64, u64)> {
+        let (mut lo, mut hi) = (0usize, self.len());
+        while lo < hi {
+            let mid = lo + (hi - lo) / 2;
+            let entry = self.record(mid);
+            match entry.id.cmp(&id) {
+                std::cmp::Ordering::Less => lo = mid + 1,
+                std::cmp::Ordering::Greater => hi = mid,
+                std::cmp::Ordering::Equal => return Some((entry.start, entry.end)),
+            }
+        }
+        None
+    }
+
+    /// Load a sidecar index, but only if it indexes a buffer of exactly
+    /// `buffer_len` bytes. Any mismatch, truncation, or unknown magic simply
+    /// reads as "absent" — the caller rebuilds, which is always correct.
+    fn open(path: &Path, buffer_len: u64) -> Option<Self> {
+        let map = open_mmap(path)?;
+        if map.len() < IDX_HEADER || &map[0..8] != IDX_MAGIC {
+            return None;
+        }
+        let indexed_len = u64::from_le_bytes(map[8..16].try_into().ok()?);
+        if indexed_len != buffer_len {
+            return None;
+        }
+        let count = u64::from_le_bytes(map[16..24].try_into().ok()?) as usize;
+        if map.len() != IDX_HEADER + count * IDX_RECORD {
+            return None;
+        }
+        Some(IdIndex::Mapped { map, count })
+    }
+
+    /// Write `entries` to a sidecar and return the mmapped result, falling back
+    /// to holding them in memory if the write fails (read-only math folder).
+    fn persist(path: &Path, buffer_len: u64, entries: Vec<IdRange>) -> Self {
+        match write_index(path, buffer_len, &entries) {
+            Ok(()) => {
+                if let Some(mapped) = Self::open(path, buffer_len) {
+                    return mapped;
+                }
+                tracing::warn!(path = %path.display(), "wrote books index but could not map it back");
+            }
+            Err(e) => tracing::warn!(
+                path = %path.display(),
+                error = %e,
+                "cannot persist the books index; it will be rebuilt on every restart"
+            ),
+        }
+        IdIndex::Owned(entries)
+    }
+}
+
+/// Serialize the index to `path` via a temporary file + rename, so a crash
+/// mid-write never leaves a file a later run would trust.
+fn write_index(path: &Path, buffer_len: u64, entries: &[IdRange]) -> std::io::Result<()> {
+    use std::io::Write;
+
+    let tmp_path = sidecar(path, ".tmp");
+    let file = std::fs::File::create(&tmp_path)?;
+    let mut out = std::io::BufWriter::with_capacity(4 << 20, file);
+    out.write_all(IDX_MAGIC)?;
+    out.write_all(&buffer_len.to_le_bytes())?;
+    out.write_all(&(entries.len() as u64).to_le_bytes())?;
+    for entry in entries {
+        out.write_all(&entry.id.to_le_bytes())?;
+        out.write_all(&entry.start.to_le_bytes())?;
+        out.write_all(&entry.end.to_le_bytes())?;
+    }
+    let file = out.into_inner().map_err(|e| e.into_error())?;
+    file.sync_all()?;
+    std::fs::rename(&tmp_path, path)
 }
 
 pub struct WeightSampler {
@@ -430,17 +555,14 @@ impl MathEngine {
         let required_ids: Vec<u32> = sampler.entries.iter().map(|e| e.event_id).collect();
         let index = cell
             .get_or_try_init(|| async {
-                // Stream the compressed books straight from disk: at up to ~1 GiB
-                // compressed, buffering the whole file first would leave a same-
-                // sized hole in the allocator's large-block cache on every load.
-                // Decompression and file I/O are blocking, so keep them off the
-                // asynchronous request workers.
+                // Decompression, indexing and file I/O are blocking, so keep them
+                // off the asynchronous request workers.
                 //
-                // Multi-GiB books take minutes to decompress + index, and the work
-                // sits squarely in the first request's latency. Bracket it with
-                // logs: a load that is merely slow and one that fails (and is
-                // therefore retried by every subsequent spin, since the cache cell
-                // stays empty) look identical from the outside otherwise.
+                // A cold load of multi-GiB books takes minutes; a warm one maps
+                // the sidecars and takes milliseconds. Bracket both with logs —
+                // a load that is merely slow and one that FAILS (and is therefore
+                // retried by every subsequent spin, since the cache cell stays
+                // empty) look identical from the outside otherwise.
                 tracing::info!(
                     game = %game,
                     mode = %mode.name,
@@ -449,30 +571,23 @@ impl MathEngine {
                 );
                 let started = std::time::Instant::now();
                 let path = books_path.clone();
-                let books = tokio::task::spawn_blocking(move || {
-                    let books_file = std::fs::File::open(&path)
-                        .map_err(|e| AppError::Parse(format!("read {}: {e}", path.display())))?;
-                    decompress_and_index(
-                        std::io::BufReader::with_capacity(4 << 20, books_file),
-                        &required_ids,
-                    )
-                })
-                .await
-                .map_err(|e| AppError::Parse(format!("books loader task failed: {e}")))?
-                .inspect_err(|e| {
-                    tracing::error!(
-                        game = %game,
-                        path = %books_path.display(),
-                        secs = format!("{:.1}", started.elapsed().as_secs_f64()),
-                        error = %e,
-                        "books load FAILED — every spin will retry it from scratch"
-                    );
-                })?;
+                let books = tokio::task::spawn_blocking(move || open_books(&path, &required_ids))
+                    .await
+                    .map_err(|e| AppError::Parse(format!("books loader task failed: {e}")))?
+                    .inspect_err(|e| {
+                        tracing::error!(
+                            game = %game,
+                            path = %books_path.display(),
+                            secs = format!("{:.1}", started.elapsed().as_secs_f64()),
+                            error = %e,
+                            "books load FAILED — every spin will retry it from scratch"
+                        );
+                    })?;
                 tracing::info!(
                     game = %game,
                     path = %books_path.display(),
                     decompressed_mib = books.buffer.len() / (1024 * 1024),
-                    indexed_ids = books.id_to_range.len(),
+                    indexed_ids = books.index.len(),
                     secs = format!("{:.1}", started.elapsed().as_secs_f64()),
                     "books loaded"
                 );
@@ -762,36 +877,146 @@ fn parse_weights(text: &str) -> AppResult<WeightSampler> {
     })
 }
 
-fn decompress_and_index(
-    compressed: impl std::io::Read,
-    required_ids: &[u32],
-) -> AppResult<BooksIndex> {
-    // Stream-decompress into an unlinked temp file, then mmap it read-only.
-    // The temp file has no path (already deleted); the OS frees the disk space
-    // as soon as the mmap is dropped.
-    let file = tempfile::tempfile().map_err(|e| AppError::Zstd(format!("temp books file: {e}")))?;
+/// Sidecar suffixes written next to a `*.zst` books file: the decompressed
+/// bytes, and the id index over them.
+const RAW_SUFFIX: &str = ".raw";
+const IDX_SUFFIX: &str = ".idx";
 
-    // Fast path: math-sdk publish files are strict JSONL, so ids can be
-    // harvested from line starts while the decompressed stream is being
-    // written out — the multi-GiB buffer is never re-read. Trust the result
-    // only if it accounts for every id the weights table can ask for;
-    // otherwise (adjacent records, multi-line values…) fall back to an
-    // exhaustive JSON stream scan of the mmap.
-    let mut writer = IndexingWriter::new(std::io::BufWriter::with_capacity(4 << 20, file));
-    zstd::stream::copy_decode(compressed, &mut writer)
-        .map_err(|e| AppError::Zstd(e.to_string()))?;
-    let (writer, mut id_to_range, line_index_complete) = writer.finish();
-    let file = writer
-        .into_inner()
-        .map_err(|e| AppError::Zstd(format!("flush books: {e}")))?;
+fn sidecar(books_zst: &Path, suffix: &str) -> PathBuf {
+    let mut name = books_zst.as_os_str().to_os_string();
+    name.push(suffix);
+    PathBuf::from(name)
+}
+
+/// Open a books file for reading, preparing whatever is missing.
+///
+/// The expensive parts — decompressing several GiB and indexing them — are
+/// written next to the source as `<books>.zst.raw` / `<books>.zst.idx` and
+/// reused verbatim on every later open, including after a restart. Materialized
+/// revisions are immutable, so a sidecar can only be stale if it does not match
+/// the buffer it indexes, which the header check below catches.
+///
+/// If the directory cannot be written (a read-only math folder), both fall back
+/// to the previous behavior: an anonymous temp file and an in-memory index,
+/// rebuilt on every process start.
+fn open_books(books_zst: &Path, required_ids: &[u32]) -> AppResult<BooksIndex> {
+    let raw_path = sidecar(books_zst, RAW_SUFFIX);
+    let idx_path = sidecar(books_zst, IDX_SUFFIX);
+
+    let buffer = match open_mmap(&raw_path) {
+        Some(buffer) => {
+            tracing::info!(
+                path = %raw_path.display(),
+                mib = buffer.len() / (1024 * 1024),
+                "reusing decompressed books"
+            );
+            buffer
+        }
+        None => decompress(books_zst, &raw_path)?,
+    };
+
+    // A matching sidecar index loads by mmap alone: no parse, no heap, and none
+    // of the minutes the build below costs.
+    if let Some(index) = IdIndex::open(&idx_path, buffer.len() as u64) {
+        tracing::info!(
+            path = %idx_path.display(),
+            indexed_ids = index.len(),
+            "reusing books index"
+        );
+        return Ok(BooksIndex { buffer, index });
+    }
+
+    let entries = build_index(&buffer, required_ids)?;
+    let index = IdIndex::persist(&idx_path, buffer.len() as u64, entries);
+    Ok(BooksIndex { buffer, index })
+}
+
+/// mmap `path` if it exists and is non-empty. A zero-length file is treated as
+/// absent: it is what a crash mid-write leaves behind, and mapping it would
+/// produce an empty buffer rather than an error.
+fn open_mmap(path: &Path) -> Option<Mmap> {
+    let file = std::fs::File::open(path).ok()?;
+    if file.metadata().ok()?.len() == 0 {
+        return None;
+    }
+    // SAFETY: the file is a materialized revision artifact, immutable for the
+    // lifetime of the mapping (revisions are content-addressed and never
+    // rewritten in place; eviction deletes the whole directory).
+    unsafe { Mmap::map(&file) }.ok()
+}
+
+/// Stream-decompress `books_zst` to `raw_path` and mmap the result. Written to a
+/// temporary name and renamed, so a crash never leaves a half-written file that
+/// a later run would trust.
+fn decompress(books_zst: &Path, raw_path: &Path) -> AppResult<Mmap> {
+    let source = std::fs::File::open(books_zst)
+        .map_err(|e| AppError::Parse(format!("read {}: {e}", books_zst.display())))?;
+    let source = std::io::BufReader::with_capacity(4 << 20, source);
+
+    let tmp_path = sidecar(raw_path, ".tmp");
+    let started = std::time::Instant::now();
+    let file = match std::fs::File::create(&tmp_path) {
+        Ok(file) => {
+            let mut writer = std::io::BufWriter::with_capacity(4 << 20, file);
+            zstd::stream::copy_decode(source, &mut writer)
+                .map_err(|e| AppError::Zstd(e.to_string()))?;
+            let file = writer
+                .into_inner()
+                .map_err(|e| AppError::Zstd(format!("flush books: {e}")))?;
+            file.sync_all()
+                .map_err(|e| AppError::Zstd(format!("sync books: {e}")))?;
+            std::fs::rename(&tmp_path, raw_path)
+                .map_err(|e| AppError::Zstd(format!("publish decompressed books: {e}")))?;
+            std::fs::File::open(raw_path)
+                .map_err(|e| AppError::Zstd(format!("reopen decompressed books: {e}")))?
+        }
+        // Read-only math folder: keep working, just without the reuse.
+        Err(e) => {
+            tracing::warn!(
+                path = %tmp_path.display(),
+                error = %e,
+                "cannot persist decompressed books; falling back to a temp file \
+                 (it will be redone on every restart)"
+            );
+            let file =
+                tempfile::tempfile().map_err(|e| AppError::Zstd(format!("temp books: {e}")))?;
+            let mut writer = std::io::BufWriter::with_capacity(4 << 20, file);
+            zstd::stream::copy_decode(source, &mut writer)
+                .map_err(|e| AppError::Zstd(e.to_string()))?;
+            writer
+                .into_inner()
+                .map_err(|e| AppError::Zstd(format!("flush books: {e}")))?
+        }
+    };
+
     let buffer =
         unsafe { Mmap::map(&file) }.map_err(|e| AppError::Zstd(format!("mmap books: {e}")))?;
+    tracing::info!(
+        path = %raw_path.display(),
+        mib = buffer.len() / (1024 * 1024),
+        secs = format!("{:.1}", started.elapsed().as_secs_f64()),
+        "decompressed books"
+    );
+    Ok(buffer)
+}
+
+/// Build the sorted id index over a decompressed buffer.
+///
+/// Fast path: math-sdk publish files are strict JSONL, so ids can be harvested
+/// from line starts in one sequential pass. Trust that only if it accounts for
+/// every id the weights table can ask for; otherwise (adjacent records,
+/// multi-line values…) fall back to an exhaustive JSON stream scan.
+fn build_index(buffer: &[u8], required_ids: &[u32]) -> AppResult<Vec<IdRange>> {
+    let started = std::time::Instant::now();
+    let mut writer = IndexingWriter::new(std::io::sink());
+    writer.feed(buffer);
+    let (_, mut id_to_range, line_index_complete) = writer.finish();
 
     if !line_index_complete || !required_ids.iter().all(|id| id_to_range.contains_key(id)) {
         // This fallback re-parses every record as JSON. On a multi-GiB file it
         // dwarfs the decompression it follows, so record what triggered it —
         // a books file that trips it is the difference between a slow first
-        // spin and an unusable game.
+        // load and an unusable game.
         let missing = required_ids
             .iter()
             .filter(|id| !id_to_range.contains_key(id))
@@ -803,18 +1028,42 @@ fn decompress_and_index(
             decompressed_mib = buffer.len() / (1024 * 1024),
             "line-based books index incomplete; falling back to a full JSON scan"
         );
-        let started = std::time::Instant::now();
-        id_to_range = index_by_json_stream(&buffer)?;
-        tracing::info!(
-            indexed_ids = id_to_range.len(),
-            secs = format!("{:.1}", started.elapsed().as_secs_f64()),
-            "books JSON scan complete"
-        );
+        id_to_range = index_by_json_stream(buffer)?;
     }
 
+    let mut entries: Vec<IdRange> = id_to_range
+        .into_iter()
+        .map(|(id, (start, end))| IdRange { id, start, end })
+        .collect();
+    entries.sort_unstable_by_key(|entry| entry.id);
+    tracing::info!(
+        indexed_ids = entries.len(),
+        secs = format!("{:.1}", started.elapsed().as_secs_f64()),
+        "books index built"
+    );
+    Ok(entries)
+}
+
+/// Decompress + index into anonymous memory, reusing nothing and persisting
+/// nothing. The unit tests drive the indexing through this.
+#[cfg(test)]
+fn decompress_and_index(
+    compressed: impl std::io::Read,
+    required_ids: &[u32],
+) -> AppResult<BooksIndex> {
+    let file = tempfile::tempfile().map_err(|e| AppError::Zstd(format!("temp books file: {e}")))?;
+    let mut writer = std::io::BufWriter::with_capacity(4 << 20, file);
+    zstd::stream::copy_decode(compressed, &mut writer)
+        .map_err(|e| AppError::Zstd(e.to_string()))?;
+    let file = writer
+        .into_inner()
+        .map_err(|e| AppError::Zstd(format!("flush books: {e}")))?;
+    let buffer =
+        unsafe { Mmap::map(&file) }.map_err(|e| AppError::Zstd(format!("mmap books: {e}")))?;
+    let entries = build_index(&buffer, required_ids)?;
     Ok(BooksIndex {
         buffer,
-        id_to_range,
+        index: IdIndex::Owned(entries),
     })
 }
 
@@ -1019,10 +1268,10 @@ fn weighted_pick(sampler: &WeightSampler) -> WeightEntry {
 }
 
 fn read_event(idx: &BooksIndex, event_id: u32) -> AppResult<Arc<RawValue>> {
-    let &(start, end) = idx.id_to_range.get(&event_id).ok_or_else(|| {
+    let (start, end) = idx.index.get(event_id).ok_or_else(|| {
         AppError::Parse(format!(
             "event {event_id} not found in books ({} ids indexed)",
-            idx.id_to_range.len()
+            idx.index.len()
         ))
     })?;
     let start = usize::try_from(start)
@@ -1136,7 +1385,7 @@ mod tests {
         let buffer = unsafe { Mmap::map(&file) }.expect("map sparse books file");
         let books = BooksIndex {
             buffer,
-            id_to_range: HashMap::from([(42, (start, end))]),
+            index: IdIndex::Owned(vec![IdRange { id: 42, start, end }]),
         };
         let raw = read_event(&books, 42).expect("read event beyond 4 GiB");
 
@@ -1320,6 +1569,74 @@ mod tests {
         assert_eq!(engine.books.modes.len(), 2, "but two mode entries");
         // Each mode still keeps its own weights table.
         assert!(!Arc::ptr_eq(&a.sampler, &b.sampler));
+    }
+
+    // --- Sidecar reuse: the whole point is not paying the cost twice --------
+
+    #[test]
+    fn sidecars_make_a_reopen_independent_of_the_compressed_source() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let zst = dir.path().join("books.jsonl.zst");
+        std::fs::write(&zst, compressed_books(SHARED_BOOKS)).expect("write books");
+
+        let cold = open_books(&zst, &[1, 2]).expect("cold open");
+        assert_eq!(
+            read_event(&cold, 2).expect("read event").get(),
+            r#"[{"reveal":"win"}]"#
+        );
+        assert!(sidecar(&zst, RAW_SUFFIX).exists(), "decompressed sidecar");
+        assert!(sidecar(&zst, IDX_SUFFIX).exists(), "index sidecar");
+        drop(cold);
+
+        // Deleting the compressed source proves the second open reads the
+        // sidecars only — no decompression, no re-index.
+        std::fs::remove_file(&zst).expect("remove compressed source");
+        let warm = open_books(&zst, &[1, 2]).expect("warm open");
+        assert!(matches!(warm.index, IdIndex::Mapped { .. }));
+        assert_eq!(
+            read_event(&warm, 2).expect("read event").get(),
+            r#"[{"reveal":"win"}]"#
+        );
+    }
+
+    #[test]
+    fn a_sidecar_index_built_for_another_buffer_is_ignored() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("books.idx");
+        let entries = [IdRange {
+            id: 1,
+            start: 0,
+            end: 10,
+        }];
+        write_index(&path, 1234, &entries).expect("write index");
+
+        assert!(IdIndex::open(&path, 1234).is_some());
+        // A buffer of a different length means the index cannot describe it, so
+        // it must read as absent and be rebuilt rather than return bad offsets.
+        assert!(IdIndex::open(&path, 9999).is_none());
+    }
+
+    #[test]
+    fn mapped_and_owned_indexes_answer_identically() {
+        // Sparse ids (gaps between them) so the binary search is exercised on
+        // both hits and misses.
+        let entries: Vec<IdRange> = (0..50u32)
+            .map(|i| IdRange {
+                id: i * 3,
+                start: u64::from(i) * 10,
+                end: u64::from(i) * 10 + 5,
+            })
+            .collect();
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("probe.idx");
+        write_index(&path, 777, &entries).expect("write index");
+
+        let mapped = IdIndex::open(&path, 777).expect("mapped index");
+        let owned = IdIndex::Owned(entries);
+        assert_eq!(mapped.len(), owned.len());
+        for probe in 0..160u32 {
+            assert_eq!(mapped.get(probe), owned.get(probe), "id {probe}");
+        }
     }
 
     #[tokio::test]

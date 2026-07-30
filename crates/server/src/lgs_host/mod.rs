@@ -39,7 +39,7 @@ pub use dispatch::{dispatch, dispatch_workbench};
 use std::path::PathBuf;
 use std::sync::{Arc, OnceLock};
 
-use dashmap::DashMap;
+use dashmap::{DashMap, DashSet};
 use object_store::ObjectStore;
 use sqlx::PgPool;
 use uuid::Uuid;
@@ -73,6 +73,9 @@ pub(crate) struct LgsHost {
     /// Per-tenant decompressed-books cap applied on registration (config now,
     /// billing later). `None` leaves tenants sharing the global budget uncapped.
     books_cap: Option<u64>,
+    /// Tenants whose books warm-up has been kicked off, so it runs once per
+    /// revision instead of on every request that touches the mount.
+    warming: DashSet<TenantId>,
 }
 
 /// One [`LgsHost`] per distinct cache root. In production a single `AppState`
@@ -146,6 +149,7 @@ impl LgsHost {
             materializer: Materializer::new(cache_root, cache_budget),
             routers: DashMap::new(),
             books_cap,
+            warming: DashSet::new(),
         }
     }
 
@@ -159,7 +163,7 @@ impl LgsHost {
     /// over the materialized math root, apply the per-tenant books cap, and
     /// return the tenant's router (built + cached on first use).
     async fn router_for_revision(
-        &self,
+        self: &Arc<Self>,
         store: &dyn ObjectStore,
         pool: &PgPool,
         rev: &RevisionRef<'_>,
@@ -171,6 +175,7 @@ impl LgsHost {
         // root is `<number>/`, so the engine resolves `<number>/<game_slug>/file`.
         self.registry.get_or_create_disk(tenant.clone(), &math_root);
         self.registry.set_tenant_cap(&tenant, self.books_cap);
+        self.warm_books(&tenant, rev.game_slug);
 
         if let Some(cached) = self.routers.get(&tenant) {
             return Ok(cached.clone());
@@ -182,5 +187,35 @@ impl LgsHost {
         // `or_insert` collapses a lost race onto the winner's router; both are
         // equivalent (same tenant AppState), so returning either is correct.
         Ok(self.routers.entry(tenant).or_insert(built).clone())
+    }
+
+    /// Start the tenant's books warm-up in the background, at most once.
+    ///
+    /// Preparing a books file the first time — decompress, index, write both
+    /// beside the materialized math — takes minutes on a multi-GiB publish. Doing
+    /// it HERE means merely opening the workbench (or any request that touches
+    /// the mount) starts it, and by the time a player spins it is already done.
+    /// The inner LGS also warms on `authenticate`, but that is far too late: a
+    /// spin has to be fast, and authenticate-to-first-spin is a second or two.
+    ///
+    /// Failures are logged and the tenant is released, so the next request
+    /// retries rather than leaving the revision permanently cold.
+    fn warm_books(self: &Arc<Self>, tenant: &TenantId, game_slug: &str) {
+        if !self.warming.insert(tenant.clone()) {
+            return;
+        }
+        let Some(state) = self.registry.get(tenant) else {
+            self.warming.remove(tenant);
+            return;
+        };
+        let host = Arc::clone(self);
+        let tenant = tenant.clone();
+        let game = game_slug.to_string();
+        tokio::spawn(async move {
+            if let Err(e) = state.engine.preload(&game).await {
+                tracing::warn!(tenant = %tenant, game = %game, error = %e, "books warm-up failed");
+                host.warming.remove(&tenant);
+            }
+        });
     }
 }
