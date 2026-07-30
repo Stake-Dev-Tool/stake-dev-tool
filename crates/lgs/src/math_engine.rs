@@ -330,12 +330,21 @@ impl MathEngine {
             })
     }
 
-    pub async fn get_mode_cost(&self, game: &str, mode_name: &str) -> AppResult<u64> {
+    /// The total stake a `base_bet` translates to in `mode_name` (bet × cost
+    /// multiplier, exact for fractional costs). Falls back to the bet itself
+    /// when the mode can't be resolved — `/play` surfaces the real error a
+    /// moment later.
+    pub async fn total_bet_cost(
+        &self,
+        game: &str,
+        mode_name: &str,
+        base_bet: u64,
+    ) -> AppResult<u64> {
         Ok(self
             .get_mode(game, mode_name)
             .await
-            .map(|m| m.cost)
-            .unwrap_or(1))
+            .map(|m| m.total_bet(base_bet))
+            .unwrap_or(base_bet))
     }
 
     pub async fn load_assets(&self, game: &str, mode: &GameMode) -> AppResult<Arc<ModeAssets>> {
@@ -448,7 +457,7 @@ impl MathEngine {
         bet_amount: u64,
     ) -> AppResult<SpinResult> {
         let state = read_event(&assets.books, event_id)?;
-        let base_bet = bet_amount / mode.cost.max(1);
+        let base_bet = mode.base_bet(bet_amount);
         let payout = (base_bet.saturating_mul(payout_multiplier as u64)) / 100;
         Ok(SpinResult {
             event_id,
@@ -588,7 +597,7 @@ fn notable_near_percentile(
 
 pub struct ReplayResult {
     pub payout_multiplier: u32,
-    pub cost_multiplier: u64,
+    pub cost_multiplier: f64,
     pub state: Arc<RawValue>,
 }
 

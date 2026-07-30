@@ -37,7 +37,7 @@ async fn replay_handler(
     let result = state.engine.replay_event(&game, &mode, event).await?;
     Ok(Json(ReplayResponse {
         payout_multiplier: result.payout_multiplier as f64 / 100.0,
-        cost_multiplier: result.cost_multiplier as f64,
+        cost_multiplier: result.cost_multiplier,
         state: result.state,
     }))
 }

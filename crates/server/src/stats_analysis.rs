@@ -14,8 +14,9 @@
 //! `x_i = m_i / cost`. RTP `= Σ p·x`; `σ = sqrt(Σ p·x² − RTP²)`. All the
 //! probability fields are integer-weight sums divided by `W` (exact), while the
 //! RTP-share fields (CVaR, the ETLs, bucket contributions) accumulate `p·x` in
-//! f64. Payout comparisons run in integer "hundredths" space (`m ⋛ cost`
-//! becomes `payout ⋛ cost·100`) so boundaries are exact.
+//! f64. Payout comparisons run in integer "thousandths" space (`m ⋛ cost`
+//! becomes `payout·10 ⋛ cost·1000`) so boundaries stay exact even for
+//! fractional cost multipliers (2.5×, 1.25×).
 
 use std::collections::HashSet;
 
@@ -43,11 +44,15 @@ const DIST_EDGES: [f64; 15] = [
 /// `rows` must be non-empty with a non-zero total weight (the basic
 /// `ModeStats` path validates this first, so by the time we get here it holds);
 /// the few divisions that would otherwise blow up are guarded anyway.
-pub(crate) fn mode_analysis(mode: &str, cost: u64, rows: &[Weighted]) -> ModeAnalysis {
-    let cost_u = cost.max(1);
-    let cost_f = cost_u as f64;
-    // `cost` expressed in payout-hundredths, so `m ⋛ cost ⟺ payout ⋛ cost_h`.
-    let cost_h = cost_u.saturating_mul(100);
+pub(crate) fn mode_analysis(mode: &str, cost: f64, rows: &[Weighted]) -> ModeAnalysis {
+    let cost_f = if cost.is_finite() && cost > 0.0 {
+        cost
+    } else {
+        1.0
+    };
+    // `cost` in thousandths, exact for fractional buy prices (2.5 → 2500). A
+    // payout is in hundredths, so `m ⋛ cost ⟺ payout·10 ⋛ cost_m`.
+    let cost_m = (cost_f * 1000.0).round() as u64;
 
     let total_weight: u128 = rows.iter().map(|r| u128::from(r.weight)).sum();
     let total = total_weight as f64;
@@ -71,7 +76,7 @@ pub(crate) fn mode_analysis(mode: &str, cost: u64, rows: &[Weighted]) -> ModeAna
     let mut max_payout_w: u128 = 0; // total weight sitting on the top multiplier
     let mut unique: HashSet<u32> = HashSet::new();
 
-    let etl40_threshold = cost_h.saturating_mul(40); // 40·cost in hundredths
+    let etl40_threshold = cost_m.saturating_mul(40); // 40·cost in thousandths
 
     for r in rows {
         let wq = u128::from(r.weight);
@@ -81,22 +86,24 @@ pub(crate) fn mode_analysis(mode: &str, cost: u64, rows: &[Weighted]) -> ModeAna
         sum_px2 += p * x * x;
 
         let pay = u64::from(r.payout);
+        // Same payout, in thousandths, for the exact `⋛ cost` comparisons.
+        let pay_m = pay * 10;
         if pay == 0 {
             zero_w += wq;
         }
-        if pay > 0 && pay < cost_h {
+        if pay > 0 && pay_m < cost_m {
             sub_bet_w += wq;
         }
-        if pay >= cost_h {
+        if pay_m >= cost_m {
             win_w += wq;
         }
-        if pay > cost_h {
+        if pay_m > cost_m {
             profit_w += wq;
         }
-        if pay < cost_h {
+        if pay_m < cost_m {
             below_cost_w += wq;
         }
-        if pay <= cost_h {
+        if pay_m <= cost_m {
             le_cost_w += wq;
         }
         if pay >= 500_000 {
@@ -105,7 +112,7 @@ pub(crate) fn mode_analysis(mode: &str, cost: u64, rows: &[Weighted]) -> ModeAna
         if pay >= 1_000_000 {
             tail10000_w += wq;
         }
-        if pay > etl40_threshold {
+        if pay_m > etl40_threshold {
             etl_40 += p * x;
         }
         if pay > 1_000_000 {
@@ -203,9 +210,8 @@ pub(crate) fn mode_analysis(mode: &str, cost: u64, rows: &[Weighted]) -> ModeAna
 /// (cheapest) mode carries the extra `base_cost` compliance check and supplies
 /// the volatility / tail / CVaR / ETL figures of the global constraint table.
 pub(crate) fn revision_analysis(mut modes: Vec<ModeAnalysis>) -> RevisionAnalysis {
-    // Base mode = the cost==1 mode if present, else the cheapest. Because cost
-    // is guaranteed >= 1, a cost==1 mode is always the global minimum, so
-    // "first minimum cost" captures both cases. `min_by` keeps the first on ties.
+    // Base mode = the cheapest one; a cost==1 mode is the base in every real
+    // game folder. `min_by` keeps the first on ties.
     let base_idx = modes
         .iter()
         .enumerate()
@@ -593,7 +599,7 @@ mod tests {
     #[test]
     fn micro_fixture_mode_analysis_matches_hand_values() {
         let r = rows(&[(9000, 0), (900, 100), (90, 5000), (10, 42000)]);
-        let m = mode_analysis("base", 1, &r);
+        let m = mode_analysis("base", 1.0, &r);
 
         assert_eq!(m.mode, "base");
         assert!(close(m.cost, 1.0));
@@ -675,7 +681,7 @@ mod tests {
     #[test]
     fn micro_fixture_revision_is_three_star_not_two() {
         let r = rows(&[(9000, 0), (900, 100), (90, 5000), (10, 42000)]);
-        let a = revision_analysis(vec![mode_analysis("base", 1, &r)]);
+        let a = revision_analysis(vec![mode_analysis("base", 1.0, &r)]);
 
         assert!(!a.two_star_compliant);
         assert!(a.three_star_compliant);
@@ -720,7 +726,7 @@ mod tests {
     #[test]
     fn cost_100_mode_uses_x_not_m() {
         let r = rows(&[(8000, 0), (1900, 10000), (100, 200000)]);
-        let m = mode_analysis("buy", 100, &r);
+        let m = mode_analysis("buy", 100.0, &r);
 
         assert!(close(m.cost, 100.0));
         // RTP = 0.19*1 + 0.01*20 = 0.39 (x), NOT 0.19*100 + 0.01*2000 = 39 (m).
@@ -747,8 +753,8 @@ mod tests {
     /// cost-2000 buy mode (fails cost_multiplier and max_bet_cost at both stars).
     #[test]
     fn compliance_failures_yield_zero_stars() {
-        let base = mode_analysis("base", 1, &rows(&[(1500, 0), (8500, 100)])); // rtp 0.85
-        let buy = mode_analysis("buy", 2000, &rows(&[(9000, 0), (1000, 400_000)]));
+        let base = mode_analysis("base", 1.0, &rows(&[(1500, 0), (8500, 100)])); // rtp 0.85
+        let buy = mode_analysis("buy", 2000.0, &rows(&[(9000, 0), (1000, 400_000)]));
         let a = revision_analysis(vec![base, buy]);
 
         assert!(!a.two_star_compliant);

@@ -231,7 +231,7 @@ pub(crate) fn parse_weights_rows(weights_csv: &str) -> anyhow::Result<Vec<Weight
 /// * `max_win` = `max(payout) / 100`
 /// * `entries` = number of rows
 /// * `hit_rate`= share of total weight with a non-zero payout
-fn mode_stats_from_rows(mode: &str, cost: u64, rows: &[Weighted]) -> anyhow::Result<ModeStats> {
+fn mode_stats_from_rows(mode: &str, cost: f64, rows: &[Weighted]) -> anyhow::Result<ModeStats> {
     if rows.is_empty() {
         anyhow::bail!("lookup table has no rows");
     }
@@ -253,14 +253,18 @@ fn mode_stats_from_rows(mode: &str, cost: u64, rows: &[Weighted]) -> anyhow::Res
         anyhow::bail!("lookup table has zero total weight");
     }
 
-    let cost_f = cost.max(1) as f64;
+    let cost_f = if cost.is_finite() && cost > 0.0 {
+        cost
+    } else {
+        1.0
+    };
     let rtp = (weighted_payout as f64) / 100.0 / (total_weight as f64) / cost_f;
     let max_win = f64::from(max_payout) / 100.0;
     let hit_rate = (win_weight as f64) / (total_weight as f64);
 
     Ok(ModeStats {
         mode: mode.to_string(),
-        cost: cost as f64,
+        cost: cost_f,
         rtp,
         max_win,
         entries: rows.len() as u64,
@@ -271,7 +275,7 @@ fn mode_stats_from_rows(mode: &str, cost: u64, rows: &[Weighted]) -> anyhow::Res
 /// Compute one mode's basic stats from its lookup-table CSV (parse then
 /// aggregate). Retained for the module's unit tests.
 #[cfg(test)]
-fn compute_mode_stats(mode: &str, cost: u64, weights_csv: &str) -> anyhow::Result<ModeStats> {
+fn compute_mode_stats(mode: &str, cost: f64, weights_csv: &str) -> anyhow::Result<ModeStats> {
     let rows = parse_weights_rows(weights_csv)?;
     mode_stats_from_rows(mode, cost, &rows)
 }
@@ -286,7 +290,7 @@ mod tests {
         // rtp = 960000 / 100 / 10000 / 1 = 0.96
         // max_win = 42000 / 100 = 420.0 ; hit_rate = 1000/10000 = 0.10
         let csv = "0,9000,0\n1,900,100\n2,90,5000\n3,10,42000\n";
-        let s = compute_mode_stats("base", 1, csv).expect("stats");
+        let s = compute_mode_stats("base", 1.0, csv).expect("stats");
         assert_eq!(s.mode, "base");
         assert_eq!(s.cost, 1.0);
         assert!((s.rtp - 0.96).abs() < 1e-9, "rtp = {}", s.rtp);
@@ -303,21 +307,30 @@ mod tests {
     fn cost_divides_rtp() {
         // Same table but cost 10 → rtp is a tenth.
         let csv = "0,9000,0\n1,900,100\n2,90,5000\n3,10,42000\n";
-        let s = compute_mode_stats("bonus", 10, csv).expect("stats");
+        let s = compute_mode_stats("bonus", 10.0, csv).expect("stats");
         assert_eq!(s.cost, 10.0);
         assert!((s.rtp - 0.096).abs() < 1e-9, "rtp = {}", s.rtp);
     }
 
     #[test]
+    fn fractional_cost_divides_rtp() {
+        // A 2.5× buy mode: rtp = 0.96 / 2.5 = 0.384.
+        let csv = "0,9000,0\n1,900,100\n2,90,5000\n3,10,42000\n";
+        let s = compute_mode_stats("buy", 2.5, csv).expect("stats");
+        assert_eq!(s.cost, 2.5);
+        assert!((s.rtp - 0.384).abs() < 1e-9, "rtp = {}", s.rtp);
+    }
+
+    #[test]
     fn blank_lines_are_skipped() {
-        let s = compute_mode_stats("base", 1, "\n0,1,0\n\n1,1,200\n").expect("stats");
+        let s = compute_mode_stats("base", 1.0, "\n0,1,0\n\n1,1,200\n").expect("stats");
         assert_eq!(s.entries, 2);
     }
 
     #[test]
     fn malformed_csv_is_an_error() {
-        assert!(compute_mode_stats("base", 1, "not,a,number\n").is_err());
-        assert!(compute_mode_stats("base", 1, "0,1\n").is_err()); // missing payout
-        assert!(compute_mode_stats("base", 1, "").is_err()); // no rows
+        assert!(compute_mode_stats("base", 1.0, "not,a,number\n").is_err());
+        assert!(compute_mode_stats("base", 1.0, "0,1\n").is_err()); // missing payout
+        assert!(compute_mode_stats("base", 1.0, "").is_err()); // no rows
     }
 }

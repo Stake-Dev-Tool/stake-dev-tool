@@ -19,6 +19,11 @@ use wasm_bindgen::prelude::*;
 
 const API_MULTIPLIER: u64 = 1_000_000;
 
+/// Fixed-point scale for a mode's cost multiplier — mirrors `lgs::types`, so
+/// fractional buy prices (`2.5`, `1.25`) charge and pay out identically in the
+/// browser engine and in the native LGS.
+const COST_SCALE: u64 = 1_000;
+
 // ============================================================
 // Shared types — mirror the shapes the game expects on the wire.
 // ============================================================
@@ -26,9 +31,37 @@ const API_MULTIPLIER: u64 = 1_000_000;
 #[derive(Debug, Clone, Deserialize)]
 struct GameMode {
     name: String,
-    cost: u64,
+    /// Cost multiplier as a multiple of the base bet — integer (`1`, `100`) or
+    /// fractional (`2.5`) depending on the game.
+    cost: f64,
     events: String,
     weights: String,
+}
+
+impl GameMode {
+    /// The cost multiplier in thousandths (`2.5` → `2500`), clamped to a sane
+    /// value so a malformed index.json can't zero-divide the bet arithmetic.
+    fn cost_milli(&self) -> u64 {
+        let scaled = (self.cost * COST_SCALE as f64).round();
+        if scaled.is_finite() && scaled >= 1.0 {
+            scaled as u64
+        } else {
+            COST_SCALE
+        }
+    }
+
+    /// What a `base_bet` costs the player in this mode.
+    fn total_bet(&self, base_bet: u64) -> u64 {
+        let total = u128::from(base_bet) * u128::from(self.cost_milli()) / u128::from(COST_SCALE);
+        u64::try_from(total).unwrap_or(u64::MAX)
+    }
+
+    /// Inverse of [`GameMode::total_bet`] — payouts are quoted against the base
+    /// bet, not against what was staked.
+    fn base_bet(&self, total_bet: u64) -> u64 {
+        let base = u128::from(total_bet) * u128::from(COST_SCALE) / u128::from(self.cost_milli());
+        u64::try_from(base).unwrap_or(u64::MAX)
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -417,7 +450,7 @@ impl PreviewEngine {
             self.balance = self.balance.saturating_add(prev.payout);
         }
 
-        let total_cost = amount.saturating_mul(mode_def.cost);
+        let total_cost = mode_def.total_bet(amount);
         if total_cost > self.balance {
             return Err(js_err("insufficient balance"));
         }
@@ -426,7 +459,7 @@ impl PreviewEngine {
         let pick = weighted_pick(&assets.sampler, &mut self.rng);
         let state = read_event(&assets.books, pick.event_id)
             .map_err(|e| js_err(&format!("read event {}: {e}", pick.event_id)))?;
-        let base_bet = total_cost / mode_def.cost.max(1);
+        let base_bet = mode_def.base_bet(total_cost);
         let payout = (base_bet.saturating_mul(pick.payout_multiplier as u64)) / 100;
 
         let round = Round {

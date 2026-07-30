@@ -114,8 +114,7 @@ async fn play(
         state.sessions.add_winnings(&session_id, round.payout);
     }
 
-    let mode_cost = state.engine.get_mode_cost(&game, &mode).await?;
-    let total_cost = amount.saturating_mul(mode_cost);
+    let total_cost = state.engine.total_bet_cost(&game, &mode, amount).await?;
 
     state
         .sessions

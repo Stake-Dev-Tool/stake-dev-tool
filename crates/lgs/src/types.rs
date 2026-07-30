@@ -52,16 +52,50 @@ pub struct Round {
     pub state: Arc<RawValue>,
 }
 
+/// Fixed-point scale for a mode's cost multiplier. Bet arithmetic runs in
+/// thousandths of a base bet so fractional buy prices (`1.25`, `2.5`) stay
+/// exact and round-trip — plain f64 division would drift on large stakes.
+pub const COST_SCALE: u64 = 1_000;
+
 #[derive(Debug, Clone, Deserialize)]
 pub struct GameMode {
     pub name: String,
-    /// Cost multiplier of the mode. math-sdk emits this either as an integer
-    /// or as a float (`"cost": 300.0`) depending on the generator version, so
-    /// accept integer-valued forms without silently rounding invalid costs.
+    /// Cost multiplier of the mode: what one spin costs as a multiple of the
+    /// base bet. math-sdk emits this as an integer (`1`, `100`), as an
+    /// integer-valued float (`300.0`) or as a fractional buy/ante price
+    /// (`2.5`, `1.25`) depending on the generator and the game, so the wire
+    /// type is a decimal. Use [`GameMode::total_bet`] / [`GameMode::base_bet`]
+    /// rather than multiplying by this directly.
     #[serde(deserialize_with = "de_cost")]
-    pub cost: u64,
+    pub cost: f64,
     pub events: String,
     pub weights: String,
+}
+
+impl GameMode {
+    /// The cost multiplier in thousandths (`2.5` → `2500`). Exact: `de_cost`
+    /// rejects any value that isn't representable at this scale.
+    pub fn cost_milli(&self) -> u64 {
+        let scaled = (self.cost * COST_SCALE as f64).round();
+        if scaled.is_finite() && scaled >= 1.0 {
+            scaled as u64
+        } else {
+            COST_SCALE
+        }
+    }
+
+    /// What a `base_bet` actually costs the player in this mode.
+    pub fn total_bet(&self, base_bet: u64) -> u64 {
+        let total = u128::from(base_bet) * u128::from(self.cost_milli()) / u128::from(COST_SCALE);
+        u64::try_from(total).unwrap_or(u64::MAX)
+    }
+
+    /// Inverse of [`GameMode::total_bet`]: the base bet a total stake buys.
+    /// Payouts are quoted against the base bet, not against what was staked.
+    pub fn base_bet(&self, total_bet: u64) -> u64 {
+        let base = u128::from(total_bet) * u128::from(COST_SCALE) / u128::from(self.cost_milli());
+        u64::try_from(base).unwrap_or(u64::MAX)
+    }
 }
 
 #[derive(Deserialize)]
@@ -71,23 +105,20 @@ enum CostValue {
     Float(f64),
 }
 
-fn de_cost<'de, D: serde::Deserializer<'de>>(d: D) -> Result<u64, D::Error> {
-    match CostValue::deserialize(d)? {
-        CostValue::Integer(value) if value > 0 => Ok(value),
-        CostValue::Float(value)
-            if value.is_finite()
-                && value >= 1.0
-                && value.fract() == 0.0
-                && value < u64::MAX as f64 =>
-        {
-            Ok(value as u64)
-        }
-        CostValue::Integer(value) => Err(serde::de::Error::custom(format!(
-            "invalid mode cost {value}; expected a positive integer"
-        ))),
-        CostValue::Float(value) => Err(serde::de::Error::custom(format!(
-            "invalid mode cost {value}; expected a positive integer"
-        ))),
+fn de_cost<'de, D: serde::Deserializer<'de>>(d: D) -> Result<f64, D::Error> {
+    let value = match CostValue::deserialize(d)? {
+        CostValue::Integer(value) => value as f64,
+        CostValue::Float(value) => value,
+    };
+    // Anything the fixed-point bet arithmetic couldn't represent exactly is an
+    // error rather than a silent rounding of the player's stake.
+    let scaled = value * COST_SCALE as f64;
+    if value.is_finite() && value > 0.0 && scaled.fract() == 0.0 && scaled <= u64::MAX as f64 {
+        Ok(value)
+    } else {
+        Err(serde::de::Error::custom(format!(
+            "invalid mode cost {value}; expected a positive number with at most 3 decimals (e.g. 1, 2.5, 100)"
+        )))
     }
 }
 
@@ -115,20 +146,43 @@ mod tests {
 
     #[test]
     fn mode_cost_accepts_integer_and_integer_valued_float() {
-        assert_eq!(mode_with_cost("300").expect("integer cost").cost, 300);
+        assert_eq!(mode_with_cost("300").expect("integer cost").cost, 300.0);
         assert_eq!(
             mode_with_cost("300.0")
                 .expect("integer-valued float cost")
                 .cost,
-            300
+            300.0
         );
     }
 
     #[test]
+    fn mode_cost_accepts_fractional_buy_prices() {
+        for (json, expected) in [("2.5", 2.5), ("1.25", 1.25), ("0.5", 0.5)] {
+            let mode = mode_with_cost(json).unwrap_or_else(|e| panic!("cost {json}: {e}"));
+            assert_eq!(mode.cost, expected);
+        }
+        assert_eq!(mode_with_cost("2.5").expect("2.5").cost_milli(), 2500);
+    }
+
+    #[test]
     fn mode_cost_rejects_values_that_would_be_silently_changed() {
-        assert!(mode_with_cost("300.5").is_err());
+        // Below the thousandth — the fixed-point bet arithmetic can't hold it.
+        assert!(mode_with_cost("2.5001").is_err());
         assert!(mode_with_cost("0").is_err());
         assert!(mode_with_cost("-1").is_err());
+    }
+
+    #[test]
+    fn fractional_cost_bet_arithmetic_round_trips() {
+        let mode = mode_with_cost("2.5").expect("fractional cost");
+        // One unit at API scale: 2.5× costs 2.5 units, and the payout base is
+        // the original bet again.
+        assert_eq!(mode.total_bet(API_MULTIPLIER), 2_500_000);
+        assert_eq!(mode.base_bet(2_500_000), API_MULTIPLIER);
+
+        let base = mode_with_cost("1").expect("base cost");
+        assert_eq!(base.total_bet(API_MULTIPLIER), API_MULTIPLIER);
+        assert_eq!(base.base_bet(API_MULTIPLIER), API_MULTIPLIER);
     }
 }
 
