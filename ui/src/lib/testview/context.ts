@@ -45,19 +45,25 @@ export type TestViewContext = {
   makeSessionId: (resId: string) => string;
   /**
    * Full `rgs_url` for the game front's play contract (the iframe query param):
-   * `<host><prefix>/api/rgs/<slug>`. The front + RGS are always same-origin, so
-   * the base is the browser authority (`location.host`) — NOT `apiBase`, which is
-   * an origin-relative path used by `fetch`. Desktop returns the pre-M6 value
-   * `<host>/api/rgs/<slug>` byte-identically; cloud splices the tenant prefix in.
+   * `<host><prefix>/api/rgs/<slug>`. The base is the browser authority
+   * (`location.host`) — NOT `apiBase`, which is an origin-relative path used by
+   * `fetch`. Desktop returns the pre-M6 value `<host>/api/rgs/<slug>`
+   * byte-identically; cloud splices the tenant prefix in.
+   *
+   * `prefixOverride` replaces the tenant prefix for a front that is NOT
+   * same-origin with us — a local dev server, whose cross-site calls never carry
+   * the session cookie. The cloud workbench passes the `/api/wb/<token>` mount
+   * it minted for exactly that case; desktop ignores it (its own LGS already
+   * allows any origin, and has no such mount).
    */
-  rgsUrl: (gameSlug: string) => string;
+  rgsUrl: (gameSlug: string, prefixOverride?: string) => string;
   /**
    * Authority(+prefix) base handed to the replay front as its `rgs_url` (the
    * replay contract passes the bare base and a separate `game` param, so this
    * carries no `/api/rgs`). Desktop → `<host>` (byte-identical); cloud →
-   * `<host><prefix>`.
+   * `<host><prefix>`. `prefixOverride` behaves as in `rgsUrl`.
    */
-  rgsBase: () => string;
+  rgsBase: (prefixOverride?: string) => string;
   /**
    * Prefix inserted into the test view's `localStorage` keys. `''` on desktop
    * (keys unchanged — byte-identical); on the cloud it carries the tenant prefix
@@ -108,6 +114,10 @@ export function detectTenantPrefix(pathname: string): string | null {
  *  - session id format `stake-dev-tool:<slug>:<resId>`.
  *  - `storageNamespace = ''` → localStorage keys unchanged.
  *  - all capabilities enabled (single-user desktop).
+ *
+ * `rgsUrl`/`rgsBase` ignore their `prefixOverride`: the desktop LGS answers any
+ * origin already (`CorsMode::Permissive`), so a front on a dev server needs no
+ * capability mount here.
  */
 export function desktopContext(
   searchParams: URLSearchParams,
@@ -168,8 +178,9 @@ export function cloudContext(
     // UNCHANGED from desktop on purpose (M6 task #6 / recon B.4): the client id
     // value stays as-is; only the storage keys below carry the tenant prefix.
     makeSessionId: (resId: string) => `stake-dev-tool:${gameSlug}:${resId}`,
-    rgsUrl: (slug: string) => `${host}${prefix}/api/rgs/${slug}`,
-    rgsBase: () => `${host}${prefix}`,
+    rgsUrl: (slug: string, prefixOverride?: string) =>
+      `${host}${prefixOverride ?? prefix}/api/rgs/${slug}`,
+    rgsBase: (prefixOverride?: string) => `${host}${prefixOverride ?? prefix}`,
     storageNamespace: `${prefix}:`,
     capabilities: {
       manageResolutions: true,

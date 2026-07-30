@@ -15,6 +15,7 @@ pub mod documents;
 pub mod error;
 pub mod math;
 pub mod shares;
+pub mod workbench;
 pub mod workspace;
 
 pub use admin::*;
@@ -22,6 +23,7 @@ pub use auth::*;
 pub use documents::*;
 pub use error::*;
 pub use math::*;
+pub use workbench::*;
 pub use workspace::*;
 
 /// Health of a single dependency the server talks to (database, object store).

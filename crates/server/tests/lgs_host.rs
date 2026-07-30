@@ -537,3 +537,213 @@ async fn distinct_revisions_are_distinct_tenants() {
             .exists()
     );
 }
+
+// ---------------------------------------------------------------------------
+// The cross-origin workbench mount (`/api/wb/:token/…`).
+//
+// A game front served from the developer's own dev server is a different SITE,
+// so the `SameSite=Lax` session cookie never rides along, and its CORS preflight
+// carries no credentials at all. These cover the path that replaces it: a
+// capability token minted by the (cookie-authenticated) workbench, carried in
+// the URL, honored behind a credential-less CORS layer.
+// ---------------------------------------------------------------------------
+
+/// Drive one request through the real router and return its status + headers.
+/// `Client` drops response headers, and the CORS assertions need them.
+async fn raw_response(
+    state: &AppState,
+    method: Method,
+    uri: &str,
+    headers: &[(&str, &str)],
+) -> (StatusCode, axum::http::HeaderMap) {
+    let mut builder = Request::builder().method(method).uri(uri);
+    for (name, value) in headers {
+        builder = builder.header(*name, *value);
+    }
+    let response = http::build_router(state.clone())
+        .oneshot(builder.body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    (response.status(), response.headers().clone())
+}
+
+/// Mint a workbench token as `owner` and return its mount prefix.
+async fn mint_prefix(owner: &mut Client, ws: &str, game: &str, revision: i32) -> String {
+    let (status, body) = owner
+        .post(
+            "/api/workbench-tokens",
+            json!({ "workspace": ws, "game": game, "revision": revision }),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "mint: {body}");
+    s(&body["prefix"]).to_string()
+}
+
+/// The point of the whole mechanism: a client holding ONLY the token — no
+/// session cookie, no bearer header — plays through the tenant router.
+#[tokio::test]
+async fn workbench_token_authorizes_a_cookieless_client() {
+    let Some(ctx) = setup().await else {
+        return;
+    };
+    let (mut owner, token) = owner_with_token(&ctx.state).await;
+    let ws = create_workspace(&mut owner).await;
+    push(&mut owner, &ws, GAME, &rev_files(INDEX_1MODE), None, &token).await;
+
+    let prefix = mint_prefix(&mut owner, &ws, GAME, 1).await;
+    assert!(
+        prefix.starts_with("/api/wb/sdt_wb_"),
+        "unexpected prefix: {prefix}"
+    );
+
+    // A brand-new client holds no cookies — the path token is the only
+    // credential in play.
+    let mut front = Client::new(&ctx.state);
+    let sid = format!("sess-{}", Uuid::new_v4());
+    let (status, auth) = front
+        .post(
+            &format!("{prefix}/api/rgs/{GAME}/wallet/authenticate"),
+            json!({ "sessionID": sid, "language": "en" }),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "authenticate: {auth}");
+    assert_eq!(auth["balance"]["amount"].as_u64().unwrap(), 10_000_000_000);
+}
+
+/// The preflight — what actually breaks today — is answered by the CORS layer
+/// with the origin mirrored back, and WITHOUT `allow-credentials`: the path
+/// token is the credential, so the browser must never attach the cookie.
+#[tokio::test]
+async fn workbench_preflight_mirrors_origin_without_credentials() {
+    let Some(ctx) = setup().await else {
+        return;
+    };
+    let (mut owner, token) = owner_with_token(&ctx.state).await;
+    let ws = create_workspace(&mut owner).await;
+    push(&mut owner, &ws, GAME, &rev_files(INDEX_1MODE), None, &token).await;
+    let prefix = mint_prefix(&mut owner, &ws, GAME, 1).await;
+
+    let (status, headers) = raw_response(
+        &ctx.state,
+        Method::OPTIONS,
+        &format!("{prefix}/api/rgs/{GAME}/wallet/authenticate"),
+        &[
+            ("origin", "http://localhost:5173"),
+            ("access-control-request-method", "POST"),
+            ("access-control-request-headers", "content-type"),
+        ],
+    )
+    .await;
+
+    assert!(status.is_success(), "preflight status: {status}");
+    assert_eq!(
+        headers
+            .get("access-control-allow-origin")
+            .and_then(|v| v.to_str().ok()),
+        Some("http://localhost:5173"),
+    );
+    assert!(
+        headers.get("access-control-allow-credentials").is_none(),
+        "the mount must never invite the session cookie"
+    );
+}
+
+/// The same preflight against the SAME-ORIGIN mount still fails — that mount is
+/// cookie-authenticated and deliberately carries no CORS layer. This is the 401
+/// that sends the workbench down the token path in the first place.
+#[tokio::test]
+async fn same_origin_mount_still_rejects_a_preflight() {
+    let Some(ctx) = setup().await else {
+        return;
+    };
+    let (mut owner, token) = owner_with_token(&ctx.state).await;
+    let ws = create_workspace(&mut owner).await;
+    push(&mut owner, &ws, GAME, &rev_files(INDEX_1MODE), None, &token).await;
+
+    let (status, headers) = raw_response(
+        &ctx.state,
+        Method::OPTIONS,
+        &ws_url(&ws, GAME, 1, &format!("api/rgs/{GAME}/wallet/authenticate")),
+        &[
+            ("origin", "http://localhost:5173"),
+            ("access-control-request-method", "POST"),
+        ],
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    assert!(headers.get("access-control-allow-origin").is_none());
+}
+
+/// An unknown or malformed token is a flat 401 — the mount never reveals whether
+/// a token ever existed.
+#[tokio::test]
+async fn unknown_workbench_token_is_401() {
+    let Some(ctx) = setup().await else {
+        return;
+    };
+    let mut front = Client::new(&ctx.state);
+    for token in ["sdt_wb_nope", "not-even-a-token"] {
+        let (status, _) = front
+            .post(
+                &format!("/api/wb/{token}/api/rgs/{GAME}/wallet/authenticate"),
+                json!({ "sessionID": "s", "language": "en" }),
+            )
+            .await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED, "token {token}");
+    }
+}
+
+/// Minting is membership-gated exactly like the mount it authorizes: a
+/// non-member gets the same 404 the tenant mount gives them.
+#[tokio::test]
+async fn non_member_cannot_mint_a_workbench_token() {
+    let Some(ctx) = setup().await else {
+        return;
+    };
+    let (mut owner, token) = owner_with_token(&ctx.state).await;
+    let ws = create_workspace(&mut owner).await;
+    push(&mut owner, &ws, GAME, &rev_files(INDEX_1MODE), None, &token).await;
+
+    let mut outsider = register(&ctx.state, &unique_email(), "Charlie").await;
+    let (status, _) = outsider
+        .post(
+            "/api/workbench-tokens",
+            json!({ "workspace": ws, "game": GAME, "revision": 1 }),
+        )
+        .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+}
+
+/// A token is pinned to the revision it was minted for, and cannot be re-pointed
+/// by editing the path — the path carries no revision at all.
+#[tokio::test]
+async fn workbench_token_is_pinned_to_its_revision() {
+    let Some(ctx) = setup().await else {
+        return;
+    };
+    let (mut owner, token) = owner_with_token(&ctx.state).await;
+    let ws = create_workspace(&mut owner).await;
+    push(&mut owner, &ws, GAME, &rev_files(INDEX_1MODE), None, &token).await;
+    push(
+        &mut owner,
+        &ws,
+        GAME,
+        &rev_files(INDEX_2MODE),
+        Some(1),
+        &token,
+    )
+    .await;
+
+    // Minted for revision 1 (one mode), even though revision 2 (two modes) is
+    // now the head.
+    let prefix = mint_prefix(&mut owner, &ws, GAME, 1).await;
+    let mut front = Client::new(&ctx.state);
+    let (status, modes) = front.get(&format!("{prefix}/{}", modes_rest(GAME))).await;
+    assert_eq!(status, StatusCode::OK, "{modes}");
+    assert_eq!(
+        modes["modes"].as_array().unwrap().len(),
+        1,
+        "the token must stay pinned to revision 1"
+    );
+}

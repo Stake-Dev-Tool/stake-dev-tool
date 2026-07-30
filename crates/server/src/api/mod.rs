@@ -114,6 +114,19 @@ pub fn router(max_blob_bytes: usize) -> Router<AppState> {
         .merge(shares::router()) // M5 — share links CRUD
         .merge(billing::router()) // M7 — plans + Stripe webhook
         .merge(admin::router()) // instance-admin surface under /admin/…
-        .merge(ws::router()) // M4 — cloud LGS under /ws/…
+        .merge(ws::router()) // M4 — cloud LGS under /ws/… (+ the /wb/… mount)
         .fallback(not_found)
+}
+
+#[cfg(test)]
+mod tests {
+    /// Building the router is where `matchit` rejects conflicting patterns, and
+    /// it panics when it does — so simply constructing it is the regression test
+    /// for route-shape conflicts (this crate has hit one before: see the note on
+    /// `router` about a static segment beside a `:token` param). No database or
+    /// state is needed to reach that check.
+    #[test]
+    fn every_route_pattern_coexists() {
+        let _ = super::router(1024);
+    }
 }

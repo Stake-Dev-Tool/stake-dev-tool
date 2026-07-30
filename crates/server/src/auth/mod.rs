@@ -30,6 +30,7 @@ pub const INVITE_PREFIX: &str = "sdt_inv_";
 pub const DEVICE_PREFIX: &str = "sdt_dev_";
 pub const PASSWORD_RESET_PREFIX: &str = "sdt_rst_";
 pub const EMAIL_VERIFY_PREFIX: &str = "sdt_vrf_";
+pub const WORKBENCH_PREFIX: &str = "sdt_wb_";
 
 /// Generates `<prefix><base64url(32 random bytes)>`. 256 bits of entropy makes
 /// the value unguessable; only its hash is stored.

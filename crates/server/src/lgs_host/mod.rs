@@ -32,8 +32,9 @@
 
 mod dispatch;
 mod materialize;
+pub mod workbench;
 
-pub use dispatch::dispatch;
+pub use dispatch::{dispatch, dispatch_workbench};
 
 use std::path::PathBuf;
 use std::sync::{Arc, OnceLock};

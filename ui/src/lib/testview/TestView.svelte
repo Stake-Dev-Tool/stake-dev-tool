@@ -391,7 +391,7 @@
       toast.error('Replay bet amount must be between 0.01 and 1000.');
       return;
     }
-    const url = replayUrl(gameUrl, gameSlug, ctx.rgsBase(), {
+    const url = replayUrl(gameUrl, gameSlug, rgsBaseFor(), {
       mode: replayMode,
       eventId: replayEventId,
       currency,
@@ -469,6 +469,64 @@
     if (!isCloud) return null;
     const base = ctx.apiBase.replace(/\/r\/\d+$/, '');
     return base || null;
+  }
+
+  // --- Cross-origin front: a capability mount in place of the session cookie ---
+  //
+  // The front normally shares our origin (it is served under `/api/ws/…/front/`),
+  // so its RGS calls carry the session cookie exactly like ours. A front on the
+  // developer's own dev server is a different SITE: `SameSite=Lax` keeps the
+  // cookie off its calls, and its CORS preflight carries no credentials at all,
+  // so the tenant mount can only ever answer 401. For that case the workbench
+  // mints a capability token and hands the front a `/api/wb/<token>` prefix,
+  // which authorizes without any cookie.
+  //
+  // Null whenever the front is same-origin (nothing to work around) and always
+  // on desktop, whose LGS already answers any origin.
+  let wbPrefix = $state<string | null>(null);
+
+  function isCrossOriginFront(url: string): boolean {
+    try {
+      return new URL(url, window.location.href).origin !== window.location.origin;
+    } catch {
+      return false;
+    }
+  }
+
+  /** RGS endpoints handed to the front, re-based on the capability mount when one is held. */
+  function rgsUrlFor(slug: string): string {
+    return ctx.rgsUrl(slug, wbPrefix ?? undefined);
+  }
+
+  function rgsBaseFor(): string {
+    return ctx.rgsBase(wbPrefix ?? undefined);
+  }
+
+  /**
+   * Bring `wbPrefix` in line with the current front: mint one for a cross-origin
+   * front (once — the token is pinned to the revision, not to the front), drop it
+   * as soon as the front is same-origin again.
+   *
+   * A mint failure is reported but never fatal: the front falls back to the
+   * cookie-authenticated tenant prefix, which is exactly what it had before this
+   * mechanism existed.
+   */
+  async function syncCrossOriginPrefix(): Promise<void> {
+    if (!isCloud || !workbench || !gameSlug) return;
+    if (!isCrossOriginFront(gameUrl)) {
+      wbPrefix = null;
+      return;
+    }
+    if (wbPrefix) return;
+    try {
+      wbPrefix = await workbench.mintWorkbenchPrefix(gameSlug, currentRevisionNumber);
+    } catch (e) {
+      console.warn('could not mint a workbench token for the cross-origin front:', e);
+      toast.error(
+        'Could not authorize this front to reach the RGS from its own origin. ' +
+          'Reload, or switch to a pushed front.'
+      );
+    }
   }
 
   type FrontSelection =
@@ -624,10 +682,15 @@
   function switchFront(newBase: string) {
     if (!newBase || newBase === gameUrl) return;
     gameUrl = newBase;
-    // Rebuild every mounted frame's src against the new front (same session).
-    for (const f of frames) {
-      if (f.src !== null) f.src = buildGameUrlFor(f.sessionId);
-    }
+    // The new front may sit on another origin (or come back to ours), so the
+    // capability mount is re-synced BEFORE the frames are rebuilt against it —
+    // their `rgs_url` depends on it.
+    void syncCrossOriginPrefix().then(() => {
+      // Rebuild every mounted frame's src against the new front (same session).
+      for (const f of frames) {
+        if (f.src !== null) f.src = buildGameUrlFor(f.sessionId);
+      }
+    });
     // Reflect the change in the address bar without reloading (query param only).
     try {
       const pageUrl = new URL(window.location.href);
@@ -762,12 +825,13 @@
 
   let busy = $state(false);
 
-  // The game front (iframe) and replay call back to the LGS/RGS same-origin, so
-  // their base is routed through the context: `ctx.rgsUrl(slug)` for the play
-  // iframe and `ctx.rgsBase()` for replay. Desktop resolves these to
-  // `location.host[/api/rgs/<slug>]` (byte-identical to before); a cloud context
-  // splices the tenant prefix in so they hit `<host><prefix>/api/rgs/…`. Devtool
-  // HTTP/SSE/prepare are apiBase-scoped via `http` (above) instead.
+  // The game front (iframe) and replay call back to the LGS/RGS through the
+  // context: `rgsUrlFor(slug)` for the play iframe and `rgsBaseFor()` for replay
+  // (both wrap `ctx` with the capability prefix — see `wbPrefix`). Desktop
+  // resolves these to `location.host[/api/rgs/<slug>]` (byte-identical to
+  // before); a cloud context splices the tenant prefix in so they hit
+  // `<host><prefix>/api/rgs/…`. Devtool HTTP/SSE/prepare are apiBase-scoped via
+  // `http` (above) instead.
   const SESSION_STORAGE_PREFIX = 'stake-dev-tool:test-sessions:';
   const SIDEBAR_COLLAPSED_STORAGE_KEY = 'stake-dev-tool:test-sidebar-collapsed';
   const VIEWPORT_STORAGE_PREFIX = 'stake-dev-tool:test-display-viewports:';
@@ -895,6 +959,9 @@
       toast.error('Missing game URL or slug. Open this page from the desktop launcher.');
       return;
     }
+    // Before any frame is built: a front on another origin needs the capability
+    // mount spliced into the `rgs_url` it is handed.
+    await syncCrossOriginPrefix();
     try {
       const s = await settingsHttp.get();
       allResolutions = s.resolutions;
@@ -986,7 +1053,7 @@
     if (!gameUrl) return '';
     const u = new URL(gameUrl);
     u.searchParams.set('sessionID', sessionId);
-    u.searchParams.set('rgs_url', ctx.rgsUrl(gameSlug));
+    u.searchParams.set('rgs_url', rgsUrlFor(gameSlug));
     u.searchParams.set('lang', language);
     u.searchParams.set('currency', currency);
     u.searchParams.set('device', device);

@@ -314,7 +314,30 @@ export function createCloudWorkbenchClient(workspaceSlug: string) {
     },
     /** Workspace SSE stream URL — carries named `revision_pushed` / `front_pushed`
      *  events. Consumed via `EventSource` (same-origin cookie). */
-    eventsUrl: (): string => `/api/workspaces/${ws}/events`
+    eventsUrl: (): string => `/api/workspaces/${ws}/events`,
+    /**
+     * `POST /api/workbench-tokens` — mint a capability token pinned to
+     * `(workspace, game, revision)` and return the mount prefix it authorizes
+     * (e.g. `/api/wb/sdt_wb_…`).
+     *
+     * A game front served from ANOTHER origin (a local dev server) is a
+     * different site, so its calls never carry the `SameSite=Lax` session cookie
+     * and the cookie-authenticated `/api/ws/…` prefix can only 401 them. This
+     * prefix moves the authorization into the path instead. Minting itself is
+     * same-origin and cookie-authenticated, like every other call here.
+     */
+    mintWorkbenchPrefix: async (game: string, revision: number): Promise<string> => {
+      const r = await fetch('/api/workbench-tokens', {
+        method: 'POST',
+        credentials: 'same-origin',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ workspace: ws, game, revision })
+      });
+      if (!r.ok) throw new CloudHttpError(r.status, `mint workbench token: ${r.status}`);
+      const j = (await r.json()) as { prefix?: string };
+      if (!j.prefix) throw new CloudHttpError(r.status, 'workbench token response had no prefix');
+      return j.prefix;
+    }
   };
 }
 
