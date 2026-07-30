@@ -78,52 +78,67 @@ impl MathSource for DiskMathSource {
     }
 }
 
-struct CachedMode {
+/// One cached books FILE, tracked by the LRU. `bytes` is its decompressed size,
+/// which is what the budget is really about — the temp-file disk space and the
+/// mmap it backs.
+struct CachedBooks {
     key: String,
     tenant: TenantId,
     bytes: u64,
-    cell: Arc<OnceCell<Arc<ModeAssets>>>,
+    cell: Arc<OnceCell<Arc<BooksIndex>>>,
 }
 
-/// Decompressed books are huge (frequently several GiB per mode), so only the
-/// most recently used modes stay cached; older entries are dropped, releasing
-/// their temp-file-backed mmaps. In-flight spins keep their `Arc<ModeAssets>`
-/// alive, so eviction is safe mid-request. The cache is bounded both by entry
-/// count and by total decompressed bytes, since each cached mode holds its
-/// decompressed size in temp-file disk space.
-const MAX_CACHED_MODES: usize = 8;
+/// Decompressed books are huge (frequently several GiB), so only the most
+/// recently used FILES stay cached; older entries are dropped, releasing their
+/// temp-file-backed mmaps. In-flight spins keep their `Arc<BooksIndex>` alive,
+/// so eviction is safe mid-request.
+const MAX_CACHED_FILES: usize = 8;
 const MAX_CACHED_BYTES: u64 = 40 * 1024 * 1024 * 1024;
 
 /// Process-global books cache, shared across every tenant so the decompressed-
-/// bytes budget and mode-count cap are enforced once for the whole process
-/// (exactly the recently-hardened single-tenant behavior, now shared).
+/// bytes budget and the entry cap are enforced once for the whole process.
+///
+/// ## Two levels, on purpose
+/// A mode owns a weights table; a books FILE owns the multi-GiB decompressed
+/// buffer and its id index. Those are cached separately because publishes
+/// routinely point several modes at ONE books file (`books.jsonl.zst`), varying
+/// only the weights. Keying the buffer by mode made each of them decompress and
+/// index the same file into its own temp file — N times the minutes, N times the
+/// disk — and, past the budget, evict each other in a loop so no spin was ever
+/// served from cache. The buffer is therefore keyed by (tenant, path) and shared
+/// by every mode that publishes against it.
 ///
 /// Cache keys embed the [`TenantId`], so two tenants hosting a game with the
 /// same slug never share a books mmap. An optional per-tenant byte cap keeps a
 /// single tenant from evicting everyone else out of the shared budget; the
 /// default is uncapped, which reproduces single-tenant behavior exactly.
 pub struct BooksCache {
+    /// Per-mode assets: the mode's sampler plus a handle on its shared index.
+    /// Small next to the books, and deliberately outside the byte budget.
     modes: DashMap<String, Arc<OnceCell<Arc<ModeAssets>>>>,
-    lru: parking_lot::Mutex<Vec<CachedMode>>,
-    max_modes: usize,
+    /// Per-file decompressed books — the half the budget below is about.
+    files: DashMap<String, Arc<OnceCell<Arc<BooksIndex>>>>,
+    lru: parking_lot::Mutex<Vec<CachedBooks>>,
+    max_files: usize,
     max_bytes: u64,
     tenant_caps: DashMap<TenantId, u64>,
 }
 
 impl BooksCache {
-    /// A cache with the default process-global budget (`MAX_CACHED_MODES`
+    /// A cache with the default process-global budget (`MAX_CACHED_FILES`
     /// entries / `MAX_CACHED_BYTES` decompressed bytes).
     pub fn new() -> Self {
-        Self::with_limits(MAX_CACHED_MODES, MAX_CACHED_BYTES)
+        Self::with_limits(MAX_CACHED_FILES, MAX_CACHED_BYTES)
     }
 
     /// A cache with explicit global limits (mainly for tests; production uses
     /// [`BooksCache::new`]).
-    pub fn with_limits(max_modes: usize, max_bytes: u64) -> Self {
+    pub fn with_limits(max_files: usize, max_bytes: u64) -> Self {
         Self {
             modes: DashMap::new(),
+            files: DashMap::new(),
             lru: parking_lot::Mutex::new(Vec::new()),
-            max_modes,
+            max_files,
             max_bytes,
             tenant_caps: DashMap::new(),
         }
@@ -142,17 +157,33 @@ impl BooksCache {
         }
     }
 
-    /// Compose the tenant-scoped cache key. The unit separator can appear in
+    /// Compose the tenant-scoped per-MODE key. The unit separator can appear in
     /// neither tenant ids nor game/mode slugs, so the key is unambiguous. One
     /// allocation per lookup — the same profile as the previous
     /// `"{game}:{mode}"` key.
-    fn cache_key(tenant: &TenantId, game: &str, mode: &str) -> String {
+    fn mode_key(tenant: &TenantId, game: &str, mode: &str) -> String {
         format!("{}\u{1f}{game}\u{1f}{mode}", tenant.as_str())
     }
 
-    /// Get (or lazily create) the `OnceCell` for an already-composed key.
-    fn entry_cell(&self, key: &str) -> Arc<OnceCell<Arc<ModeAssets>>> {
+    /// Compose the tenant-scoped per-FILE key. Keyed by the resolved path, so
+    /// every mode publishing against one books file lands on one entry.
+    fn file_key(tenant: &TenantId, path: &std::path::Path) -> String {
+        format!("{}\u{1f}{}", tenant.as_str(), path.display())
+    }
+
+    /// Get (or lazily create) the per-mode `OnceCell` for an already-composed key.
+    fn mode_cell(&self, key: &str) -> Arc<OnceCell<Arc<ModeAssets>>> {
         self.modes
+            .entry(key.to_string())
+            .or_insert_with(|| Arc::new(OnceCell::new()))
+            .clone()
+    }
+
+    /// Get (or lazily create) the per-file `OnceCell` for an already-composed key.
+    /// Two modes sharing a books file share this cell, so the multi-GiB
+    /// decompress + index happens once and the second mode simply waits on it.
+    fn file_cell(&self, key: &str) -> Arc<OnceCell<Arc<BooksIndex>>> {
+        self.files
             .entry(key.to_string())
             .or_insert_with(|| Arc::new(OnceCell::new()))
             .clone()
@@ -162,16 +193,16 @@ impl BooksCache {
         &self,
         key: &str,
         tenant: &TenantId,
-        cell: &Arc<OnceCell<Arc<ModeAssets>>>,
+        cell: &Arc<OnceCell<Arc<BooksIndex>>>,
         bytes: u64,
     ) {
         // Keep the LRU and DashMap mutation under one lock. A request may have
         // cloned a cell just before another request evicts it; in that case it
         // may finish safely, but it must not re-add a phantom LRU entry for a
-        // cell that is no longer present in `modes`.
+        // cell that is no longer present in `files`.
         let mut lru = self.lru.lock();
         let is_current = self
-            .modes
+            .files
             .get(key)
             .is_some_and(|current| Arc::ptr_eq(current.value(), cell));
         if !is_current {
@@ -179,7 +210,7 @@ impl BooksCache {
         }
 
         lru.retain(|entry| entry.key != key);
-        lru.push(CachedMode {
+        lru.push(CachedBooks {
             key: key.to_string(),
             tenant: tenant.clone(),
             bytes,
@@ -205,7 +236,7 @@ impl BooksCache {
         // Global caps (entry count + total bytes). Always keep at least the
         // entry just touched, whatever its size.
         while lru.len() > 1
-            && (lru.len() > self.max_modes
+            && (lru.len() > self.max_files
                 || lru.iter().map(|entry| entry.bytes).sum::<u64>() > self.max_bytes)
         {
             let old = lru.remove(0);
@@ -213,16 +244,24 @@ impl BooksCache {
         }
     }
 
-    /// Drop an LRU-selected entry from `modes`, but only if it is still the
-    /// same cell (a concurrent load may have replaced it).
-    fn evict(&self, old: &CachedMode) {
+    /// Drop an LRU-selected books file from `files`, but only if it is still the
+    /// same cell (a concurrent load may have replaced it), then drop every mode
+    /// entry holding that index — their `Arc` would otherwise keep the mmap, and
+    /// its temp-file disk space, alive well past the eviction.
+    fn evict(&self, old: &CachedBooks) {
         let removed = self
-            .modes
+            .files
             .remove_if(&old.key, |_, current| Arc::ptr_eq(current, &old.cell))
             .is_some();
         if removed {
+            if let Some(index) = old.cell.get() {
+                self.modes.retain(|_, cell| {
+                    cell.get()
+                        .is_none_or(|assets| !Arc::ptr_eq(&assets.books, index))
+                });
+            }
             tracing::info!(
-                mode = %old.key,
+                books = %old.key,
                 tenant = %old.tenant,
                 gib = old.bytes / (1024 * 1024 * 1024),
                 "evicted books cache (LRU)"
@@ -237,7 +276,7 @@ impl Default for BooksCache {
     }
 }
 
-fn tenant_bytes(lru: &[CachedMode], tenant: &TenantId) -> u64 {
+fn tenant_bytes(lru: &[CachedBooks], tenant: &TenantId) -> u64 {
     lru.iter()
         .filter(|entry| &entry.tenant == tenant)
         .map(|entry| entry.bytes)
@@ -348,30 +387,60 @@ impl MathEngine {
     }
 
     pub async fn load_assets(&self, game: &str, mode: &GameMode) -> AppResult<Arc<ModeAssets>> {
-        let key = BooksCache::cache_key(&self.tenant, game, &mode.name);
-        let cell = self.books.entry_cell(&key);
-        let game = game.to_string();
-        let mode = mode.clone();
-        let assets = cell
-            .get_or_try_init(|| async move {
-                let weights_bytes = self.read_file(&game, &mode.weights).await?;
+        let key = BooksCache::mode_key(&self.tenant, game, &mode.name);
+        let cell = self.books.mode_cell(&key);
+        let game_owned = game.to_string();
+        let mode_owned = mode.clone();
+        cell.get_or_try_init(|| async move {
+            let weights_bytes = self.read_file(&game_owned, &mode_owned.weights).await?;
 
-                let weights_text = String::from_utf8(weights_bytes)
-                    .map_err(|e| AppError::Parse(format!("weights utf8: {e}")))?;
-                let sampler = parse_weights(&weights_text)?;
+            let weights_text = String::from_utf8(weights_bytes)
+                .map_err(|e| AppError::Parse(format!("weights utf8: {e}")))?;
+            let sampler = parse_weights(&weights_text)?;
 
+            // The books themselves come from the per-FILE cache, so the modes
+            // that publish against one books file share a single decompression.
+            let books = self.load_books(&game_owned, &mode_owned, &sampler).await?;
+
+            Ok::<Arc<ModeAssets>, AppError>(Arc::new(ModeAssets {
+                sampler: Arc::new(sampler),
+                books,
+            }))
+        })
+        .await
+        .cloned()
+    }
+
+    /// Resolve this mode's books file to a shared, decompressed, indexed
+    /// [`BooksIndex`] — decompressing it only if no other mode already has.
+    ///
+    /// `required_ids` only decides whether the cheap line-based index is trusted
+    /// or the exhaustive JSON scan runs; both index the WHOLE file, so the result
+    /// serves every mode that shares it, not just the one that triggered the load.
+    async fn load_books(
+        &self,
+        game: &str,
+        mode: &GameMode,
+        sampler: &WeightSampler,
+    ) -> AppResult<Arc<BooksIndex>> {
+        let books_path = self.file_path(game, &mode.events);
+        let key = BooksCache::file_key(&self.tenant, &books_path);
+        let cell = self.books.file_cell(&key);
+
+        let required_ids: Vec<u32> = sampler.entries.iter().map(|e| e.event_id).collect();
+        let index = cell
+            .get_or_try_init(|| async {
                 // Stream the compressed books straight from disk: at up to ~1 GiB
                 // compressed, buffering the whole file first would leave a same-
                 // sized hole in the allocator's large-block cache on every load.
                 // Decompression and file I/O are blocking, so keep them off the
                 // asynchronous request workers.
-                let books_path = self.file_path(&game, &mode.events);
-                let required_ids: Vec<u32> = sampler.entries.iter().map(|e| e.event_id).collect();
-                // Multi-GiB books take minutes to decompress + index, and the
-                // work sits squarely in the first request's latency. Bracket it
-                // with logs: a load that is merely slow and one that fails (and
-                // is therefore retried by every subsequent spin, since the cache
-                // cell stays empty) look identical from the outside otherwise.
+                //
+                // Multi-GiB books take minutes to decompress + index, and the work
+                // sits squarely in the first request's latency. Bracket it with
+                // logs: a load that is merely slow and one that fails (and is
+                // therefore retried by every subsequent spin, since the cache cell
+                // stays empty) look identical from the outside otherwise.
                 tracing::info!(
                     game = %game,
                     mode = %mode.name,
@@ -379,10 +448,10 @@ impl MathEngine {
                     "loading books"
                 );
                 let started = std::time::Instant::now();
+                let path = books_path.clone();
                 let books = tokio::task::spawn_blocking(move || {
-                    let books_file = std::fs::File::open(&books_path).map_err(|e| {
-                        AppError::Parse(format!("read {}: {e}", books_path.display()))
-                    })?;
+                    let books_file = std::fs::File::open(&path)
+                        .map_err(|e| AppError::Parse(format!("read {}: {e}", path.display())))?;
                     decompress_and_index(
                         std::io::BufReader::with_capacity(4 << 20, books_file),
                         &required_ids,
@@ -393,7 +462,7 @@ impl MathEngine {
                 .inspect_err(|e| {
                     tracing::error!(
                         game = %game,
-                        mode = %mode.name,
+                        path = %books_path.display(),
                         secs = format!("{:.1}", started.elapsed().as_secs_f64()),
                         error = %e,
                         "books load FAILED — every spin will retry it from scratch"
@@ -401,29 +470,36 @@ impl MathEngine {
                 })?;
                 tracing::info!(
                     game = %game,
-                    mode = %mode.name,
+                    path = %books_path.display(),
                     decompressed_mib = books.buffer.len() / (1024 * 1024),
                     indexed_ids = books.id_to_range.len(),
                     secs = format!("{:.1}", started.elapsed().as_secs_f64()),
                     "books loaded"
                 );
-
-                Ok::<Arc<ModeAssets>, AppError>(Arc::new(ModeAssets {
-                    sampler: Arc::new(sampler),
-                    books: Arc::new(books),
-                }))
+                Ok::<Arc<BooksIndex>, AppError>(Arc::new(books))
             })
             .await
             .cloned()?;
+
         self.books
-            .touch(&key, &self.tenant, &cell, assets.books.buffer.len() as u64);
-        Ok(assets)
+            .touch(&key, &self.tenant, &cell, index.buffer.len() as u64);
+        Ok(index)
     }
 
+    /// Warm the game's books ahead of the first spin, one load per DISTINCT
+    /// books file (modes sharing a file are warmed by the first of them).
+    ///
+    /// This used to warm a mode literally named `base`, which no publish is
+    /// obliged to have — a game whose modes are `angle_10`, `angle_20`, … was
+    /// warmed not at all, and paid the whole multi-GiB decompression inside its
+    /// first spin.
     pub async fn preload(&self, game: &str) -> AppResult<()> {
         let cfg = self.load_config(game).await?;
-        if let Some(base) = cfg.modes.iter().find(|m| m.name == "base") {
-            self.load_assets(game, base).await?;
+        let mut seen: std::collections::HashSet<&str> = std::collections::HashSet::new();
+        for mode in &cfg.modes {
+            if seen.insert(mode.events.as_str()) {
+                self.load_assets(game, mode).await?;
+            }
         }
         Ok(())
     }
@@ -1082,57 +1158,46 @@ mod tests {
         assert_eq!(test_engine().tenant().as_str(), TenantId::DEFAULT_STR);
     }
 
-    fn insert_cache_cell(cache: &BooksCache, key: &str) -> Arc<OnceCell<Arc<ModeAssets>>> {
+    /// The LRU tracks books FILES, so the cache tests operate on file keys.
+    fn books_key(tenant: &TenantId, name: &str) -> String {
+        BooksCache::file_key(tenant, &PathBuf::from(format!("/math/{name}.jsonl.zst")))
+    }
+
+    fn insert_cache_cell(cache: &BooksCache, key: &str) -> Arc<OnceCell<Arc<BooksIndex>>> {
         let cell = Arc::new(OnceCell::new());
-        cache.modes.insert(key.to_string(), Arc::clone(&cell));
+        cache.files.insert(key.to_string(), Arc::clone(&cell));
         cell
     }
 
     #[test]
-    fn lru_evicts_the_oldest_mode_by_entry_count() {
+    fn lru_evicts_the_oldest_books_file_by_entry_count() {
         let cache = BooksCache::new();
         let tenant = TenantId::default();
-        for index in 0..=MAX_CACHED_MODES {
-            let key = BooksCache::cache_key(&tenant, "game", &format!("mode-{index}"));
+        for index in 0..=MAX_CACHED_FILES {
+            let key = books_key(&tenant, &format!("books-{index}"));
             let cell = insert_cache_cell(&cache, &key);
             cache.touch(&key, &tenant, &cell, 1);
         }
 
-        assert!(
-            !cache
-                .modes
-                .contains_key(&BooksCache::cache_key(&tenant, "game", "mode-0"))
-        );
-        assert_eq!(cache.modes.len(), MAX_CACHED_MODES);
-        assert_eq!(cache.lru.lock().len(), MAX_CACHED_MODES);
+        assert!(!cache.files.contains_key(&books_key(&tenant, "books-0")));
+        assert_eq!(cache.files.len(), MAX_CACHED_FILES);
+        assert_eq!(cache.lru.lock().len(), MAX_CACHED_FILES);
     }
 
     #[test]
-    fn lru_evicts_the_oldest_mode_by_decompressed_bytes() {
+    fn lru_evicts_the_oldest_books_file_by_decompressed_bytes() {
         let cache = BooksCache::new();
         let tenant = TenantId::default();
         let bytes = MAX_CACHED_BYTES / 2 + 1;
         for index in 0..3 {
-            let key = BooksCache::cache_key(&tenant, "game", &format!("large-mode-{index}"));
+            let key = books_key(&tenant, &format!("large-{index}"));
             let cell = insert_cache_cell(&cache, &key);
             cache.touch(&key, &tenant, &cell, bytes);
         }
 
-        assert!(
-            !cache
-                .modes
-                .contains_key(&BooksCache::cache_key(&tenant, "game", "large-mode-0"))
-        );
-        assert!(
-            !cache
-                .modes
-                .contains_key(&BooksCache::cache_key(&tenant, "game", "large-mode-1"))
-        );
-        assert!(
-            cache
-                .modes
-                .contains_key(&BooksCache::cache_key(&tenant, "game", "large-mode-2"))
-        );
+        assert!(!cache.files.contains_key(&books_key(&tenant, "large-0")));
+        assert!(!cache.files.contains_key(&books_key(&tenant, "large-1")));
+        assert!(cache.files.contains_key(&books_key(&tenant, "large-2")));
         assert_eq!(cache.lru.lock().len(), 1);
     }
 
@@ -1140,9 +1205,9 @@ mod tests {
     fn stale_cache_cell_cannot_create_a_phantom_lru_entry() {
         let cache = BooksCache::new();
         let tenant = TenantId::default();
-        let key = BooksCache::cache_key(&tenant, "game", "base");
+        let key = books_key(&tenant, "base");
         let stale = insert_cache_cell(&cache, &key);
-        cache.modes.remove(&key);
+        cache.files.remove(&key);
         let current = insert_cache_cell(&cache, &key);
 
         cache.touch(&key, &tenant, &stale, 10);
@@ -1150,7 +1215,7 @@ mod tests {
         assert!(cache.lru.lock().is_empty());
         assert!(
             cache
-                .modes
+                .files
                 .get(&key)
                 .is_some_and(|cell| Arc::ptr_eq(cell.value(), &current))
         );
@@ -1159,51 +1224,38 @@ mod tests {
     #[test]
     fn per_tenant_cap_evicts_only_within_the_capped_tenant() {
         // Generous global budget; only tenant A is capped.
-        let cache = BooksCache::with_limits(MAX_CACHED_MODES, MAX_CACHED_BYTES);
+        let cache = BooksCache::with_limits(MAX_CACHED_FILES, MAX_CACHED_BYTES);
         let a = TenantId::from("workspace-a");
         let b = TenantId::from("workspace-b");
         cache.set_tenant_cap(&a, Some(100));
 
-        // Each tenant loads two 60-byte modes under the same slug. Tenant A's
-        // 100-byte cap forces its first mode out; tenant B is uncapped, so both
-        // of B's survive — proving one tenant's cap never touches another's.
+        // Each tenant loads two 60-byte books files under the same names.
+        // Tenant A's 100-byte cap forces its first file out; tenant B is
+        // uncapped, so both of B's survive — proving one tenant's cap never
+        // touches another's.
         for tenant in [&a, &b] {
             for index in 0..2 {
-                let key = BooksCache::cache_key(tenant, "game", &format!("mode-{index}"));
+                let key = books_key(tenant, &format!("books-{index}"));
                 let cell = insert_cache_cell(&cache, &key);
                 cache.touch(&key, tenant, &cell, 60);
             }
         }
 
-        assert!(
-            !cache
-                .modes
-                .contains_key(&BooksCache::cache_key(&a, "game", "mode-0"))
-        );
-        assert!(
-            cache
-                .modes
-                .contains_key(&BooksCache::cache_key(&a, "game", "mode-1"))
-        );
-        assert!(
-            cache
-                .modes
-                .contains_key(&BooksCache::cache_key(&b, "game", "mode-0"))
-        );
-        assert!(
-            cache
-                .modes
-                .contains_key(&BooksCache::cache_key(&b, "game", "mode-1"))
-        );
+        assert!(!cache.files.contains_key(&books_key(&a, "books-0")));
+        assert!(cache.files.contains_key(&books_key(&a, "books-1")));
+        assert!(cache.files.contains_key(&books_key(&b, "books-0")));
+        assert!(cache.files.contains_key(&books_key(&b, "books-1")));
     }
 
     #[test]
-    fn same_slug_different_tenants_get_distinct_cache_entries() {
+    fn same_path_different_tenants_get_distinct_cache_entries() {
+        // Two tenants materialize their math under different roots, but even a
+        // colliding path must not let them share one mmap.
         let cache = BooksCache::new();
         let a = TenantId::from("tenant-a");
         let b = TenantId::from("tenant-b");
-        let ka = BooksCache::cache_key(&a, "sweet-bonanza", "base");
-        let kb = BooksCache::cache_key(&b, "sweet-bonanza", "base");
+        let ka = books_key(&a, "sweet-bonanza");
+        let kb = books_key(&b, "sweet-bonanza");
         assert_ne!(ka, kb);
 
         let ca = insert_cache_cell(&cache, &ka);
@@ -1211,9 +1263,74 @@ mod tests {
         cache.touch(&ka, &a, &ca, 1);
         cache.touch(&kb, &b, &cb, 1);
 
-        assert!(cache.modes.contains_key(&ka));
-        assert!(cache.modes.contains_key(&kb));
+        assert!(cache.files.contains_key(&ka));
+        assert!(cache.files.contains_key(&kb));
         assert!(!Arc::ptr_eq(&ca, &cb));
+    }
+
+    // --- The per-file sharing itself, end to end on a real math folder -------
+
+    const SHARED_INDEX: &[u8] = br#"{"modes":[
+        {"name":"angle_10","cost":1,"events":"books.jsonl.zst","weights":"lookup_10.csv"},
+        {"name":"angle_20","cost":2,"events":"books.jsonl.zst","weights":"lookup_20.csv"}
+    ]}"#;
+    const SHARED_LOOKUP: &[u8] = b"1,5000,0\n2,5000,200\n";
+    const SHARED_BOOKS: &[u8] = br#"{"id":1,"events":[]}
+{"id":2,"events":[{"reveal":"win"}]}
+"#;
+
+    /// A math folder whose two modes publish against ONE books file — the shape
+    /// that used to make each mode decompress the same multi-GiB file.
+    fn shared_books_engine() -> (tempfile::TempDir, MathEngine) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let game = dir.path().join("demo");
+        std::fs::create_dir_all(&game).expect("game dir");
+        std::fs::write(game.join("index.json"), SHARED_INDEX).expect("index.json");
+        std::fs::write(game.join("lookup_10.csv"), SHARED_LOOKUP).expect("lookup 10");
+        std::fs::write(game.join("lookup_20.csv"), SHARED_LOOKUP).expect("lookup 20");
+        std::fs::write(game.join("books.jsonl.zst"), compressed_books(SHARED_BOOKS))
+            .expect("books");
+
+        let engine = MathEngine::new(ServerConfig {
+            bind_addr: "127.0.0.1:0".to_string(),
+            math_dir: dir.path().to_string_lossy().into_owned(),
+            ui_dir: None,
+        });
+        (dir, engine)
+    }
+
+    #[tokio::test]
+    async fn modes_sharing_a_books_file_share_one_index() {
+        let (_dir, engine) = shared_books_engine();
+        let cfg = engine.load_config("demo").await.expect("config");
+
+        let a = engine
+            .load_assets("demo", &cfg.modes[0])
+            .await
+            .expect("angle_10");
+        let b = engine
+            .load_assets("demo", &cfg.modes[1])
+            .await
+            .expect("angle_20");
+
+        // Literally the same index behind both modes: one decompression, one
+        // temp file, one mmap — not one per mode.
+        assert!(Arc::ptr_eq(&a.books, &b.books));
+        assert_eq!(engine.books.files.len(), 1, "one books entry");
+        assert_eq!(engine.books.modes.len(), 2, "but two mode entries");
+        // Each mode still keeps its own weights table.
+        assert!(!Arc::ptr_eq(&a.sampler, &b.sampler));
+    }
+
+    #[tokio::test]
+    async fn preload_warms_games_whose_modes_are_not_named_base() {
+        // No mode is called "base" here; the old preload matched on that name
+        // and warmed nothing, leaving the whole decompression to the first spin.
+        let (_dir, engine) = shared_books_engine();
+
+        engine.preload("demo").await.expect("preload");
+
+        assert_eq!(engine.books.files.len(), 1, "books warmed ahead of play");
     }
 
     #[test]
