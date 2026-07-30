@@ -234,6 +234,18 @@ async fn missing_hashes(
 // blob upload / download
 // ---------------------------------------------------------------------------
 
+/// Multipart part size for a blob upload. 8 MiB keeps the part count sane for
+/// multi-GB blobs (S3 caps an upload at 10 000 parts → 80 GiB here) while the
+/// in-flight bytes stay bounded by [`BLOB_PART_CONCURRENCY`].
+const BLOB_PART_BYTES: usize = 8 * 1024 * 1024;
+
+/// Parts allowed in flight per blob upload. `WriteMultipart::write` starts a new
+/// part the moment its buffer fills, regardless of how many are already running,
+/// so the body loop waits on this before every write — otherwise a client faster
+/// than the store piles unbounded parts in memory and a multi-GB push degrades
+/// as the box swaps.
+const BLOB_PART_CONCURRENCY: usize = 4;
+
 async fn blob_size(pool: &PgPool, workspace_id: Uuid, hash: &[u8]) -> ApiResult<Option<i64>> {
     Ok(
         sqlx::query_scalar("SELECT size FROM blobs WHERE workspace_id = $1 AND hash = $2")
@@ -304,10 +316,11 @@ pub async fn put_blob(
         .put_multipart(&key)
         .await
         .map_err(ApiError::internal)?;
-    let mut writer = WriteMultipart::new(upload);
+    let mut writer = WriteMultipart::new_with_chunk_size(upload, BLOB_PART_BYTES);
     let mut hasher = Sha256::new();
     let mut total: u64 = 0;
     let max = state.config.storage_max_blob_bytes;
+    let started = std::time::Instant::now();
 
     let mut stream = request.into_body().into_data_stream();
     while let Some(chunk) = stream.next().await {
@@ -331,6 +344,13 @@ pub async fn put_blob(
             ));
         }
         hasher.update(&chunk);
+        // Back-pressure: block the body stream while `BLOB_PART_CONCURRENCY`
+        // parts are already uploading, so reading the request never outruns the
+        // store (see the constant).
+        if let Err(e) = writer.wait_for_capacity(BLOB_PART_CONCURRENCY).await {
+            writer.abort().await.ok();
+            return Err(ApiError::internal(e));
+        }
         writer.write(&chunk);
     }
 
@@ -373,6 +393,18 @@ pub async fn put_blob(
     .bind(total as i64)
     .execute(&state.pool)
     .await?;
+
+    // Throughput breadcrumb: the receive+store rate for this blob, so a "pushes
+    // get slower the bigger they are" report can be settled from the server side
+    // instead of guessed at from the client's progress bar.
+    let secs = started.elapsed().as_secs_f64();
+    tracing::info!(
+        hash = %hash_hex,
+        bytes = total,
+        secs = format!("{secs:.1}"),
+        mib_per_s = format!("{:.1}", (total as f64 / (1024.0 * 1024.0)) / secs.max(0.001)),
+        "blob uploaded"
+    );
 
     Ok((
         StatusCode::CREATED,
