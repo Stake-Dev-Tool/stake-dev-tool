@@ -1984,7 +1984,6 @@
                 title={frame.res.label}
                 class="h-full w-full bg-black"
                 allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; fullscreen; cross-origin-isolated"
-                allowfullscreen
               ></iframe>
             {:else}
               <div class="flex h-full w-full items-center justify-center text-xs text-muted-foreground">
