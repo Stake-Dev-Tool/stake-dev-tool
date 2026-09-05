@@ -271,9 +271,10 @@ pub struct SavedRoundsResponse {
 }
 
 async fn list_saved_rounds(
+    State(state): State<Arc<AppState>>,
     Query(q): Query<SavedRoundsQuery>,
 ) -> AppResult<Json<SavedRoundsResponse>> {
-    let rounds = saved_rounds::list(q.game_slug.as_deref()).await?;
+    let rounds = state.saved_rounds.list(q.game_slug.as_deref()).await?;
     Ok(Json(SavedRoundsResponse { rounds }))
 }
 
@@ -289,10 +290,13 @@ pub struct CreateSavedRoundBody {
 }
 
 async fn create_saved_round(
+    State(state): State<Arc<AppState>>,
     Json(body): Json<CreateSavedRoundBody>,
 ) -> AppResult<Json<saved_rounds::SavedRound>> {
-    let r =
-        saved_rounds::create(body.game_slug, body.mode, body.event_id, body.description).await?;
+    let r = state
+        .saved_rounds
+        .create(body.game_slug, body.mode, body.event_id, body.description)
+        .await?;
     Ok(Json(r))
 }
 
@@ -302,10 +306,14 @@ pub struct UpdateSavedRoundBody {
 }
 
 async fn update_saved_round(
+    State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
     Json(body): Json<UpdateSavedRoundBody>,
 ) -> AppResult<Json<saved_rounds::SavedRound>> {
-    let r = saved_rounds::update_description(&id, body.description).await?;
+    let r = state
+        .saved_rounds
+        .update_description(&id, body.description)
+        .await?;
     Ok(Json(r))
 }
 
@@ -314,8 +322,11 @@ pub struct OkResponse {
     pub ok: bool,
 }
 
-async fn delete_saved_round(Path(id): Path<String>) -> AppResult<Json<OkResponse>> {
-    saved_rounds::delete(&id).await?;
+async fn delete_saved_round(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> AppResult<Json<OkResponse>> {
+    state.saved_rounds.delete(&id).await?;
     Ok(Json(OkResponse { ok: true }))
 }
 

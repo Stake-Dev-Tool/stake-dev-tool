@@ -66,6 +66,7 @@ pub(crate) struct RevisionRef<'a> {
 /// [`Materializer`], and a per-tenant router cache.
 pub(crate) struct LgsHost {
     registry: TenantRegistry,
+    cache_root: PathBuf,
     materializer: Materializer,
     /// One built [`axum::Router`] per tenant. `Router` is `Clone` and implements
     /// `Service`, so a request does `clone().oneshot(req)` off the cached value.
@@ -146,7 +147,8 @@ impl LgsHost {
     fn new(cache_root: PathBuf, cache_budget: u64, books_cap: Option<u64>) -> Self {
         Self {
             registry: TenantRegistry::new(),
-            materializer: Materializer::new(cache_root, cache_budget),
+            materializer: Materializer::new(cache_root.clone(), cache_budget),
+            cache_root,
             routers: DashMap::new(),
             books_cap,
             warming: DashSet::new(),
@@ -173,7 +175,17 @@ impl LgsHost {
         let tenant = Self::tenant_id(rev.workspace_id, rev.game_id, rev.number);
         // Atomic get-or-create: concurrent callers observe one AppState. The math
         // root is `<number>/`, so the engine resolves `<number>/<game_slug>/file`.
-        self.registry.get_or_create_disk(tenant.clone(), &math_root);
+        let saved_rounds_path = self
+            .cache_root
+            .join("saved-rounds")
+            .join(rev.workspace_id.to_string())
+            .join(rev.game_id.to_string())
+            .join(format!("{}.json", rev.number));
+        self.registry.get_or_create_disk_with_saved_rounds(
+            tenant.clone(),
+            &math_root,
+            saved_rounds_path,
+        );
         self.registry.set_tenant_cap(&tenant, self.books_cap);
         self.warm_books(&tenant, rev.game_slug);
 

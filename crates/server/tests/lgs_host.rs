@@ -417,6 +417,29 @@ async fn member_devtool_and_wallet_flow_and_rematerialize() {
         "index.json under <number>/<game_slug>/"
     );
 
+    // Saved rounds use writable, tenant-scoped storage beside (not inside) the
+    // evictable revision cache. This is the production path mounted at /app/data.
+    let saved_rounds_url = ws_url(&ws, GAME, 1, "api/devtool/saved-rounds");
+    let (status, saved) = owner
+        .post(
+            &saved_rounds_url,
+            json!({
+                "gameSlug": GAME,
+                "mode": "base",
+                "eventId": 1,
+                "description": "production persistence regression"
+            }),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "create saved round: {saved}");
+    let saved_rounds_file = ctx
+        .cache_root()
+        .join("saved-rounds")
+        .join(ws_id.to_string())
+        .join(game_id.to_string())
+        .join("1.json");
+    assert!(saved_rounds_file.exists(), "tenant saved-rounds file");
+
     // (c) full wallet flow: authenticate → balance → play → end-round.
     let sid = format!("sess-{}", Uuid::new_v4());
     let auth_url = ws_url(&ws, GAME, 1, &format!("api/rgs/{GAME}/wallet/authenticate"));
@@ -457,6 +480,9 @@ async fn member_devtool_and_wallet_flow_and_rematerialize() {
         dir.join(".complete").exists(),
         "marker recreated (idempotent re-materialize)"
     );
+    let (status, listed) = owner.get(&saved_rounds_url).await;
+    assert_eq!(status, StatusCode::OK, "list saved rounds: {listed}");
+    assert_eq!(listed["rounds"].as_array().unwrap().len(), 1);
 }
 
 /// (d) The same game slug in two workspaces resolves to two isolated tenants
@@ -497,6 +523,20 @@ async fn same_slug_isolated_across_workspaces() {
         2,
         "ws_b: base + bonus"
     );
+
+    // Saved rounds for the same game slug remain workspace-tenant scoped.
+    let rounds_a = ws_url(&ws_a, GAME, 1, "api/devtool/saved-rounds");
+    let rounds_b = ws_url(&ws_b, GAME, 1, "api/devtool/saved-rounds");
+    let (status, created) = owner
+        .post(
+            &rounds_a,
+            json!({ "gameSlug": GAME, "mode": "base", "eventId": 1 }),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "ws_a create: {created}");
+    let (status, listed) = owner.get(&rounds_b).await;
+    assert_eq!(status, StatusCode::OK, "ws_b list: {listed}");
+    assert!(listed["rounds"].as_array().unwrap().is_empty());
 }
 
 /// (f) Two revisions of one game resolve to two distinct tenants, each with its
