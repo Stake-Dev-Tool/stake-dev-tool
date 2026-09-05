@@ -133,6 +133,7 @@ pub(super) async fn dispatch_replay(
 }
 
 /// Resolve the link's revision and build (or reuse) its tenant router.
+#[allow(clippy::result_large_err)] // Branded HTML responses are the error contract here.
 async fn tenant_router(state: &AppState, link: &ResolvedShare) -> Result<axum::Router, Response> {
     let (number, revision_id) = resolve::resolve_revision(&state.pool, link).await?;
     let host = tenants::host_for(state);

@@ -78,6 +78,7 @@ async fn load_by_slug(
 /// error maps to the internal page (logged) rather than propagating. `scope`
 /// constrains the lookup to a workspace for custom-domain requests (see
 /// [`load_by_slug`]).
+#[allow(clippy::result_large_err)] // Branded HTML responses are the error contract here.
 pub(super) async fn resolve(
     state: &AppState,
     slug: &str,
@@ -118,6 +119,7 @@ pub(super) async fn resolve(
 
 /// Resolve the revision number + id this link plays against (pinned, or the
 /// game's latest). Returns the "no revision yet" page when there is none.
+#[allow(clippy::result_large_err)] // Branded HTML responses are the error contract here.
 pub(super) async fn resolve_revision(
     pool: &PgPool,
     link: &ResolvedShare,
@@ -175,6 +177,7 @@ pub(super) struct BundleEntry {
 
 /// Resolve the front bundle this link serves (pinned, or the game's latest).
 /// Returns the "no front build yet" page when there is none.
+#[allow(clippy::result_large_err)] // Branded HTML responses are the error contract here.
 pub(super) async fn resolve_bundle(
     pool: &PgPool,
     link: &ResolvedShare,
