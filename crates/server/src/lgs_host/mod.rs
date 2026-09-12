@@ -181,10 +181,18 @@ impl LgsHost {
             .join(rev.workspace_id.to_string())
             .join(rev.game_id.to_string())
             .join(format!("{}.json", rev.number));
-        self.registry.get_or_create_disk_with_saved_rounds(
+        // User settings persist outside the evictable revision math tree too.
+        let settings_path = self
+            .cache_root
+            .join("settings")
+            .join(rev.workspace_id.to_string())
+            .join(rev.game_id.to_string())
+            .join(format!("{}.json", rev.number));
+        self.registry.get_or_create_disk_with_persistence(
             tenant.clone(),
             &math_root,
             saved_rounds_path,
+            settings_path,
         );
         self.registry.set_tenant_cap(&tenant, self.books_cap);
         self.warm_books(&tenant, rev.game_slug);

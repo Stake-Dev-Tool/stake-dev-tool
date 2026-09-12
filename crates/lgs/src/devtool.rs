@@ -109,8 +109,10 @@ async fn status() -> Json<StatusResponse> {
 
 // ========== Settings (resolutions) ==========
 
-async fn get_settings_handler() -> AppResult<Json<settings::Settings>> {
-    let s = settings::load().await?;
+async fn get_settings_handler(
+    State(state): State<Arc<AppState>>,
+) -> AppResult<Json<settings::Settings>> {
+    let s = state.settings.load().await?;
     Ok(Json(s))
 }
 
@@ -121,9 +123,10 @@ pub struct ToggleResolutionBody {
 }
 
 async fn toggle_resolution_handler(
+    State(state): State<Arc<AppState>>,
     Json(body): Json<ToggleResolutionBody>,
 ) -> AppResult<Json<settings::Settings>> {
-    let s = settings::toggle(&body.id, body.enabled).await?;
+    let s = state.settings.toggle(&body.id, body.enabled).await?;
     Ok(Json(s))
 }
 
@@ -135,16 +138,21 @@ pub struct AddCustomResolutionBody {
 }
 
 async fn add_custom_resolution_handler(
+    State(state): State<Arc<AppState>>,
     Json(body): Json<AddCustomResolutionBody>,
 ) -> AppResult<Json<settings::Settings>> {
-    let s = settings::add_custom(body.label, body.width, body.height).await?;
+    let s = state
+        .settings
+        .add_custom(body.label, body.width, body.height)
+        .await?;
     Ok(Json(s))
 }
 
 async fn delete_custom_resolution_handler(
+    State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
 ) -> AppResult<Json<settings::Settings>> {
-    let s = settings::delete_custom(&id).await?;
+    let s = state.settings.delete_custom(&id).await?;
     Ok(Json(s))
 }
 

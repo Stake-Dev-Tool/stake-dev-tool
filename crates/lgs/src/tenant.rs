@@ -19,6 +19,7 @@
 use crate::math_engine::{BooksCache, DiskMathSource, MathEngine, MathSource};
 use crate::saved_rounds::SavedRoundsStore;
 use crate::session::SessionStore;
+use crate::settings::SettingsStore;
 use crate::state::AppState;
 use dashmap::DashMap;
 use std::path::PathBuf;
@@ -161,16 +162,23 @@ impl TenantRegistry {
             .join("tenants")
             .join(tenant_dir)
             .join("saved-rounds.json");
-        self.get_or_create_disk_with_saved_rounds(tenant, math_root, saved_rounds_path)
+        let settings_path = saved_rounds_path.with_file_name("settings.json");
+        self.get_or_create_disk_with_persistence(
+            tenant,
+            math_root,
+            saved_rounds_path,
+            settings_path,
+        )
     }
 
     /// Cloud variant of [`Self::get_or_create_disk`] with an explicit,
-    /// tenant-scoped persistence path for saved rounds.
-    pub fn get_or_create_disk_with_saved_rounds(
+    /// tenant-scoped persistence paths for saved rounds and settings.
+    pub fn get_or_create_disk_with_persistence(
         &self,
         tenant: TenantId,
         math_root: impl Into<PathBuf>,
         saved_rounds_path: impl Into<PathBuf>,
+        settings_path: impl Into<PathBuf>,
     ) -> Arc<AppState> {
         // Fast path: already registered.
         if let Some(existing) = self.get(&tenant) {
@@ -180,6 +188,7 @@ impl TenantRegistry {
         let books = Arc::clone(&self.books);
         let tenant_for_engine = tenant.clone();
         let saved_rounds_path = saved_rounds_path.into();
+        let settings_path = settings_path.into();
         // `or_insert_with` runs only if the entry is still absent, so a lost
         // race drops the freshly-built (and unused) state instead of clobbering
         // the winner. `.clone()` derefs the map guard to clone the `Arc`.
@@ -187,10 +196,11 @@ impl TenantRegistry {
             .entry(tenant)
             .or_insert_with(|| {
                 let engine = Arc::new(MathEngine::with_source(tenant_for_engine, source, books));
-                Arc::new(AppState::from_parts_with_saved_rounds(
+                Arc::new(AppState::from_parts_with_stores(
                     Arc::new(SessionStore::in_memory()),
                     engine,
                     Arc::new(SavedRoundsStore::with_path(saved_rounds_path)),
+                    Arc::new(SettingsStore::with_path(settings_path)),
                 ))
             })
             .clone()

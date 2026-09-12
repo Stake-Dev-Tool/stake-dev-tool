@@ -440,6 +440,43 @@ async fn member_devtool_and_wallet_flow_and_rematerialize() {
         .join("1.json");
     assert!(saved_rounds_file.exists(), "tenant saved-rounds file");
 
+    let settings_url = ws_url(&ws, GAME, 1, "api/devtool/settings");
+    let toggle_url = format!("{settings_url}/toggle");
+    let (status, enabled) = owner
+        .post(&toggle_url, json!({"id":"popout-s", "enabled":true}))
+        .await;
+    assert_eq!(status, StatusCode::OK, "enable resolution: {enabled}");
+    assert_eq!(
+        enabled["resolutions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|r| r["id"] == "popout-s")
+            .unwrap()["enabled"],
+        true
+    );
+    let (status, settings) = owner
+        .post(&toggle_url, json!({"id":"popout-s", "enabled":false}))
+        .await;
+    assert_eq!(status, StatusCode::OK, "disable resolution: {settings}");
+    assert_eq!(
+        settings["resolutions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|r| r["id"] == "popout-s")
+            .unwrap()["enabled"],
+        false
+    );
+    let settings_file = ctx
+        .cache_root()
+        .join("settings")
+        .join(ws_id.to_string())
+        .join(game_id.to_string())
+        .join("1.json");
+    let persisted: Value = serde_json::from_slice(&std::fs::read(&settings_file).unwrap()).unwrap();
+    assert_eq!(persisted, settings);
+
     // (c) full wallet flow: authenticate → balance → play → end-round.
     let sid = format!("sess-{}", Uuid::new_v4());
     let auth_url = ws_url(&ws, GAME, 1, &format!("api/rgs/{GAME}/wallet/authenticate"));
@@ -483,6 +520,13 @@ async fn member_devtool_and_wallet_flow_and_rematerialize() {
     let (status, listed) = owner.get(&saved_rounds_url).await;
     assert_eq!(status, StatusCode::OK, "list saved rounds: {listed}");
     assert_eq!(listed["rounds"].as_array().unwrap().len(), 1);
+    let (status, restored) = owner.get(&settings_url).await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "read settings after rematerialize: {restored}"
+    );
+    assert_eq!(restored, settings);
 }
 
 /// (d) The same game slug in two workspaces resolves to two isolated tenants
@@ -537,6 +581,22 @@ async fn same_slug_isolated_across_workspaces() {
     let (status, listed) = owner.get(&rounds_b).await;
     assert_eq!(status, StatusCode::OK, "ws_b list: {listed}");
     assert!(listed["rounds"].as_array().unwrap().is_empty());
+
+    let (status, changed) = owner
+        .post(
+            &ws_url(&ws_a, GAME, 1, "api/devtool/settings/toggle"),
+            json!({"id":"popout-s", "enabled":true}),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "ws_a settings: {changed}");
+    let (status, isolated) = owner
+        .get(&ws_url(&ws_b, GAME, 1, "api/devtool/settings"))
+        .await;
+    assert_eq!(status, StatusCode::OK, "ws_b settings: {isolated}");
+    assert_eq!(
+        isolated,
+        serde_json::to_value(lgs::settings::Settings::default()).unwrap()
+    );
 }
 
 /// (f) Two revisions of one game resolve to two distinct tenants, each with its
@@ -562,6 +622,26 @@ async fn distinct_revisions_are_distinct_tenants() {
     let (_, r1) = owner.get(&ws_url(&ws, GAME, 1, &modes_rest(GAME))).await;
     let (_, r2) = owner.get(&ws_url(&ws, GAME, 2, &modes_rest(GAME))).await;
     assert_eq!(r1["modes"].as_array().unwrap().len(), 1, "rev1: base only");
+    let (status, changed) = owner
+        .post(
+            &ws_url(&ws, GAME, 1, "api/devtool/settings/toggle"),
+            json!({"id":"popout-s", "enabled":true}),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "rev1 settings: {changed}");
+    let (status, isolated) = owner
+        .get(&ws_url(&ws, GAME, 2, "api/devtool/settings"))
+        .await;
+    assert_eq!(status, StatusCode::OK, "rev2 settings: {isolated}");
+    assert_eq!(
+        isolated,
+        serde_json::to_value(lgs::settings::Settings::default()).unwrap()
+    );
+    let (status, unchanged) = owner
+        .get(&ws_url(&ws, GAME, 1, "api/devtool/settings"))
+        .await;
+    assert_eq!(status, StatusCode::OK, "rev1 reread: {unchanged}");
+    assert_eq!(unchanged, changed);
     assert_eq!(r2["modes"].as_array().unwrap().len(), 2, "rev2: base+bonus");
 
     // Each revision materialized into its own tenant directory.
