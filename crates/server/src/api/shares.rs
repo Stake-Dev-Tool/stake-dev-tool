@@ -57,6 +57,10 @@ pub fn router() -> Router<AppState> {
             get(list_front_bundles).post(create_front_bundle),
         )
         .route(
+            "/workspaces/:slug/games/:game/front-bundles/:id/download",
+            get(download_front_bundle),
+        )
+        .route(
             "/workspaces/:slug/games/:game/front-bundles/:id",
             axum::routing::delete(delete_front_bundle),
         )
@@ -292,6 +296,49 @@ async fn list_front_bundles(
         })
         .collect();
     Ok(Json(FrontBundlesResponse { bundles }))
+}
+
+/// Download original frontend files; ordinary workspace membership is sufficient.
+async fn download_front_bundle(
+    State(state): State<AppState>,
+    user: CurrentUser,
+    Path((slug, game_slug, id)): Path<(String, String, Uuid)>,
+) -> ApiResult<Response> {
+    let workspace = authorize_read(&state, &user, &slug).await?;
+    let game_id = game_id_by_slug(&state.pool, workspace.id, &game_slug).await?;
+    let manifest: Value =
+        sqlx::query_scalar("SELECT manifest FROM front_bundles WHERE id = $1 AND game_id = $2")
+            .bind(id)
+            .bind(game_id)
+            .fetch_optional(&state.pool)
+            .await?
+            .ok_or_else(|| {
+                ApiError::not_found("bundle_not_found", "no such front bundle in this game")
+            })?;
+    let entries = manifest
+        .as_object()
+        .ok_or_else(|| invalid("invalid stored bundle manifest"))?;
+    let files = entries
+        .iter()
+        .map(|(path, entry)| {
+            Ok(FileEntry {
+                path: path.clone(),
+                hash: entry["hash"]
+                    .as_str()
+                    .ok_or_else(|| invalid("invalid stored hash"))?
+                    .to_string(),
+                size: entry["size"]
+                    .as_i64()
+                    .ok_or_else(|| invalid("invalid stored size"))?,
+            })
+        })
+        .collect::<ApiResult<Vec<_>>>()?;
+    super::archives::download(
+        state,
+        workspace.id,
+        files,
+        format!("{game_slug}-front-{id}.tar"),
+    )
 }
 
 /// `DELETE .../front-bundles/:id` — owner/admin only. Guards: `409 bundle_pinned`

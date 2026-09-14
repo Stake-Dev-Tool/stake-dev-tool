@@ -1129,6 +1129,23 @@ fn diff_stats(before: Option<Vec<ModeStats>>, after: Option<Vec<ModeStats>>) -> 
 // file download (pull)
 // ---------------------------------------------------------------------------
 
+pub async fn download_archive(
+    State(state): State<AppState>,
+    user: CurrentUser,
+    Path((slug, game_slug, number)): Path<(String, String, i32)>,
+) -> ApiResult<Response> {
+    let workspace = authorize_read(&state, &user, &slug).await?;
+    let game_id = game_id_by_slug(&state.pool, workspace.id, &game_slug).await?;
+    let revision_id = revision_id_by_number(&state.pool, game_id, number).await?;
+    let files = load_revision_files(&state.pool, revision_id).await?;
+    super::archives::download(
+        state,
+        workspace.id,
+        files,
+        format!("{game_slug}-math-r{number}.tar"),
+    )
+}
+
 pub async fn download_file(
     State(state): State<AppState>,
     user: CurrentUser,

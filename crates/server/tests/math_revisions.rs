@@ -372,6 +372,458 @@ async fn compute_and_wait(
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
+async fn build_archive_roundtrips_original_math_files() {
+    let Some(ctx) = setup().await else {
+        return;
+    };
+    let (mut owner, ws, token) = bootstrap(&ctx.state).await;
+    let files = [
+        ("index.json", INDEX_JSON),
+        ("nested/books.jsonl.zst", BOOKS),
+        ("lookup.csv", LOOKUP_V1),
+    ];
+    let (status, _) = push(&mut owner, &ws, "archive", &files, "build", None, &token).await;
+    assert_eq!(status, StatusCode::CREATED);
+    let request = Request::builder()
+        .uri(format!("{}/1/download", revisions_url(&ws, "archive")))
+        .header("cookie", owner.cookie_header().unwrap())
+        .body(Body::empty())
+        .unwrap();
+    let response = http::build_router(ctx.state.clone())
+        .oneshot(request)
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(response.headers()["content-type"], "application/x-tar");
+    assert_eq!(
+        response.headers()["content-disposition"],
+        "attachment; filename=\"archive-math-r1.tar\""
+    );
+    assert_eq!(response.headers()["cache-control"], "private, no-store");
+    let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let mut archive = tar::Archive::new(bytes.as_ref());
+    let mut actual = std::collections::BTreeMap::new();
+    for entry in archive.entries().unwrap() {
+        let mut entry = entry.unwrap();
+        let path = entry.path().unwrap().to_string_lossy().into_owned();
+        let mut bytes = Vec::new();
+        std::io::Read::read_to_end(&mut entry, &mut bytes).unwrap();
+        actual.insert(path, bytes);
+    }
+    assert_eq!(
+        actual,
+        files
+            .into_iter()
+            .map(|(p, b)| (p.to_string(), b.to_vec()))
+            .collect()
+    );
+}
+
+#[tokio::test]
+async fn build_archive_front_roundtrip_and_membership() {
+    let Some(ctx) = setup().await else {
+        return;
+    };
+    let (mut owner, ws, token) = bootstrap(&ctx.state).await;
+    push(
+        &mut owner,
+        &ws,
+        "archive",
+        &[("index.json", INDEX_JSON)],
+        "math",
+        None,
+        &token,
+    )
+    .await;
+    let files: [(&str, &[u8]); 2] = [
+        ("index.html", b"<html>original</html>"),
+        ("assets/app.js", b"original js"),
+    ];
+    for (_, bytes) in files {
+        let (status, _) = owner
+            .send_bytes(
+                Method::PUT,
+                &blob_url(&ws, "archive", &sha_hex(bytes)),
+                bytes.to_vec(),
+                Some(&token),
+            )
+            .await;
+        assert_eq!(status, StatusCode::CREATED);
+    }
+    let (status, bundle) = owner
+        .post(
+            &format!("/api/workspaces/{ws}/games/archive/front-bundles"),
+            json!({"files": manifest(&files)}),
+        )
+        .await;
+    assert_eq!(status, StatusCode::CREATED, "{bundle}");
+    let front = format!(
+        "/api/workspaces/{ws}/games/archive/front-bundles/{}/download",
+        s(&bundle["id"])
+    );
+    let (status, bytes) = owner.get_raw(&front, None).await;
+    assert_eq!(status, StatusCode::OK);
+    let mut archive = tar::Archive::new(bytes.as_slice());
+    let mut actual = std::collections::BTreeMap::new();
+    for entry in archive.entries().unwrap() {
+        let mut entry = entry.unwrap();
+        let path = entry.path().unwrap().to_string_lossy().into_owned();
+        let mut bytes = Vec::new();
+        std::io::Read::read_to_end(&mut entry, &mut bytes).unwrap();
+        actual.insert(path, bytes);
+    }
+    assert_eq!(
+        actual,
+        files
+            .into_iter()
+            .map(|(p, b)| (p.to_string(), b.to_vec()))
+            .collect()
+    );
+    let math = format!("{}/1/download", revisions_url(&ws, "archive"));
+    // The protocol has owner/admin/member only (no separate viewer role).
+    for role in ["member", "admin"] {
+        let (mut member, _) = register(&ctx.state, &unique_email(), role).await;
+        let (status, invite) = owner
+            .post(
+                &format!("/api/workspaces/{ws}/invites"),
+                json!({"role": role}),
+            )
+            .await;
+        assert_eq!(status, StatusCode::OK, "{invite}");
+        member
+            .post(
+                &format!("/api/invites/{}/accept", s(&invite["token"])),
+                json!({}),
+            )
+            .await;
+        for url in [&math, &front] {
+            assert_eq!(
+                member.get_raw(url, None).await.0,
+                StatusCode::OK,
+                "{role} {url}"
+            );
+        }
+    }
+    let (mut outsider, _) = register(&ctx.state, &unique_email(), "outsider").await;
+    let mut anonymous = Client::new(&ctx.state);
+    for url in [&math, &front] {
+        assert_eq!(outsider.get_raw(url, None).await.0, StatusCode::NOT_FOUND);
+        assert_eq!(
+            anonymous.get_raw(url, None).await.0,
+            StatusCode::UNAUTHORIZED
+        );
+        assert_eq!(
+            anonymous.get_raw(url, Some("share-token")).await.0,
+            StatusCode::UNAUTHORIZED
+        );
+        assert_eq!(
+            owner
+                .get_raw(&url.replace("/archive/", "/wrong-game/"), None)
+                .await
+                .0,
+            StatusCode::NOT_FOUND
+        );
+    }
+    assert_eq!(
+        owner.get_raw(&math.replace("/1/", "/99/"), None).await.0,
+        StatusCode::NOT_FOUND
+    );
+    assert_eq!(
+        owner
+            .get_raw(
+                &front.replace(s(&bundle["id"]), &Uuid::new_v4().to_string()),
+                None
+            )
+            .await
+            .0,
+        StatusCode::NOT_FOUND
+    );
+}
+
+#[tokio::test]
+async fn build_archive_rejects_unsafe_stored_paths_before_streaming() {
+    let Some(ctx) = setup().await else {
+        return;
+    };
+    let (mut owner, ws, token) = bootstrap(&ctx.state).await;
+    push(
+        &mut owner,
+        &ws,
+        "archive",
+        &[("index.json", INDEX_JSON)],
+        "math",
+        None,
+        &token,
+    )
+    .await;
+    let revision = revision_uuid(&ctx.state, &ws, "archive", 1).await;
+    let url = format!("{}/1/download", revisions_url(&ws, "archive"));
+    for path in [
+        "C:/escape",
+        "../escape",
+        "/absolute",
+        "a\\b",
+        "a/../b",
+        "a//b",
+        "./index.json",
+        "a/",
+        "bad\nname",
+        "",
+        "a:b",
+    ] {
+        sqlx::query("UPDATE revision_files SET path = $2 WHERE revision_id = $1")
+            .bind(revision)
+            .bind(path)
+            .execute(&ctx.state.pool)
+            .await
+            .unwrap();
+        let (status, error) = owner.get(&url).await;
+        assert_eq!(
+            status,
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "{path:?}: {error}"
+        );
+        assert_eq!(error["error"]["code"], "invalid_manifest");
+    }
+}
+
+#[tokio::test]
+async fn build_archive_preserves_long_unicode_paths_and_empty_files() {
+    let Some(ctx) = setup().await else {
+        return;
+    };
+    let (mut owner, ws, token) = bootstrap(&ctx.state).await;
+    let path = format!(
+        "assets/{}{}.js",
+        "long-directory/".repeat(25),
+        "é".repeat(40)
+    );
+    let files: [(&str, &[u8]); 3] = [("index.json", INDEX_JSON), (&path, BOOKS), ("empty", b"")];
+    assert_eq!(
+        push(&mut owner, &ws, "archive", &files, "math", None, &token)
+            .await
+            .0,
+        StatusCode::CREATED
+    );
+    let (status, bytes) = owner
+        .get_raw(
+            &format!("{}/1/download", revisions_url(&ws, "archive")),
+            None,
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    let mut archive = tar::Archive::new(bytes.as_slice());
+    let mut actual = std::collections::BTreeMap::new();
+    for entry in archive.entries().unwrap() {
+        let mut entry = entry.unwrap();
+        let path = entry.path().unwrap().to_string_lossy().into_owned();
+        let mut bytes = Vec::new();
+        std::io::Read::read_to_end(&mut entry, &mut bytes).unwrap();
+        actual.insert(path, bytes);
+    }
+    assert_eq!(
+        actual,
+        files
+            .into_iter()
+            .map(|(p, b)| (p.to_string(), b.to_vec()))
+            .collect()
+    );
+    // Optional independent inspection with a system tar outside the test runner.
+    if let Ok(path) = std::env::var("TEST_ARCHIVE_OUTPUT") {
+        std::fs::write(path, bytes).unwrap();
+    }
+}
+
+#[tokio::test]
+async fn build_archive_aborts_on_object_size_mismatch() {
+    let Some(ctx) = setup().await else {
+        return;
+    };
+    let (mut owner, ws, token) = bootstrap(&ctx.state).await;
+    push(
+        &mut owner,
+        &ws,
+        "archive",
+        &[("index.json", INDEX_JSON)],
+        "math",
+        None,
+        &token,
+    )
+    .await;
+    let revision = revision_uuid(&ctx.state, &ws, "archive", 1).await;
+    for size in [0_i64, 1, 999] {
+        sqlx::query("UPDATE revision_files SET size = $2 WHERE revision_id = $1")
+            .bind(revision)
+            .bind(size)
+            .execute(&ctx.state.pool)
+            .await
+            .unwrap();
+        let request = Request::builder()
+            .uri(format!("{}/1/download", revisions_url(&ws, "archive")))
+            .header("cookie", owner.cookie_header().unwrap())
+            .body(Body::empty())
+            .unwrap();
+        let response = http::build_router(ctx.state.clone())
+            .oneshot(request)
+            .await
+            .unwrap();
+        use futures_util::StreamExt;
+        let mut body = response.into_body().into_data_stream();
+        assert!(
+            body.next().await.unwrap().is_err(),
+            "must reject size mismatch before any tar header, declared size {size}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn build_archive_rejects_invalid_front_metadata() {
+    let Some(ctx) = setup().await else {
+        return;
+    };
+    let (mut owner, ws, token) = bootstrap(&ctx.state).await;
+    push(
+        &mut owner,
+        &ws,
+        "archive",
+        &[("index.json", INDEX_JSON)],
+        "math",
+        None,
+        &token,
+    )
+    .await;
+    let game: Uuid = sqlx::query_scalar("SELECT game_id FROM revisions WHERE id = $1")
+        .bind(revision_uuid(&ctx.state, &ws, "archive", 1).await)
+        .fetch_one(&ctx.state.pool)
+        .await
+        .unwrap();
+    let id = Uuid::new_v4();
+    sqlx::query("INSERT INTO front_bundles (id, game_id, manifest) VALUES ($1, $2, '{}')")
+        .bind(id)
+        .bind(game)
+        .execute(&ctx.state.pool)
+        .await
+        .unwrap();
+    let url = format!("/api/workspaces/{ws}/games/archive/front-bundles/{id}/download");
+    for manifest in [
+        json!({"index.html": {"hash": sha_hex(INDEX_JSON), "size": -1}}),
+        json!({"index.html": {"hash": "../not-a-hash", "size": 1}}),
+        json!({"C:/escape": {"hash": sha_hex(INDEX_JSON), "size": 1}}),
+        json!({"index.html": {"size": 1}}),
+        json!([]),
+    ] {
+        sqlx::query("UPDATE front_bundles SET manifest = $2 WHERE id = $1")
+            .bind(id)
+            .bind(manifest.clone())
+            .execute(&ctx.state.pool)
+            .await
+            .unwrap();
+        let request = Request::builder()
+            .uri(&url)
+            .header("cookie", owner.cookie_header().unwrap())
+            .body(Body::empty())
+            .unwrap();
+        let response = http::build_router(ctx.state.clone())
+            .oneshot(request)
+            .await
+            .unwrap();
+        assert_eq!(
+            response.status(),
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "{manifest}"
+        );
+    }
+}
+
+// Characterization of the already-green streaming implementation: a sparse
+// 347 MiB fixture exercises large downloads without allocating that much RAM.
+#[tokio::test]
+async fn build_archive_streams_large_files_and_stops_on_missing_objects() {
+    use futures_util::StreamExt;
+    let Some(ctx) = setup().await else {
+        return;
+    };
+    let (mut owner, ws, token) = bootstrap(&ctx.state).await;
+    push(
+        &mut owner,
+        &ws,
+        "archive",
+        &[("index.json", INDEX_JSON), ("zz-books.zst", BOOKS)],
+        "math",
+        None,
+        &token,
+    )
+    .await;
+    let workspace: Uuid = sqlx::query_scalar("SELECT id FROM workspaces WHERE slug = $1")
+        .bind(&ws)
+        .fetch_one(&ctx.state.pool)
+        .await
+        .unwrap();
+    let path = ctx
+        ._tmp
+        .path()
+        .join(server::blobs::blob_key(workspace, &sha_hex(BOOKS)).as_ref());
+    let size = 347_u64 * 1024 * 1024;
+    std::fs::OpenOptions::new()
+        .write(true)
+        .open(&path)
+        .unwrap()
+        .set_len(size)
+        .unwrap();
+    sqlx::query(
+        "UPDATE revision_files SET size = $2 WHERE revision_id = $1 AND path = 'zz-books.zst'",
+    )
+    .bind(revision_uuid(&ctx.state, &ws, "archive", 1).await)
+    .bind(size as i64)
+    .execute(&ctx.state.pool)
+    .await
+    .unwrap();
+    let url = format!("{}/1/download", revisions_url(&ws, "archive"));
+    let request = || {
+        Request::builder()
+            .uri(&url)
+            .header("cookie", owner.cookie_header().unwrap())
+            .body(Body::empty())
+            .unwrap()
+    };
+    let response = http::build_router(ctx.state.clone())
+        .oneshot(request())
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let mut body = response.into_body().into_data_stream();
+    let mut total = 0_u64;
+    while let Some(chunk) = body.next().await {
+        let chunk = chunk.unwrap();
+        assert!(
+            chunk.len() <= 1024 * 1024,
+            "archive must yield bounded chunks"
+        );
+        total += chunk.len() as u64;
+    }
+    assert_eq!(total, size + 2560); // two headers, padded index, and end blocks
+    let response = http::build_router(ctx.state.clone())
+        .oneshot(request())
+        .await
+        .unwrap();
+    let mut body = response.into_body().into_data_stream();
+    assert_eq!(body.next().await.unwrap().unwrap().len(), 512);
+    // Removing a later object AFTER the first chunk proves it wasn't buffered
+    // ahead of the consumer. A missing object must abort, not finish the tar.
+    std::fs::remove_file(path).unwrap();
+    let mut failed = false;
+    while let Some(chunk) = body.next().await {
+        if chunk.is_err() {
+            failed = true;
+            break;
+        }
+    }
+    assert!(failed);
+}
+
+#[tokio::test]
 async fn full_push_flow_dedup_list_download_and_diff() {
     let Some(ctx) = setup().await else {
         return;

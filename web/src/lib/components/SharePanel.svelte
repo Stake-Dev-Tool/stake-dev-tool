@@ -148,9 +148,9 @@
     }
   }
 
-  // --- Manage bundles (owner/admin) -------------------------------------------
-  // A compact, lazily-loaded expandable: the game's front bundles with a Delete
-  // that frees storage. Loaded on first expand; reloads when the game changes.
+  // --- Front builds (downloads for members, deletion for owner/admin) ----------
+  // A compact, lazily-loaded expandable. Loaded on first expand and reloaded
+  // when the game changes; only owner/admin can delete builds to free storage.
   let showBundles = $state(false);
   let bundles = $state<FrontBundleSummary[]>([]);
   let loadingBundles = $state(false);
@@ -434,8 +434,7 @@
     </span>
   </Card>
 
-  <!-- Manage bundles (owner/admin): compact, lazily-loaded expandable -------->
-  {#if canManage}
+  <!-- Build downloads for every member; deletion remains owner/admin-only. -->
     <div class="mb-4">
       <button
         type="button"
@@ -444,8 +443,8 @@
         onclick={toggleBundles}
       >
         <span class="text-xs text-faint">{showBundles ? '▾' : '▸'}</span>
-        Manage bundles
-        <span class="text-xs text-faint">— delete old builds to free storage</span>
+        Front builds
+        <span class="text-xs text-faint">— download original build files</span>
       </button>
 
       {#if showBundles}
@@ -471,7 +470,17 @@
                   {/if}
                   <span class="text-xs text-faint">created <Time iso={b.created_at} /></span>
                   <span class="text-xs text-muted">{b.files_count} files · {humanSize(b.total_size)}</span>
-                  <div class="ml-auto">
+                  <div class="ml-auto flex flex-wrap items-center gap-2">
+                    <Button
+                      href={`/api/workspaces/${encodeURIComponent(slug)}/games/${encodeURIComponent(game)}/front-bundles/${encodeURIComponent(b.id)}/download`}
+                      download
+                      data-sveltekit-reload
+                      variant="outline"
+                      size="sm"
+                    >
+                      Download build files
+                    </Button>
+                    {#if canManage}
                     <Button
                       variant="ghost"
                       size="sm"
@@ -480,6 +489,7 @@
                     >
                       Delete
                     </Button>
+                    {/if}
                   </div>
                 </div>
               {/each}
@@ -488,7 +498,6 @@
         </div>
       {/if}
     </div>
-  {/if}
 
   <!-- 2) Create share (owner/admin) ----------------------------------------->
   {#if canManage}

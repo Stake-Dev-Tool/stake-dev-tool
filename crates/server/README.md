@@ -115,6 +115,13 @@ satisfies it); reads need membership only. Hashes are lowercase hex sha256.
 | `GET` | `/api/workspaces/:slug/games/:game/revisions/:number` | member | Revision detail: manifest + stats. |
 | `GET` | `/api/workspaces/:slug/games/:game/revisions/:number/diff/:other` | member | File + stats diff (`:other` = before, `:number` = after). |
 | `GET` | `/api/workspaces/:slug/games/:game/revisions/:number/files/*path` | member | Stream a file's blob (pull). |
+| `GET` | `/api/workspaces/:slug/games/:game/revisions/:number/download` | member | Download all original math build files as a streamed `.tar` archive. |
+| `GET` | `/api/workspaces/:slug/games/:game/front-bundles/:id/download` | member | Download an uploaded frontend build as a streamed `.tar` archive. |
+
+The dashboard's **Download build files** links use native browser downloads, so large
+builds are not buffered in JavaScript memory. Archives preserve relative file paths
+and original bytes. These endpoints require workspace membership; public share links
+do not grant download access.
 
 ### Document sync + workspace SSE (M3)
 

@@ -2,6 +2,7 @@
 //! the sub-router `http::build_router` nests under `/api`.
 
 pub mod admin;
+mod archives;
 pub mod auth;
 pub mod billing;
 pub mod documents;
@@ -108,6 +109,10 @@ pub fn router(max_blob_bytes: usize) -> Router<AppState> {
         .route(
             "/workspaces/:slug/games/:game/revisions/:number/files/*path",
             get(math::download_file),
+        )
+        .route(
+            "/workspaces/:slug/games/:game/revisions/:number/download",
+            get(math::download_archive),
         )
         // --- reserved mount points (stub routers until their milestones land) ---
         .merge(documents::router()) // M3 — document sync + workspace SSE

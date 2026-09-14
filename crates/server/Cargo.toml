@@ -42,6 +42,8 @@ sysinfo.workspace = true
 object_store.workspace = true
 dotenvy.workspace = true
 futures-util.workspace = true
+async-stream = "0.3"
+tar = "0.4"
 # Small temp dirs for materializing a revision's index.json + lookup CSVs when
 # computing bet stats (books are never downloaded).
 tempfile.workspace = true

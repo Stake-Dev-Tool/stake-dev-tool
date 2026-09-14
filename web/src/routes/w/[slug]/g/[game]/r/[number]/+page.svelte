@@ -181,7 +181,16 @@
             <span class="font-mono-tab">{humanSize(totalSize)}</span>
           </div>
         </div>
-        <div class="flex flex-shrink-0 items-center gap-2">
+        <div class="flex flex-wrap items-center gap-2">
+          <Button
+            href={`/api/workspaces/${encodeURIComponent(slug)}/games/${encodeURIComponent(game)}/revisions/${revNum}/download`}
+            download
+            data-sveltekit-reload
+            variant="outline"
+            size="sm"
+          >
+            Download build files
+          </Button>
           <Button href={`/w/${slug}/g/${game}/r/${revNum}/math`} variant="outline" size="sm">
             Math report
           </Button>
