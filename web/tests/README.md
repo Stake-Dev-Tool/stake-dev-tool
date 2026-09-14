@@ -26,6 +26,14 @@ PLAYWRIGHT_MODULE=/tmp/sdt-playwright/node_modules/playwright node web/tests/bui
 local server. API responses are intercepted; never interpret this as a production
 end-to-end test.
 
+`share-versions.cjs` covers independent math/front share pins, explicit latest
+payloads, role gates, and loading/error/navigation safety. Its default URL uses
+port 5194; it can reuse the server above with:
+
+```sh
+SDT_TEST_URL=http://127.0.0.1:5193 PLAYWRIGHT_MODULE=/tmp/sdt-playwright/node_modules/playwright node web/tests/share-versions.cjs
+```
+
 Stop Vite before running the final `corepack pnpm@10 --filter web check` and
 `corepack pnpm@10 --filter web build`, and serialize those commands. Concurrent
 SvelteKit sync/build processes can invalidate each other's generated output.

@@ -4,8 +4,8 @@
    *
    *   • Game front status — a best-effort probe of whether this game has an
    *     uploaded front bundle (the build a share serves). The bundle itself is
-   *     pushed from the Revisions tab with the Push button; shares use the latest one.
-   *   • Create share (owner/admin only) — pin a revision (or track latest),
+   *     uploaded from Builds; shares independently pin math and front or track latest.
+   *   • Create share (owner/admin only) — choose math and front versions independently,
    *     optional custom slug / password / expiry / session cap → POST, then
    *     prepend to the list and show the new URL prominently (stays inline).
    *   • Share links list — every ShareLink as a card: URL (CopyField, or a
@@ -14,6 +14,7 @@
    *
    * Members can view the list (and copy URLs) but see no create/manage controls.
    */
+  import { untrack } from 'svelte';
   import {
     api,
     ApiError,
@@ -63,10 +64,39 @@
   let busyId = $state<string | null>(null);
 
   // Reload when the game (or workspace) changes — the page reuses this component.
+  let routeGeneration = 0;
+  function requestScope() {
+    const generation = routeGeneration;
+    const s = slug;
+    const g = game;
+    return { s, g, current: () => generation === routeGeneration && s === slug && g === game };
+  }
+
   $effect(() => {
     void slug;
     void game;
-    load();
+    untrack(() => {
+      routeGeneration++;
+      role = null;
+      shares = [];
+      actionError = '';
+      busyId = null;
+      bundleBusyId = null;
+      loadingBundles = false;
+      showCreate = false;
+      createdShare = null;
+      creating = false;
+      createError = '';
+      createErrorUpgrade = false;
+      frontChoicesRequest++;
+      frontChoices = [];
+      frontChoicesLoaded = false;
+      frontChoicesError = '';
+      loadingFrontChoices = false;
+      resetCreateForm();
+      void load();
+    });
+    return () => { routeGeneration++; frontChoicesRequest++; };
   });
 
   // --- Plan limits (shared billing cache) --------------------------------------
@@ -92,9 +122,10 @@
 
   /** Re-read the billing status after a mutation so the quota line stays true. */
   function refreshBilling() {
-    invalidateBillingStatus(slug);
-    billingStatus(slug)
-      .then((r) => (billing = r))
+    const scope = requestScope();
+    invalidateBillingStatus(scope.s);
+    billingStatus(scope.s)
+      .then((r) => { if (scope.current()) billing = r; })
       .catch(() => {});
   }
 
@@ -129,22 +160,25 @@
   });
 
   async function load() {
+    const scope = requestScope();
     loadingShares = true;
     sharesError = '';
     try {
       const [detail, list] = await Promise.all([
-        api.workspaces.get(slug),
-        api.shares.list(slug, game)
+        api.workspaces.get(scope.s),
+        api.shares.list(scope.s, scope.g)
       ]);
+      if (!scope.current()) return;
       role =
         detail.role ??
         detail.members.find((m) => m.user_id === (session.user?.id ?? ''))?.role ??
         null;
       shares = list;
     } catch (e) {
+      if (!scope.current()) return;
       sharesError = errorText(e);
     } finally {
-      loadingShares = false;
+      if (scope.current()) loadingShares = false;
     }
   }
 
@@ -175,15 +209,19 @@
   }
 
   async function loadBundles() {
+    const scope = requestScope();
     loadingBundles = true;
     bundlesError = '';
     try {
-      bundles = await api.games.frontBundles(slug, game);
+      const list = await api.games.frontBundles(scope.s, scope.g);
+      if (!scope.current()) return;
+      bundles = list;
       bundlesLoaded = true;
     } catch (e) {
+      if (!scope.current()) return;
       bundlesError = errorText(e);
     } finally {
-      loadingBundles = false;
+      if (scope.current()) loadingBundles = false;
     }
   }
 
@@ -205,6 +243,7 @@
   }
 
   async function deleteBundle(b: FrontBundleSummary) {
+    const scope = requestScope();
     if (
       !confirm(
         `Delete this front bundle? This is permanent and frees ${humanSize(b.total_size)} of storage that no share or revision still shares.`
@@ -215,7 +254,8 @@
     bundlesError = '';
     bundleBusyId = b.id;
     try {
-      const res = await api.games.deleteFrontBundle(slug, game, b.id);
+      const res = await api.games.deleteFrontBundle(scope.s, scope.g, b.id);
+      if (!scope.current()) return;
       bundles = bundles.filter((x) => x.id !== b.id);
       // The next bundle in the (newest-first) list is now the latest one served.
       if (b.is_latest && bundles.length > 0) bundles[0] = { ...bundles[0], is_latest: true };
@@ -225,21 +265,26 @@
           : 'Bundle deleted · no storage freed (its files are still shared).'
       );
     } catch (e) {
+      if (!scope.current()) return;
       bundlesError = bundleErrorMessage(e);
     } finally {
-      bundleBusyId = null;
+      if (scope.current()) bundleBusyId = null;
     }
   }
 
   async function refresh() {
+    const scope = requestScope();
     loadingShares = true;
     sharesError = '';
     try {
-      shares = await api.shares.list(slug, game);
+      const list = await api.shares.list(scope.s, scope.g);
+      if (!scope.current()) return;
+      shares = list;
     } catch (e) {
+      if (!scope.current()) return;
       sharesError = errorText(e);
     } finally {
-      loadingShares = false;
+      if (scope.current()) loadingShares = false;
     }
   }
 
@@ -272,6 +317,38 @@
   let newSlug = $state('');
   // Revision pin: 'latest' tracks head; a number pins that revision.
   let newRev = $state<number | 'latest'>('latest');
+  let newFront = $state('latest');
+  let frontChoices = $state<FrontBundleSummary[]>([]);
+
+  let loadingFrontChoices = $state(false);
+  let frontChoicesError = $state('');
+  let frontChoicesLoaded = $state(false);
+
+  function openCreate() {
+    showCreate = true;
+    void loadFrontChoices();
+  }
+
+  let frontChoicesRequest = 0;
+  async function loadFrontChoices() {
+    const request = ++frontChoicesRequest;
+    const s = slug;
+    const g = game;
+    const current = () => request === frontChoicesRequest && s === slug && g === game;
+    loadingFrontChoices = true;
+    frontChoicesLoaded = false;
+    frontChoicesError = '';
+    try {
+      const choices = await api.games.frontBundles(s, g);
+      if (!current()) return;
+      frontChoices = choices;
+      frontChoicesLoaded = true;
+    } catch (e) {
+      if (current()) frontChoicesError = errorText(e);
+    } finally {
+      if (current()) loadingFrontChoices = false;
+    }
+  }
   let newPassword = $state('');
   let newExpiryDays = $state('');
   let newMaxSessions = $state('25');
@@ -290,11 +367,13 @@
     const days = Number.parseInt(newExpiryDays.trim(), 10);
     return newExpiryDays.trim() !== '' && Number.isFinite(days) && days > maxLinkDays;
   });
-  let canCreate = $derived(!creating && !slugInvalid && !expiryTooLong);
+  let missingFrontChoice = $derived(frontChoicesLoaded && newFront !== 'latest' && !frontChoices.some((b) => b.id === newFront));
+  let canCreate = $derived(canManage && !creating && !slugInvalid && !expiryTooLong && frontChoicesLoaded && !loadingFrontChoices && !frontChoicesError && (newFront === 'latest' || frontChoices.some((b) => b.id === newFront)));
 
   function resetCreateForm() {
     newSlug = '';
     newRev = 'latest';
+    newFront = 'latest';
     newPassword = '';
     newExpiryDays = '';
     newMaxSessions = '25';
@@ -302,15 +381,19 @@
   }
 
   async function createShare() {
+    const scope = requestScope();
     if (!canCreate) return;
     creating = true;
     createError = '';
     createErrorUpgrade = false;
     try {
-      const input: CreateShareInput = {};
+      const input: CreateShareInput = {
+        revision_number: newRev === 'latest' ? null : newRev,
+        front_bundle_id: newFront === 'latest' ? null : newFront
+      };
       const s = newSlug.trim();
       if (s) input.slug = s;
-      if (newRev !== 'latest') input.revision_number = newRev;
+
       if (newPassword.length > 0) input.password = newPassword;
       const days = Number.parseInt(newExpiryDays.trim(), 10);
       if (newExpiryDays.trim() !== '' && Number.isFinite(days) && days > 0) {
@@ -320,27 +403,31 @@
       if (Number.isFinite(sessions) && sessions > 0) input.max_concurrent_sessions = sessions;
       if (newFeedback) input.feedback_enabled = true;
 
-      const created = await api.shares.create(slug, game, input);
+      const created = await api.shares.create(scope.s, scope.g, input);
+      if (!scope.current()) return;
       shares = [created, ...shares];
       createdShare = created;
       resetCreateForm();
       showCreate = false;
       refreshBilling();
     } catch (e) {
+      if (!scope.current()) return;
       createError = shareErrorMessage(e);
       createErrorUpgrade = isUpgradeError(e);
     } finally {
-      creating = false;
+      if (scope.current()) creating = false;
     }
   }
 
   async function toggleFeedback(s: ShareLink) {
+    const scope = requestScope();
     actionError = '';
     busyId = s.id;
     try {
-      const updated = await api.shares.update(slug, game, s.id, {
+      const updated = await api.shares.update(scope.s, scope.g, s.id, {
         feedback_enabled: !s.feedback_enabled
       });
+      if (!scope.current()) return;
       shares = shares.map((x) => (x.id === s.id ? updated : x));
       toast.success(
         updated.feedback_enabled
@@ -348,42 +435,49 @@
           : `Feedback disabled on ${s.slug}.`
       );
     } catch (e) {
+      if (!scope.current()) return;
       actionError = shareErrorMessage(e);
     } finally {
-      busyId = null;
+      if (scope.current()) busyId = null;
     }
   }
 
   async function revokeShare(s: ShareLink) {
+    const scope = requestScope();
     if (!confirm(`Revoke ${s.slug}? Visitors lose access to this link immediately.`)) return;
     actionError = '';
     busyId = s.id;
     try {
-      const updated = await api.shares.revoke(slug, game, s.id);
+      const updated = await api.shares.revoke(scope.s, scope.g, s.id);
+      if (!scope.current()) return;
       shares = shares.map((x) => (x.id === s.id ? updated : x));
       toast.success(`Share link ${s.slug} revoked.`);
       refreshBilling();
     } catch (e) {
+      if (!scope.current()) return;
       actionError = shareErrorMessage(e);
     } finally {
-      busyId = null;
+      if (scope.current()) busyId = null;
     }
   }
 
   async function removeShare(s: ShareLink) {
+    const scope = requestScope();
     if (!confirm(`Delete ${s.slug}? This permanently removes the link and its analytics.`)) return;
     actionError = '';
     busyId = s.id;
     try {
-      await api.shares.remove(slug, game, s.id);
+      await api.shares.remove(scope.s, scope.g, s.id);
+      if (!scope.current()) return;
       shares = shares.filter((x) => x.id !== s.id);
       if (createdShare?.id === s.id) createdShare = null;
       toast.success(`Share link ${s.slug} deleted.`);
       refreshBilling();
     } catch (e) {
+      if (!scope.current()) return;
       actionError = shareErrorMessage(e);
     } finally {
-      busyId = null;
+      if (scope.current()) busyId = null;
     }
   }
 
@@ -430,7 +524,7 @@
       {/if}
     </div>
     <span class="text-xs text-faint">
-      Push or update it from the Revisions tab with the Push button. Shares serve the latest bundle.
+      Upload from Builds with Upload math / front. Each share independently tracks latest or pins a math and front version.
     </span>
   </Card>
 
@@ -503,7 +597,7 @@
   {#if canManage}
     {#if !showCreate}
       <div class="mb-4 flex flex-wrap items-center gap-3">
-        <Button variant="secondary" onclick={() => (showCreate = true)}>New share link</Button>
+        <Button variant="secondary" onclick={openCreate}>New share link</Button>
         {#if maxLinks != null}
           <span class="text-xs text-muted">
             {usedLinks} of {maxLinks} active share {maxLinks === 1 ? 'link' : 'links'} used on
@@ -534,7 +628,7 @@
               type="button"
               class="text-sm text-muted transition hover:text-text disabled:opacity-50"
               disabled={creating}
-              onclick={() => (showCreate = false)}
+              onclick={() => { showCreate = false; frontChoicesRequest++; }}
             >
               Cancel
             </button>
@@ -542,18 +636,49 @@
 
           <div class="grid gap-4 sm:grid-cols-2">
             <label class="flex flex-col gap-1.5">
-              <span class="text-sm font-medium text-muted">Revision</span>
+              <span class="text-sm font-medium text-muted">Math version</span>
               <select
+                aria-label="Math version"
                 bind:value={newRev}
                 disabled={creating}
                 class="h-9 rounded-md border border-border bg-surface-2 px-3 text-sm text-text outline-none transition focus:border-accent/60 focus:ring-2 focus:ring-accent/25"
               >
                 <option value="latest">Latest (tracks head{headNumber != null ? ` · rev ${headNumber}` : ''})</option>
                 {#each revisions as r (r.number)}
-                  <option value={r.number}>rev {r.number}</option>
+                  <option value={r.number}>Pinned · rev {r.number} · {new Date(r.created_at).toLocaleString()}</option>
                 {/each}
               </select>
             </label>
+
+            <label class="flex flex-col gap-1.5">
+              <span class="text-sm font-medium text-muted">Front version</span>
+              <select aria-label="Front version" bind:value={newFront} disabled={creating || loadingFrontChoices || !frontChoicesLoaded}
+                class="h-9 rounded-md border border-border bg-surface-2 px-3 text-sm text-text outline-none focus:border-accent/60">
+                <option value="latest">Latest (tracks newest front)</option>
+                {#each frontChoices as b (b.id)}
+                  <option value={b.id}>Pinned · {shortId(b.id)} · {new Date(b.created_at).toLocaleString()}</option>
+                {/each}
+              </select>
+            </label>
+
+            <div class="sm:col-span-2 text-xs text-muted">
+              {#if loadingFrontChoices}
+                <p role="status">Loading front versions…</p>
+              {:else if frontChoicesError}
+                <div role="alert">Could not load front versions: {frontChoicesError}</div>
+                <Button variant="outline" size="sm" onclick={loadFrontChoices}>Retry front versions</Button>
+              {:else if frontChoicesLoaded && frontChoices.length === 0}
+                <p>No front versions uploaded yet.</p>
+                <p>Latest will serve a future upload. The link cannot play a front until one is uploaded.</p>
+              {/if}
+            </div>
+
+            {#if frontChoicesLoaded && frontChoices.length >= 50}
+              <p class="text-xs text-muted sm:col-span-2">Showing the newest 50 front versions; older versions are not listed.</p>
+            {/if}
+            {#if missingFrontChoice}
+              <p role="alert" class="text-xs text-danger sm:col-span-2">The selected front version is not in the loaded versions. Choose another version.</p>
+            {/if}
 
             <Input
               id="share-slug"
@@ -616,6 +741,14 @@
               </span>
             </label>
           </div>
+
+          {#if billing?.enabled && (billing.limits.max_revisions_per_game != null || billing.limits.max_front_bundles_per_game != null)}
+            <p class="text-xs text-warn">
+              Your plan keeps {billing.limits.max_revisions_per_game ?? 'unlimited'} math versions and
+              {billing.limits.max_front_bundles_per_game ?? 'unlimited'} front versions per game.
+              Pinned versions can be pruned by new uploads; affected links then track latest.
+            </p>
+          {/if}
 
           {#if revisions.length === 0}
             <p class="rounded-md border border-warn/30 bg-warn/10 px-3 py-2 text-xs text-warn">
@@ -691,14 +824,14 @@
               <span class="font-mono-tab text-sm font-semibold text-text">{s.slug}</span>
               <Badge tone={st.tone}>{st.label}</Badge>
               {#if s.revision_number != null}
-                <Badge tone="accent">rev {s.revision_number}</Badge>
+                <Badge tone="accent">Math · pinned rev {s.revision_number}</Badge>
               {:else}
-                <Badge>latest rev</Badge>
+                <Badge>Math · latest (tracking)</Badge>
               {/if}
               {#if s.front_bundle_id != null}
-                <Badge>bundle {shortId(s.front_bundle_id)}</Badge>
+                <span title={s.front_bundle_id}><Badge>Front · pinned {shortId(s.front_bundle_id)}</Badge></span>
               {:else}
-                <Badge>latest bundle</Badge>
+                <Badge>Front · latest (tracking)</Badge>
               {/if}
               {#if s.password_protected}
                 <Badge tone="warn">🔒 password</Badge>

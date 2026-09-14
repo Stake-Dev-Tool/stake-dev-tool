@@ -417,10 +417,10 @@ export interface ShareLink {
 export interface CreateShareInput {
   /** Custom subdomain label; omit for a generated `word-word-nnn`. */
   slug?: string;
-  /** Pin a revision number; omit to track the latest revision. */
-  revision_number?: number;
-  /** Pin a front bundle id; omit to serve the latest bundle. */
-  front_bundle_id?: string;
+  /** Pin a revision number; null explicitly tracks latest (also the default). */
+  revision_number?: number | null;
+  /** Pin a front bundle id; null explicitly tracks latest (also the default). */
+  front_bundle_id?: string | null;
   /** Optional password (plaintext; hashed server-side). */
   password?: string;
   /** Expiry in days from now; omit for no expiry. */
