@@ -123,6 +123,11 @@ builds are not buffered in JavaScript memory. Archives preserve relative file pa
 and original bytes. These endpoints require workspace membership; public share links
 do not grant download access.
 
+Math revision numbers identify math snapshots only. Frontend uploads have independent
+bundle UUIDs and timestamps: uploading a new frontend does not increment the math
+revision number or establish a historical pairing with it. The dashboard build history
+labels each upload as Math or Front rather than presenting them as one version sequence.
+
 ### Document sync + workspace SSE (M3)
 
 Server-authoritative versioned JSON documents (`profile`, `saved_round`) with

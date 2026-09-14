@@ -16,6 +16,7 @@
   import EmptyState from '$lib/components/EmptyState.svelte';
   import SectionHeader from '$lib/components/SectionHeader.svelte';
   import Time from '$lib/components/Time.svelte';
+  import BuildHistory from '$lib/components/BuildHistory.svelte';
 
   let slug = $derived(page.params.slug ?? '');
   let game = $derived(page.params.game ?? '');
@@ -38,24 +39,38 @@
   let deleting = $state(false);
   let deleteError = $state('');
 
+  let routeGeneration = 0;
+  let detailRequest = 0;
+
   // Reload whenever the route params change (the component is reused across
   // /r/:number navigations).
   $effect(() => {
     void slug;
     void game;
     void numParam;
+    routeGeneration++;
+    detail = null;
+    role = null;
+    deleting = false;
+    deleteError = '';
+    testOpen = false;
     void load(true);
     void loadRole();
+    return () => { routeGeneration++; };
   });
 
   async function loadRole() {
+    const generation = routeGeneration;
+    const s = slug;
     try {
-      const detail = await api.workspaces.get(slug);
+      const detail = await api.workspaces.get(s);
+      if (generation !== routeGeneration || s !== slug) return;
       role =
         detail.role ??
         detail.members.find((m) => m.user_id === (session.user?.id ?? ''))?.role ??
         null;
     } catch {
+      if (generation !== routeGeneration || s !== slug) return;
       role = null;
     }
   }
@@ -96,14 +111,20 @@
   });
 
   async function load(initial: boolean) {
+    const generation = routeGeneration;
+    const request = ++detailRequest;
+    const s = slug, g = game, n = numParam;
+    const current = () => generation === routeGeneration && request === detailRequest && s === slug && g === game && n === numParam;
     if (initial) {
       loading = true;
       loadError = '';
       notFound = false;
     }
     try {
-      detail = await api.games.revision(slug, game, numParam);
+      const result = await api.games.revision(s, g, n);
+      if (current()) detail = result;
     } catch (e) {
+      if (!current()) return;
       // Only surface errors on the initial load — a failed background poll keeps
       // the current view and tries again on the next tick.
       if (initial) {
@@ -111,7 +132,7 @@
         else loadError = errorText(e);
       }
     } finally {
-      if (initial) loading = false;
+      if (initial && current()) loading = false;
     }
   }
 
@@ -170,7 +191,7 @@
             {detail.message || `Revision ${detail.number}`}
           </h1>
           <div class="mt-2 flex flex-wrap items-center gap-x-2.5 gap-y-1 text-sm text-muted">
-            <span class="font-mono-tab text-text">rev {detail.number}</span>
+            <span class="font-mono-tab text-text">Math revision {detail.number}</span>
             <span aria-hidden="true">·</span>
             <span>{detail.author_display_name || 'Unknown author'}</span>
             <span aria-hidden="true">·</span>
@@ -189,7 +210,7 @@
             variant="outline"
             size="sm"
           >
-            Download build files
+            Download math build
           </Button>
           <Button href={`/w/${slug}/g/${game}/r/${revNum}/math`} variant="outline" size="sm">
             Math report
@@ -203,7 +224,7 @@
               variant="outline"
               size="sm"
             >
-              Compare with previous
+              Compare with previous math revision
             </Button>
           {/if}
           {#if canManage}
@@ -221,6 +242,17 @@
     </header>
 
     <FrontUrlDialog bind:open={testOpen} {slug} {game} number={revNum} />
+
+    <section class="mb-10" id="front">
+      <SectionHeader title="Frontend builds">
+        {#snippet action()}
+          <Button href={`/w/${slug}/g/${game}#builds`} variant="outline" size="sm">All game builds</Button>
+        {/snippet}
+      </SectionHeader>
+      <p class="mb-3 text-sm text-muted">These are game-level frontend builds, not attachments to this math revision.</p>
+      <p class="mb-3 text-sm text-muted">This revision contains math files only; frontend builds are versioned separately.</p>
+      <BuildHistory {slug} {game} preview />
+    </section>
 
     <!-- Stats -->
     <section class="mb-10">
@@ -276,7 +308,7 @@
 
     <!-- Files -->
     <section>
-      <SectionHeader title={`Files · ${detail.files.length}`} />
+      <SectionHeader title={`Math files · ${detail.files.length}`} />
       <Card class="overflow-hidden">
         {#if detail.files.length === 0}
           <p class="px-4 py-8 text-center text-sm text-muted">No files in this revision.</p>

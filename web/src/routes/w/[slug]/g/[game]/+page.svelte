@@ -8,8 +8,7 @@
     type BillingStatus,
     type Game,
     type RevisionSummary,
-    type Role,
-    type StatsStatus
+    type Role
   } from '$lib/api';
   import { billingStatus } from '$lib/billing';
   import { session } from '$lib/session.svelte';
@@ -30,12 +29,13 @@
   import EmptyState from '$lib/components/EmptyState.svelte';
   import SectionHeader from '$lib/components/SectionHeader.svelte';
   import Tabs from '$lib/components/Tabs.svelte';
-  import Time from '$lib/components/Time.svelte';
+  import BuildHistory from '$lib/components/BuildHistory.svelte';
 
   let slug = $derived(page.params.slug ?? '');
   let game = $derived(page.params.game ?? '');
 
   let showPush = $state(false);
+  let frontRefresh = $state(0);
   let testOpen = $state(false);
 
   // Client-side tabs (deep-linkable via #revisions / #share / #feedback).
@@ -43,11 +43,17 @@
   let activeTab = $state<GameTab>('revisions');
   function selectTab(id: string) {
     activeTab = id as GameTab;
-    if (typeof history !== 'undefined') history.replaceState(history.state, '', `#${id}`);
+    void goto(`#${id === 'revisions' ? 'builds' : id}`, { replaceState: true, noScroll: true });
   }
+  function syncTab(hash: string) {
+    activeTab = hash === '#share' ? 'share' : hash === '#feedback' ? 'feedback' : 'revisions';
+  }
+  $effect(() => { syncTab(page.url.hash); });
   onMount(() => {
-    const h = location.hash.replace('#', '');
-    if (h === 'revisions' || h === 'share' || h === 'feedback') activeTab = h;
+    const onHashChange = () => syncTab(location.hash);
+    onHashChange();
+    window.addEventListener('hashchange', onHashChange);
+    return () => window.removeEventListener('hashchange', onHashChange);
   });
 
   let gameMeta = $state<Game | null>(null);
@@ -140,38 +146,46 @@
   let gameName = $derived(gameMeta?.name || game);
   let canCompare = $derived(cmpAfter != null && cmpBefore != null && cmpAfter !== cmpBefore);
 
+  let loadGeneration = 0;
+
   // SvelteKit reuses this component across /w/:slug/g/* navigations, so track the
   // params and reload when they change.
   $effect(() => {
     void slug;
     void game;
-    load();
+    showPush = false;
+    testOpen = false;
+    void load();
+    return () => { loadGeneration++; };
   });
 
   async function load() {
+    const generation = ++loadGeneration;
+    const s = slug, g = game;
+    const current = () => generation === loadGeneration && s === slug && g === game;
+    revisions = [];
+    gameMeta = null;
     loading = true;
     loadError = '';
     notFound = false;
     try {
       const [list, revs] = await Promise.all([
-        api.games.list(slug),
-        api.games.revisions(slug, game)
+        api.games.list(s),
+        api.games.revisions(s, g)
       ]);
+      if (!current()) return;
       revisions = revs;
-      gameMeta = list.find((g) => g.slug === game) ?? null;
+      gameMeta = list.find((item) => item.slug === g) ?? null;
       // Default the compare picker to "newest vs the one before it".
       cmpAfter = revs[0]?.number ?? null;
       cmpBefore = (revs.length >= 2 ? revs[1].number : revs[0]?.number) ?? null;
     } catch (e) {
+      if (!current()) return;
       if (e instanceof ApiError && e.status === 404) notFound = true;
       else loadError = errorText(e);
     } finally {
-      loading = false;
+      if (current()) loading = false;
     }
-  }
-
-  function openRevision(n: number) {
-    void goto(`/w/${slug}/g/${game}/r/${n}`);
   }
 
   function onPushed(n: number) {
@@ -187,13 +201,6 @@
     void goto(`/w/${slug}/g/${game}/diff/${cmpAfter}/${cmpBefore}`);
   }
 
-  type Tone = 'neutral' | 'accent' | 'danger';
-  function statsBadge(s: StatsStatus | null): { label: string; tone: Tone; pulse: boolean } | null {
-    if (s === 'pending') return { label: 'computing', tone: 'neutral', pulse: true };
-    if (s === 'ok') return { label: 'stats ok', tone: 'accent', pulse: false };
-    if (s === 'error') return { label: 'stats error', tone: 'danger', pulse: false };
-    return null;
-  }
 </script>
 
 <svelte:head><title>{gameName} · Stake Dev Tool Cloud</title></svelte:head>
@@ -220,9 +227,9 @@
       <h1 class="text-2xl font-semibold tracking-tight">{gameName}</h1>
       <span class="font-mono-tab text-sm text-muted">{game}</span>
       {#if headNumber != null}
-        <Badge tone="accent">rev {headNumber}</Badge>
+        <Badge tone="accent">Math rev {headNumber}</Badge>
       {:else}
-        <Badge>no revisions</Badge>
+        <Badge>no math revisions</Badge>
       {/if}
       {#if headNumber != null}
         <div class="ml-auto flex flex-wrap items-center gap-2">
@@ -243,7 +250,7 @@
     <Tabs
       class="mb-6"
       tabs={[
-        { id: 'revisions', label: 'Revisions', badge: revisions.length },
+        { id: 'revisions', label: 'Builds' },
         { id: 'share', label: 'Share' },
         { id: 'feedback', label: 'Feedback' }
       ]}
@@ -252,10 +259,10 @@
     />
 
     {#if activeTab === 'revisions'}
-      <SectionHeader title="Revisions">
+      <SectionHeader title="Build history">
         {#snippet action()}
           {#if !showPush}
-            <Button size="sm" onclick={() => (showPush = true)}>Push</Button>
+            <Button size="sm" onclick={() => (showPush = true)}>Upload math / front</Button>
           {/if}
         {/snippet}
       </SectionHeader>
@@ -263,7 +270,7 @@
       {#if singleRevisionPlan}
         <p class="mb-4 rounded-md border border-border bg-surface-2/60 px-3 py-2 text-xs text-muted">
           <span class="font-medium text-text">Free plan</span> — this game keeps only its latest
-          revision: each push replaces the previous one, and share links always serve the
+          math revision: each math push replaces the previous one, and share links always serve the
           latest. <a href={`/w/${slug}/billing`} class="text-accent underline-offset-4 hover:underline">Upgrade</a>
           to keep full history and compare revisions.
         </p>
@@ -276,16 +283,16 @@
             {game}
             parentNumber={headNumber}
             ondone={(n) => onPushed(n)}
-            onfrontuploaded={() => (showPush = false)}
+            onfrontuploaded={() => { showPush = false; frontRefresh++; }}
             oncancel={() => (showPush = false)}
           />
         </div>
       {/if}
 
       {#if revisions.length === 0}
-        <EmptyState title="No revisions yet">
+        <EmptyState title="No math revisions yet">
           Revisions are immutable math snapshots. Push your math or front build with the
-          <span class="text-text">Push</span> button above, or use
+          <span class="text-text">Upload math / front</span> button above, or use
           <span class="font-mono-tab text-text">sdt push</span> /
           <span class="font-mono-tab text-text">sdt push-front</span> from CI.
           {#snippet cta()}
@@ -297,7 +304,7 @@
       {#if revisions.length >= 2}
         <Card class="mb-4 p-4">
           <div class="flex flex-wrap items-end gap-3">
-            <span class="text-sm font-medium text-muted">Compare</span>
+            <span class="text-sm font-medium text-muted">Compare math revisions</span>
             <label class="flex flex-col gap-1">
               <span class="text-xs text-faint">After (newer)</span>
               <select
@@ -321,63 +328,13 @@
                 {/each}
               </select>
             </label>
-            <Button size="sm" disabled={!canCompare} onclick={compare}>Compare</Button>
+            <Button size="sm" disabled={!canCompare} onclick={compare}>Compare math</Button>
           </div>
         </Card>
       {/if}
 
-      <Card class="overflow-hidden">
-        <div class="overflow-x-auto">
-          <table class="w-full min-w-[46rem] text-sm">
-            <thead>
-              <tr class="border-b border-border text-left text-xs uppercase tracking-wide text-faint">
-                <th class="px-4 py-3 font-medium">Rev</th>
-                <th class="px-4 py-3 font-medium">Message</th>
-                <th class="px-4 py-3 font-medium">Author</th>
-                <th class="px-4 py-3 font-medium">Age</th>
-                <th class="px-4 py-3 font-medium text-right">Files</th>
-                <th class="px-4 py-3 font-medium text-right">Size</th>
-                <th class="px-4 py-3 font-medium">Stats</th>
-              </tr>
-            </thead>
-            <tbody>
-              {#each revisions as r (r.number)}
-                {@const badge = statsBadge(r.stats_status)}
-                <tr
-                  class="cursor-pointer border-b border-border/60 transition last:border-0 hover:bg-surface-2"
-                  role="link"
-                  tabindex="0"
-                  aria-label={`Revision ${r.number}`}
-                  onclick={() => openRevision(r.number)}
-                  onkeydown={(e) => {
-                    if (e.key === 'Enter' || e.key === ' ') {
-                      e.preventDefault();
-                      openRevision(r.number);
-                    }
-                  }}
-                >
-                  <td class="px-4 py-3 font-mono-tab font-semibold">{r.number}</td>
-                  <td class="px-4 py-3">
-                    <span class="line-clamp-1 max-w-[22rem] text-text">{r.message || '—'}</span>
-                  </td>
-                  <td class="px-4 py-3 text-muted">{r.author_display_name || '—'}</td>
-                  <td class="px-4 py-3 text-muted"><Time iso={r.created_at} /></td>
-                  <td class="px-4 py-3 text-right font-mono-tab text-muted">{r.files_count}</td>
-                  <td class="px-4 py-3 text-right font-mono-tab text-muted">{humanSize(r.total_size)}</td>
-                  <td class="px-4 py-3">
-                    {#if badge}
-                      <Badge tone={badge.tone} class={badge.pulse ? 'animate-pulse' : ''}>{badge.label}</Badge>
-                    {:else}
-                      <span class="text-faint">—</span>
-                    {/if}
-                  </td>
-                </tr>
-              {/each}
-            </tbody>
-          </table>
-        </div>
-        </Card>
       {/if}
+      <BuildHistory {slug} {game} {revisions} refresh={frontRefresh} />
     {:else if activeTab === 'share'}
       <SharePanel {slug} {game} {revisions} {headNumber} />
     {:else}

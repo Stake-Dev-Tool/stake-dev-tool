@@ -79,7 +79,7 @@
   );
 
   let primaryLabel = $derived(
-    kind === 'front' ? 'Push front bundle' : `Push revision ${nextNumber}`
+    kind === 'front' ? 'Upload front build' : `Upload math revision ${nextNumber}`
   );
 
   // --- Progress recap (derived from per-file statuses) ------------------------
@@ -211,7 +211,7 @@
     }}
   >
     <div class="flex items-center justify-between gap-3">
-      <h2 class="text-base font-semibold">Push</h2>
+      <h2 class="text-base font-semibold">Upload math / front</h2>
       {#if oncancel}
         <button
           type="button"
