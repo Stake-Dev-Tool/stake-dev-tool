@@ -374,6 +374,125 @@ fn number_dir(cache_root: &std::path::Path, ws_id: Uuid, game_id: Uuid, number: 
 
 // ---------------------------------------------------------------------------
 
+/// Regression contract used by `sdt push-rounds`: PAT-only append reaches the
+/// same persistent revision store as the browser, without touching other tenants.
+#[tokio::test]
+async fn saved_rounds_pat_append_is_visible_replayable_and_tenant_isolated() {
+    let Some(ctx) = setup().await else {
+        return;
+    };
+    let (mut owner, token) = owner_with_token(&ctx.state).await;
+    let ws = create_workspace(&mut owner).await;
+    push(&mut owner, &ws, GAME, &rev_files(INDEX_1MODE), None, &token).await;
+    push(
+        &mut owner,
+        &ws,
+        GAME,
+        &rev_files(INDEX_2MODE),
+        Some(1),
+        &token,
+    )
+    .await;
+    push(
+        &mut owner,
+        &ws,
+        "other-game",
+        &rev_files(INDEX_1MODE),
+        None,
+        &token,
+    )
+    .await;
+    let (mut outsider, outsider_token) = owner_with_token(&ctx.state).await;
+    let other_ws = create_workspace(&mut outsider).await;
+    push(
+        &mut outsider,
+        &other_ws,
+        GAME,
+        &rev_files(INDEX_1MODE),
+        None,
+        &outsider_token,
+    )
+    .await;
+
+    let url = ws_url(&ws, GAME, 1, "api/devtool/saved-rounds");
+    let (status, existing) = owner
+        .post(
+            &url,
+            json!({"gameSlug":GAME,"mode":"base","eventId":1,"description":"browser"}),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{existing}");
+    let input = json!({"gameSlug":GAME,"mode":"base","eventId":1,"description":"from CLI"});
+    let mut cli = Client::new(&ctx.state); // no session cookies
+    let (status, created) = cli
+        .send(Method::POST, &url, Some(input.clone()), Some(&token))
+        .await;
+    assert_eq!(status, StatusCode::OK, "{created}");
+    assert_ne!(created["id"], existing["id"]);
+    let (status, listed) = owner.get(&url).await;
+    assert_eq!(status, StatusCode::OK, "{listed}");
+    let rounds = listed["rounds"].as_array().unwrap();
+    assert_eq!(rounds.len(), 2);
+    assert!(rounds.contains(&existing) && rounds.contains(&created));
+    let (status, replay) = cli
+        .send(
+            Method::GET,
+            &ws_url(&ws, GAME, 1, "bet/replay/demo/0/base/1"),
+            None,
+            Some(&token),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{replay}");
+    assert_eq!(replay["state"], json!([{"reveal":"win"}]));
+
+    for (target_ws, game, rev, bearer) in [
+        (ws.as_str(), GAME, 2, token.as_str()),
+        (ws.as_str(), "other-game", 1, token.as_str()),
+        (other_ws.as_str(), GAME, 1, outsider_token.as_str()),
+    ] {
+        let (status, body) = cli
+            .send(
+                Method::GET,
+                &ws_url(target_ws, game, rev, "api/devtool/saved-rounds"),
+                None,
+                Some(bearer),
+            )
+            .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(body["rounds"], json!([]));
+    }
+    for (bearer, expected) in [
+        ("sdt_pat_invalid", StatusCode::UNAUTHORIZED),
+        (outsider_token.as_str(), StatusCode::NOT_FOUND),
+    ] {
+        let (status, _) = cli
+            .send(Method::POST, &url, Some(input.clone()), Some(bearer))
+            .await;
+        assert_eq!(status, expected);
+    }
+    let (status, _) = cli
+        .send(
+            Method::POST,
+            &ws_url(&ws, GAME, 99, "api/devtool/saved-rounds"),
+            Some(input),
+            Some(&token),
+        )
+        .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    let (_, after) = cli.send(Method::GET, &url, None, Some(&token)).await;
+    assert_eq!(after, listed);
+
+    let (workspace_id, game_id) = game_ids(&ctx.state, &ws, GAME).await;
+    let path = ctx
+        .cache_root()
+        .join("saved-rounds")
+        .join(workspace_id.to_string())
+        .join(game_id.to_string())
+        .join("1.json");
+    let persisted: Value = serde_json::from_slice(&tokio::fs::read(path).await.unwrap()).unwrap();
+    assert_eq!(persisted["rounds"].as_array().unwrap().len(), 2);
+}
+
 /// (a) A non-member hitting the tenant mount gets 404 — never learning the
 /// workspace/game/revision exists — because membership is the auth boundary.
 #[tokio::test]

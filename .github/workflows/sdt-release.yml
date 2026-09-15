@@ -73,5 +73,6 @@ jobs:
           gh release create "$GITHUB_REF_NAME" \
             --repo "$GITHUB_REPOSITORY" \
             --title "$GITHUB_REF_NAME" \
+            --latest=false \
             --notes "Prebuilt \`sdt\` CLI binaries. Install docs: https://stakedevtool.com/cli" \
             dist/*

@@ -7,8 +7,9 @@ server doesn't already have (content-addressed dedup), and commits the revision.
 
 Beyond `push`, the CLI reads the platform (`whoami`, `workspaces`, `games`,
 `revisions`, `stats`, `diff`), downloads a revision (`pull`), pushes front
-bundles and manages share links (`push-front`, `share`), and exposes the whole
-surface to AI tools over the Model Context Protocol (`sdt mcp`).
+bundles and manages share links (`push-front`, `share`), and adds saved rounds
+(`push-rounds`). Selected platform commands are also available to AI tools over
+the Model Context Protocol (`sdt mcp`); `push-rounds` is currently CLI-only.
 
 ## Commands
 
@@ -20,6 +21,7 @@ surface to AI tools over the Model Context Protocol (`sdt mcp`).
 | `games`      | List a workspace's games (head revision + revision count).      |
 | `push`       | Push a math folder as a new revision (dedup upload).            |
 | `push-front` | Push a front-bundle folder (a web build) as a new bundle.       |
+| `push-rounds` | Add saved rounds to a game revision, preserving existing rounds. |
 | `share`      | Manage share links: `create`, `list`, `revoke`.                 |
 | `revisions`  | List a game's revisions.                                         |
 | `stats`      | Show a revision's per-mode bet-stats (defaults to head).        |
@@ -28,7 +30,7 @@ surface to AI tools over the Model Context Protocol (`sdt mcp`).
 | `mcp`        | Run an MCP server over stdio for MCP clients.                    |
 
 Global conventions: every command takes `--server`/`--token`; `--json` prints
-the raw server JSON to **stdout**; human/table output and progress go to
+machine-readable JSON to **stdout**; human/table output and progress go to
 **stderr**; exit codes are `0` success, `1` usage, `2` auth, `3` server/network.
 
 ## Install
@@ -125,6 +127,73 @@ result (the revision number, or the full JSON under `--json`) goes to
 | `1`  | Usage / validation (e.g. not a math folder).        |
 | `2`  | Authentication (401/403 — bad token or missing scope). |
 | `3`  | Server or network failure.                          |
+
+## Push saved rounds
+
+```bash
+sdt push-rounds <FILE.json> --workspace <slug> --game <slug> [--rev <number>] [--json]
+
+# Pin the math revision when uploading from CI (recommended).
+SDT_SERVER=https://app.stakedevtool.com sdt push-rounds ./rounds.json \
+  --workspace acme --game my-game --rev 12 --json
+```
+
+Uses the normal `SDT_TOKEN`, `--token`, or saved-login credentials. A PAT minted
+by `sdt login` works; its user must still belong to the destination workspace.
+The workspace, game and math revision must already exist. If `--rev` is omitted,
+the current head is resolved **once** and all reads/writes use that same revision,
+even if a new math revision is pushed concurrently. The recap includes this
+resolved number; pin it explicitly when retrying or reproducing an upload.
+
+The file may be a JSON array or an object containing a `rounds` array:
+
+```json
+{
+  "rounds": [
+    {"mode": "base", "eventId": 42, "description": "Big win"},
+    {"gameSlug": "my-game", "mode": "bonus", "eventId": 17}
+  ]
+}
+```
+
+- `mode`: required, non-blank string; `eventId`: required integer from 1 through
+  4294967295, matching the existing saved-round API.
+- `gameSlug`: optional; defaults to `--game`. If supplied, it must match exactly.
+  Multi-game desktop exports must be split first: a mismatched round rejects the
+  **whole input** rather than silently copying it to another project.
+- `description`: optional string, defaults to `""`.
+- Existing desktop `saved-rounds.json` files and saved-round API responses are
+  accepted. Source `id`, `createdAt`, and `updatedAt` are ignored; new cloud
+  records receive their own IDs/timestamps. The source file is never modified.
+
+All input records and target arguments are validated before network requests.
+The CLI reads the revision's current collection, then **appends only missing
+rounds**. Equality uses `(gameSlug, mode, eventId, description)`, not source IDs
+or timestamps. Exact duplicates in the file or destination are skipped; changing
+a description creates another round, never overwrites the existing one. There
+is no replace/delete option. A final GET verifies newly created records before
+success is reported. `--json` prints a recap to stdout, for example:
+
+```json
+{"workspace":"acme","game":"my-game","revision":12,"created":2,"skipped":0}
+```
+
+Rounds appear in the cloud workbench's **Saved rounds** for that exact
+workspace/game/math revision. They are not copied to other revisions, other
+projects, or the desktop workspace-document sync collection. No math files or
+new revisions are uploaded by this command.
+
+**Limits and recovery:** this uses the existing revision-scoped saved-round API,
+not a transactional bulk-import endpoint. Writes are sequential and are not
+retried automatically. A network/server failure can leave some rounds saved;
+the error reports confirmed creates and the pinned revision. Inspect the
+workbench, then rerun with that `--rev` to skip exact matches already present.
+Concurrent identical pushes can still create duplicates (client-side dedup is
+not an atomic server guarantee). A failed final read-back also returns nonzero;
+it does not roll back successful writes. Mode names and event IDs must correspond
+to the target revision's math: this command validates their shape but does **not**
+download books or prove replayability. An event ID is the math's event identifier,
+not necessarily the physical line number in a books file.
 
 ## Revisions
 

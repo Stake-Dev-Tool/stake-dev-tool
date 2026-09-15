@@ -75,6 +75,18 @@ impl ClientError {
 // Wire types
 // ---------------------------------------------------------------------------
 
+/// The existing workbench create-round request. Desktop IDs/timestamps are
+/// deliberately not sent: the destination creates its own record.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SavedRoundInput {
+    pub game_slug: String,
+    pub mode: String,
+    pub event_id: u32,
+    #[serde(default)]
+    pub description: String,
+}
+
 /// One manifest entry: path, content hash, size. Used in both the check and
 /// commit request bodies.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -580,6 +592,25 @@ impl ApiClient {
             Some(token) => builder.bearer_auth(token),
             None => builder,
         }
+    }
+
+    /// Read or append to the revision-specific workbench saved-round store.
+    pub async fn saved_rounds(
+        &self,
+        workspace: &str,
+        game: &str,
+        revision: i32,
+        round: Option<&SavedRoundInput>,
+    ) -> ClientResult<serde_json::Value> {
+        let url = self.url(&format!(
+            "/api/ws/{workspace}/g/{game}/r/{revision}/api/devtool/saved-rounds"
+        ));
+        let request = match round {
+            Some(round) => self.http.post(url).json(round),
+            None => self.http.get(url),
+        };
+        let response = self.authed(request).send().await.map_err(map_transport)?;
+        read_body_typed(response).await
     }
 
     /// Requests a device code to start the login flow (no auth).

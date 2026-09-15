@@ -19,6 +19,7 @@ mod output;
 mod pull;
 mod push;
 mod revisions;
+mod rounds;
 mod share;
 mod stats;
 mod whoami;
@@ -63,6 +64,8 @@ enum Command {
     Push(PushArgs),
     /// Push a front-bundle folder (a web build) as a new bundle.
     PushFront(PushFrontArgs),
+    /// Add saved rounds to a cloud game revision without replacing existing rounds.
+    PushRounds(PushRoundsArgs),
     /// Manage share links: create, list, and revoke.
     Share(ShareArgs),
     /// List a game's revisions.
@@ -149,6 +152,24 @@ pub struct PushFrontArgs {
     pub no_progress: bool,
 
     /// Print a machine-readable recap JSON to stdout (for CI scripting).
+    #[arg(long)]
+    pub json: bool,
+}
+
+#[derive(Args)]
+pub struct PushRoundsArgs {
+    /// JSON file: an array of rounds or {"rounds": [...]}.
+    pub path: PathBuf,
+    /// Workspace slug.
+    #[arg(long)]
+    pub workspace: String,
+    /// Target game slug.
+    #[arg(long)]
+    pub game: String,
+    /// Target math revision (defaults to the head, resolved once before writing).
+    #[arg(long)]
+    pub rev: Option<i32>,
+    /// Print a machine-readable recap to stdout.
     #[arg(long)]
     pub json: bool,
 }
@@ -399,6 +420,10 @@ async fn dispatch(cli: Cli) -> Result<(), CliError> {
         Command::PushFront(args) => {
             let client = authed_client(&server, token)?;
             front::run(&client, args).await
+        }
+        Command::PushRounds(args) => {
+            let client = authed_client(&server, token)?;
+            rounds::run(&client, args).await
         }
         Command::Share(args) => {
             let client = authed_client(&server, token)?;
